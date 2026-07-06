@@ -1,5 +1,0 @@
-# requirements.txt
-flask
-boto3
-pyyaml
-gunicorn
