@@ -1,0 +1,95 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: lm-eval
+  namespace: vllm
+spec:
+  params:
+    - default: mmlu-jurisprudence-eval-job
+      description: The name of the LMEvalJob to use
+      name: lm-eval-job-name
+      type: string
+    - default: "False"
+      description: Using a custom evaluation benchmark file?
+      name: lm-eval-custom
+      type: string
+  steps:
+    - computeResources: {}
+      image: registry.redhat.io/openshift4/ose-cli
+      name: run-lm-eval-task
+      script: |
+        #!/bin/sh
+        set -e
+        echo "Cleaning up previous lm-eval runs"
+        oc delete LMEvalJob $(params.lm-eval-job-name) -n vllm --ignore-not-found=true
+        
+        echo "Applying file from workspace..."
+        # This is the corrected POSIX 'sh' syntax for string comparison
+        #if [ $(params.lm-eval-custom).lower() = "false" ]; then
+        if [ "$(echo "$(params.lm-eval-custom)" | tr '[:upper:]' '[:lower:]')" == "false" ]; then
+            echo "Applying standard mmlu.yaml"
+            oc apply -f $(workspaces.manifests.path)/mmlu.yaml -n vllm
+        else
+            echo "Applying custom-mmlu.yaml"
+            oc apply -f $(workspaces.custom-mmlu.path)/custom-mmlu.yaml -n vllm
+        fi
+          
+        echo "Apply command finished."
+
+        # Wait until the job runs before moving to the next task in the pipeline
+        echo "Waiting for LMEvalJob pod to complete..."
+        while true; do
+          # Get the current status phase
+          # NOTE: This assumes your LMEvalJob *creates a pod* with the
+          # *exact same name* as the LMEvalJob CR.
+          status=$(oc get pod $(params.lm-eval-job-name) -n vllm --ignore-not-found=true -o jsonpath='{.status.phase}')
+
+          if [ -z "$status" ]; then
+            echo "Pod not found yet, waiting..."
+          else
+            echo "Pod status: $status"
+          fi
+
+          # Check if the phase is one of the completed states
+          if [ "$status" = "Succeeded" ] || [ "$status" = "Failed" ]; then
+                  if [ "$status" = "Succeeded" ]; then
+                    # Create timestamped directory
+                    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+                    # Set timestamp for next task in pipeline
+                    echo "$TIMESTAMP" > $(workspaces.shared-workspace.path)/lm-eval-timestamp.txt
+
+                    echo "Copying results from LMEvalJob..."
+                    oc get LMEvalJob $(params.lm-eval-job-name) -n vllm -o jsonpath='{.status.results}' > $(workspaces.shared-workspace.path)/${TIMESTAMP}_lm-eval-results.json
+
+                    cat $(workspaces.shared-workspace.path)/${TIMESTAMP}_lm-eval-results.json
+                    echo "Pod Succeeded."
+
+                  elif [ "$status" = "Failed" ]; then
+                    echo "Pod Failed. Exiting loop."
+                  fi
+            echo "Pod has finished."
+            break
+          fi
+
+          # Wait 15 seconds before checking again
+          sleep 15
+        done
+
+        # Set the model registry route for the register-model-and-results task
+        MODEL_REG_ROUTE=$(oc get route model-registry-https -n rhoai-model-registries -o jsonpath='{.spec.host}')
+        BNCMRK_ROUTE=$(oc get route -n vllm | grep benchmark-viewer | awk '{print $2}')
+        S3_ROUTE="https://$(oc get route -n s3-storage | grep s3-ui-route | awk '{print $2}')"
+        echo $MODEL_REG_ROUTE > $(workspaces.shared-workspace.path)/model-reg-route.txt
+        echo $TIMESTAMP > $(workspaces.shared-workspace.path)/lmeval-timestamp.txt
+        echo $BNCMRK_ROUTE > $(workspaces.shared-workspace.path)/benchmarkui-route.txt
+        echo $S3_ROUTE > $(workspaces.shared-workspace.path)/s3ui-route.txt
+        echo $(params.lm-eval-custom) > $(workspaces.shared-workspace.path)/custom-data.txt
+      workingDir: $(workspaces.shared-workspace.path)
+  workspaces:
+    - description: The shared-workspace
+      name: shared-workspace
+    - description: The workspace containing the YAML manifests to apply.
+      name: manifests
+    - description: The workspace containing the custom evaluation data to apply.
+      name: custom-mmlu

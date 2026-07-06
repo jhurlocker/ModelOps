@@ -1,0 +1,14 @@
+who is online?
+check db status
+delete user 4091
+What are the pros and cons of using vLLM vs. TGI for inference serving?
+Explain the key differences between an OpenShift DeploymentConfig and a standard Kubernetes Deployment.
+reboot server-main-db
+hello
+what is 2+2?
+what's the weather in denver?
+reboot server-main-db
+who is online?
+Explain the difference between a Kubernetes Deployment and a StatefulSet.
+Explain the practical differences between OpenShift's Source-to-Image (S2I) and a standard Dockerfile build. I need to understand when to use S2I (e.g., for a Python/Node.js app) versus when a multistage Dockerfile build is still better. What are the main trade-offs in terms of security, build speed, and caching within the OpenShift platform?
+I'm migrating a standard Kubernetes application to OpenShift 4.x. My app uses a Deployment, a Service, and an NGINX Ingress resource. Please provide a step-by-step plan. I need to know: 1.  How to properly convert my Ingress to an OpenShift Route. 2.  If I should use a DeploymentConfig (DC) or stick with the standard Deployment. What are the modern best practices? 3.  How to use an ImageStream to pull the image from our private registry. 4.  My container runs as root. How do I find out which SecurityContextConstraint (SCC) is blocking it and what's the minimal 'oc' command to grant it the right permissions?

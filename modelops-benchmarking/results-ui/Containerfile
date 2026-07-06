@@ -1,0 +1,23 @@
+# Use Red Hat's official Python 3.11 Universal Base Image (ubi9)
+# This is built to run as non-root and is the standard for OpenShift
+FROM registry.access.redhat.com/ubi9/python-311
+
+# This is the standard directory for source code in UBI images
+WORKDIR /opt/app-root/src
+
+# Copy just the requirements file first to optimize layer caching
+COPY requirements.txt .
+
+# Install dependencies
+# The base image is configured to install packages as the non-root user
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Now copy the application code
+COPY app.py .
+
+# Expose port 8080 (the default for OpenShift apps)
+EXPOSE 8080
+
+# Command to run the application using Gunicorn
+# It binds to all interfaces on port 8080 and looks for the 'app' object in 'app.py'
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]

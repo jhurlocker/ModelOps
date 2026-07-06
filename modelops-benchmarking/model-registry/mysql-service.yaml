@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: rhoai-model-registries
+  labels:
+    name: mysql
+spec:
+  # The selector must match the 'spec.template.metadata.labels' in your Deployment
+  selector:
+    name: mysql
+  ports:
+    - name: mysql
+      protocol: TCP
+      # This is the port the Service will expose within the cluster
+      port: 3306
+      # This must match the 'containerPort' from your Deployment
+      targetPort: 3306
+  # ClusterIP is the default, making the service only reachable within the cluster
+  type: ClusterIP

@@ -1,0 +1,18 @@
+apiVersion: quay.redhat.com/v1
+kind: QuayRegistry
+metadata:
+  name: my-quay-registry
+  namespace: quay-registry
+spec:
+  configBundleSecret: quay-minio-config-bundle # <-- Points to the new, correct secret
+  components:
+    - kind: clair
+      managed: true
+    - kind: postgres
+      managed: true
+    - kind: redis
+      managed: true
+    - kind: route
+      managed: true
+    - kind: objectstorage
+      managed: false # <-- Correctly tells Quay to use your config

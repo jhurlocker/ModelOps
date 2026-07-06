@@ -1,0 +1,248 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: model-registry
+  namespace: vllm
+spec:
+  params:
+    - name: model-url
+      type: string
+    - name: model-name
+      type: string
+    - name: model-reg-author
+      type: string
+  steps:
+    - image: registry.access.redhat.com/ubi9/python-311
+      name: register-model
+      script: |
+        #!/usr/bin/env python3
+        import os
+        import sys
+        import subprocess
+
+        # --- 1. Install Dependencies ---
+        print("--- Installing model-registry package ---")
+        # Use sys.executable to ensure we're using the correct pip
+        subprocess.run([sys.executable, "-m", "pip", "install", "model-registry"], check=True)
+        
+        # Now we can import it
+        from model_registry import ModelRegistry
+        import re
+
+        # Tekton will substitute this placeholder with the actual path
+        workspace_path = "$(workspaces.shared-workspace.path)"
+        
+        lmeval_timestamp = os.path.join(workspace_path, "lmeval-timestamp.txt")
+        benchmark_timestamp = os.path.join(workspace_path, "timestamp.txt")
+        benchmarkui_route = os.path.join(workspace_path, "benchmarkui-route.txt")
+        s3_route = os.path.join(workspace_path, "s3ui-route.txt")
+
+        print(s3_route)
+
+        try:
+            print("--- Reading lmeval timestamp from workspace ---")
+            with open(lmeval_timestamp, 'r') as f:
+                lmeval_timestamp_value = f.read().strip() # .strip() removes newlines
+
+            if not lmeval_timestamp_value:
+                print("Error: lmeval timestamp file is empty or could not be read.", file=sys.stderr)
+                sys.exit(1) # Exit with a non-zero status to fail the task
+
+            print(f"lmeval file= {lmeval_timestamp_value}")
+
+            print("--- Reading benchmark timestamp from workspace ---")
+            with open(benchmark_timestamp, 'r') as f:
+                benchmark_timestamp_value = f.read().strip() # .strip() removes newlines
+
+            if not benchmark_timestamp_value:
+                print("Error: benchmark timestamp file is empty or could not be read.", file=sys.stderr)
+                sys.exit(1) # Exit with a non-zero status to fail the task
+
+            print(f"benchmark file= {benchmark_timestamp_value}")
+
+        except FileNotFoundError as e:
+            print(f"Error: A required file was not found.", file=sys.stderr)
+            print(f"{e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        route_path = os.path.join(workspace_path, "model-reg-route.txt")
+        # benchmark_results_path = os.path.join(workspace_path, f"{benchmark_timestamp_value}_granite-2b-results.yaml")
+        lmeval_results_path = os.path.join(workspace_path, f"{lmeval_timestamp_value}_lm-eval-results.json")
+        custom_data = os.path.join(workspace_path, "custom-data.txt")
+
+        try:
+            # --- 1. Read and set the model registry route ---
+            print("--- Reading route from workspace ---")
+            with open(route_path, 'r') as f:
+                route = f.read().strip() # .strip() removes newlines
+
+            if not route:
+                print("Error: Route file is empty or could not be read.", file=sys.stderr)
+                sys.exit(1) # Exit with a non-zero status to fail the task
+
+            os.environ['ROUTE'] = route
+            route = f"https://{route}"        
+            print(f"Model registry route is= {route}")
+
+            # --- 2. Read and set the benchmark results ---
+            # print("--- Reading benchmark results ---")
+            # with open(benchmark_results_path, 'r') as f:
+            #     benchmark_results = f.read()
+            
+            # os.environ['BENCHMARK_RESULTS'] = benchmark_results
+            # print("Successfully loaded benchmark results.")
+
+            # --- 3. Read and set the lm-eval results ---
+            print("--- Reading lm-eval results ---")
+            with open(lmeval_results_path, 'r') as f:
+                lmeval_results = f.read()
+            
+            # os.environ['BENCHMARK_RESULTS'] = benchmark_results
+            os.environ['LMVAL_RESULTS'] = lmeval_results
+
+            # --- 4. Read and set the benchmark UI route ---
+            with open(benchmarkui_route, 'r') as f:
+                benchmarkui_route_val = f.read()
+            
+            # --- 5. Read and set the S3 UI route ---
+            with open(s3_route, 'r') as f:
+                s3_route_val = f.read()
+
+            # --- 6. Read custom data ---
+            with open(custom_data, 'r') as f:
+                custom_data_val = f.read().strip()
+
+            print(f"custom_data_val={custom_data_val}")
+            print(f"s3_route val={s3_route_val}")
+            print("Successfully loaded benchmark results.")
+
+        except FileNotFoundError as e:
+            print(f"Error: A required file was not found.", file=sys.stderr)
+            print(f"{e}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # --- CONFIG ---
+        MODEL_NAME = "$(params.model-name)"
+        MODEL_DESCRIPTION = "A BERT-based sentiment classifier"
+        STORAGE_PATH_BASE = "s3://my-models/sentiment-analyzer"
+        
+
+        client = ModelRegistry(
+            server_address=route,
+            port=443,
+            user_token=open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip(),
+            author="$(params.model-reg-author)",
+            is_secure=True  # or False for internal svc if needed
+        )
+
+        # --- Check if the model exists ---
+        models = client.get_registered_models()
+        model_names = [m.name for m in models]
+
+        if MODEL_NAME in model_names:
+            print(f"Model '{MODEL_NAME}' already exists.")
+            # model = client.get_model(MODEL_NAME)
+            model = client.get_registered_model(MODEL_NAME)
+
+            # ---  Get existing versions ---
+            versions = client.get_model_versions(MODEL_NAME)
+            existing_names = [v.name for v in versions]
+
+            # --- Determine next version name ---
+            pattern = re.compile(r"^v(\d+)$")
+            numbers = [
+                int(m.group(1))
+                for name in existing_names
+                if (m := pattern.match(name))
+            ]
+
+            next_num = max(numbers) + 1 if numbers else 1
+            next_version = f"v{next_num}"
+            print(f"Next version will be: {next_version}")
+            
+            if numbers:
+                current_num = max(numbers)
+                print(f"Current latest version is: v{current_num}")
+            else:
+                print("No existing semantic versions (e.g., 'v1') found.")
+                current_num = 1
+
+            version = client.get_model_version(MODEL_NAME, f"v{current_num}")
+            print(version)
+
+            # GET the existing properties.
+            current_props = version.custom_properties.copy() if version.custom_properties else {}
+
+            if custom_data_val.lower() == "true":
+                props_to_add = {
+                    # "Quay Repo URL": f"https://$(params.model-url)",
+                    "🛠️ GuideLLM Results UI": f"https://{benchmarkui_route_val.strip()}/?file={benchmark_timestamp_value}_granite-2b-results.yaml",
+                    "🛠️ GuideLLM Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{benchmark_timestamp_value}_granite-2b-results.yaml",
+                    "🛠️ lm_eval Results UI": f"https://{benchmarkui_route_val.strip()}/?file={lmeval_timestamp_value}_lm-eval-results.json",
+                    "🛠️ lm_eval Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{lmeval_timestamp_value}_lm-eval-results.json"
+                }
+            else:
+                props_to_add = {
+                    "Quay Repo URL": f"https://$(params.model-url)",
+                    "🔵 GuideLLM Results UI": f"https://{benchmarkui_route_val.strip()}/?file={benchmark_timestamp_value}_granite-2b-results.yaml",
+                    "🔵 GuideLLM Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{benchmark_timestamp_value}_granite-2b-results.yaml",
+                    "🔵 lm_eval Results UI": f"https://{benchmarkui_route_val.strip()}/?file={lmeval_timestamp_value}_lm-eval-results.json",
+                    "🔵 lm_eval Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{lmeval_timestamp_value}_lm-eval-results.json"
+                }
+
+            # UPDATE the properties
+            current_props.update(props_to_add)
+
+            # SET the newly merged dictionary back
+            version.custom_properties = current_props
+
+            client.update(version)
+
+            # version = client.register_model(
+            #     name="$(params.model-name)",
+            #     description=f"Granite 3.3 2b parameter model {next_version}",
+            #     uri="$(params.model-url)",
+            #     model_format_name='model format name',
+            #     model_format_version='model format version',
+            #     version=next_version,
+            #     metadata={
+            #         "Quay Repo URL": f"https://$(params.model-url)",
+            #         "GuideLLM Results UI": f"https://{benchmarkui_route_val.strip()}/?file={benchmark_timestamp_value}_granite-2b-results.yaml",
+            #         "GuideLLM Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{benchmark_timestamp_value}_granite-2b-results.yaml",
+            #         "lm_eval Results UI": f"https://{benchmarkui_route_val.strip()}/?file={lmeval_timestamp_value}_lm-eval-results.json",
+            #         "lm_eval Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{lmeval_timestamp_value}_lm-eval-results.json"
+            #     }
+            # )
+
+            # print(f"✅ Registered new version of an existing model: {version.name}")
+            print(f"✅ Updated existing model: {version.name}")
+        else:
+            print(f"Model '{MODEL_NAME}' not found. Creating a new one...")
+            model = client.register_model(
+                name="$(params.model-name)",
+                description=f"Granite 3.3 2b parameter model. 🔵 Are benchmarks with default datasets. 🛠️ Are benchmarks with custom datasets.",
+                uri="$(params.model-url)",
+                model_format_name='model format name',
+                model_format_version='model format version',
+                version="v1",
+                    metadata={
+                        "🔵 Quay Repo URL": f"https://$(params.model-url)",
+                        "🔵 GuideLLM Results UI": f"https://{benchmarkui_route_val.strip()}/?file={benchmark_timestamp_value}_granite-2b-results.yaml",
+                        "🔵 GuideLLM Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{benchmark_timestamp_value}_granite-2b-results.yaml",
+                        "🔵 lm_eval Results UI": f"https://{benchmarkui_route_val.strip()}/?file={lmeval_timestamp_value}_lm-eval-results.json",
+                        "🔵 lm_eval Results S3": f"{s3_route_val.strip()}/download/benchmark-results/{lmeval_timestamp_value}_lm-eval-results.json"
+                    }
+            )
+
+            print(f"✅ Registered a new model with version: 1")               
+
+      workingDir: $(workspaces.shared-workspace.path)
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace

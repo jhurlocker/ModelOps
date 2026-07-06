@@ -1,0 +1,193 @@
+
+[[ai-engineer]]
+== AI Engineer Tutorial (est. 30 minutes)
+
+*Goal*: As an AI Engineer I want to be able to find models available in my organization and run performance and evaluation benchmarks with custom data that represents my applications use case.
+
+=== Configure AI Pipelines
+We'll need to configure OpenShift AI pipelines so that we can crate and run pipelines from the workbench.
+
+. Go to you OpenShift AI web console and expand *Data Science Pipelines*. Click on *Pipelines*. Make sure you're in the *vllm* project and click *Configure Pipeline server*.
++
+image::../images/rhoai_config_aipipelines.png["OpenShift AI pipelines config"]
+
+. Fill out the required fields and click *Configure pipeline server*
++
+*Access key*
++
+[source,sh,role=execute]
+----
+minio
+----
++
+*Secret key*
++
+[source,sh,role=execute]
+----
+minio123
+----
++
+*Endpoint*
++
+[source,sh,role=execute]
+----
+http://minio-service.s3-storage.svc.cluster.local:9000
+----
++
+*Region* (can leave the default)
++
+[source,sh,role=execute]
+----
+us-east-1
+----
++
+*Bucket*
++
+[source,sh,role=execute]
+----
+pipelines
+----
++
+image::../images/rhoai_config_aipipelines_form.png["OpenShift AI pipelines config form", 75%, 75%]
+
+=== Create a Workbench
+We'll create a workbench to run our benchmark pipeline with custom data. 
+
+. Go to *Data science projects* and select the *vllm* project. Click on the *Workbenches* tab and then *Create workbench*.
++
+image::../images/rhoai_create_workbench.png["OpenShift AI create workbench page"]
+
+. Fill out the required fields and click *Create workbench*.
++
+*Name*:
++
+[source,sh,role=execute]
+----
+benchmark-workbench
+----
+*Image selection*:
++
+Jupyter| Data Science | CPU | Python3.12
++
+*Version selection* (use the default):
++
+2025.2
++
+image::../images/rhoai_create_workbench_form.png["OpenShift AI create workbench form"]
+
+. Open the workbench and click the *upload* icon button. Change the directory to the *modelops-benchmarking/rhoai_workbench* directory and select all of the files. Click *Open*.
++
+image::../images/rhoai_workbench_uploadfiles.png["OpenShift AI workbench upload files"]
+
+. Open the *benchmark-eval.pipeline* file. This is an Elyra pipeline. Click on the *Deploy Model* node of the pipeline.
++
+Elyra makes it easy to create pipeline nodes by dragging Jupyter notebooks, Python code, or R code onto the pipeline editor and connecting them together. 
++
+Note the required fields for the node. Each node can have a different runtime image if needed. For our pipeline we'll be using the standard Python data science runtime image that comes out of the box in OpenShift AI.
++
+image::../images/rhoai_workbench_dsp_node.png["AI pipeline elyra node"]
+
+. Double click on the *Deploy Model* node. That will open the *deploy-model.ipynb* notebook. Let's take a look at some of the code.
++
+Instead of recreating all of the tasks the we created in our OpenShift pipeline we'll reuse them. The way we can do this is by creating a TaskRun for each of our nodes in our OpenShift AI pipeline. This is preferred because we're not duplicating code by recreating the same task logic in our OpenShift AI pipeline. 
++
+Note the variables we're setting at the top of the cell. Add your local Quay route to the *model_url* variable.
++
+[source,sh,role=execute]
+----
+oc get route -n quay-registry | grep my-quay-registry-quay-quay
+---- 
++
+image::../images/rhoai_workbench_deploy_model.png["deploy-model notebook"]
+
+. The second cell in the notebook waits for the OpenShift task to finish. This allows our OpenShift AI pipeline to wait before moving to the next node.
++
+image::../images/rhoai_workbench_deploy_model_cell2.png["deploy-model notebook cell 2"]
+
+. Open the *guidellm-benchmark.ipynb* file. Notice the last two variables, *custom_data* is True and *custom_filename* is prompts.txt.
++
+When an AI Engineer runs GuideLLM and lm-eval on a LLM they are going to need to use data that represents the specific requirements of their use case. 
++
+We have a sample prompt file that we'll use instead of the default prompts provided by GuideLLM. This file is loaded into the task from an S3 bucket. 
++
+image::../images/rhoai_workbench_guidellm_vars.png["guidellm-benchmark.ipynb variables"]
+
+..  Go to the S3 UI and create a *custom-data* bucket. Open the bucket, click *Select Files* and navigate to *modelops-benchmarking/prompts.txt* file. Click *Open* and then click *Upload*.   
++
+image::../images/s3ui_custom_bucket.png["adding prompts.txt to custom-data bucket"]
+
+. In your OpenShift AI workbench open the *lm-eval.ipynb* notebook. 
++
+Note that the *lm_eval_custom* variable is True and we're setting the *lm_eval_job_name* variable to "custom-eval-job". 
++
+For the lm-eval task we load the custom multiple choice data file from a configmap and not from S3. We already applied the *custom_mmlu* configmap in the previous section so no need to apply it again.
++
+We do need to apply a configmap that contains our custom task and multiple choice data.
++
+[source,sh,role=execute]
+----
+oc create configmap custom-lmeval-benchmark-files   --from-file=task.yaml=guidellm-pipeline/custom-lm-eval/task.yaml   --from-file=data.jsonl=guidellm-pipeline/custom-lm-eval/data.jsonl   -n vllm
+----
++
+image::../images/rhoai_workbench_lm_eval.png["lm-eval.ipynb variables"]
+
+. Open the *register-model-and-results.ipynb* notebook and update the *model_url* with your local Quay route. 
++
+image::../images/rhoai_workbench_reg_model_vars.png["lm-eval.ipynb variables"]
+
+=== Run the Elyra Pipeline
+
+. Before we run the Elyra pipeline make sure your data science pipeline runtime is configured properly. 
++
+Click on the *Runtimes* icon button and make sure the *Cloud Object Storage Endpoint* is _http_ and not _https_. You can edit the endpoint by clicking the pencil icon. 
++
+image::../images/rhoai_workbench_dsp_runtime.png["OpenShift AI workbench Data Science Pipelines runtime", 50%, 50%]
+
+. We need to give our service account permission to run the OpenShift pipeline tasks.
++
+[source,sh,role=execute]
+----
+oc adm policy add-role-to-user edit system:serviceaccount:vllm:pipeline-runner-dspa -n vllm
+----
+
+. In your workbench go back to your *benchmark-eval.pipeline*. Click on the *Run* icon button and click on *Ok* when prompted. 
++
+image::../images/elyra_run.png["Elyra run pipeline"]
++
+Submitting this job to OpenShift AI will convert the Elyra pipeline into an OpenShift AI pipeline in Kubeflow format. If the job was sent successfully you should see this prompt.
++
+image::../images/elyra_job_success.png["Elyra job success"]
+
+. Now that the Elyra pipeline job has been submitted to OpenShift AI pipelines we should see it running under the *Data science pipelines -> Runs*. Click on the benchmark-eval run to see the nodes executing.
++
+image::../images/dsp_run.png["Data Science Pipeline run"]
+
+. You should see the nodes finishing. If you select the node you can view logs for each one.
++
+image::../images/dsp_running.png["Data Science Pipeline running"]
+
+. Go back to the OpenShift web console. In your *vllm* project go to *Pipelines -> Tasks*. Select the *Task Runs* tab. You should see the individual task of the pipeline succeeding.
++
+image::../images/task_runs.png["Task runs"]
+
+. Once your AI pipeline finishes successfully go take a look at the latest version in the model registry.
++
+image::../images/dsp_succeeded.png["Successful AI pipeline run"]
++
+Click the "Show more properties" link to display the new properties that were added. Notice that the custom data properties (🛠️) have been added to the version. Compare these results to the default data benchmarks to see how they differ. 
++
+image::../images/custom_properties_model_reg.png["Custom benchmark data properties"]
+
+=== Recap
+* You ran an Elyra pipeline that was compiled into a Kubeflow pipeline that executed our OpenShift pipeline tasks. 
+* We used custom data to get more accurate results for our use case from GuideLLM and lm-eval. 
+* The performance and accuracy results were also stored as properties of the model version to allow other people to discover how this model preforms on those custom datasets.  
+* Congratulations for making it to the end of the tutorial!
+
+=== Next Steps
+What could we improve upon? There are a number of ways you could modify and customize these pipelines. Here are a few ideas.
+
+* The Python code in the pipeline tasks should be separated into other directories or projects and containerized. The Python code was intentionally left in the tasks to make it easier to understand and for quickly modifying values and testing.
+* On the results UI add the datasets used during the GuideLLM and lm-eval runs. This would provide traceability.
+* An MCP server integrated with the OpenShift AI model registry could potentially help AI Engineers find models that fit their use cases even faster.
+

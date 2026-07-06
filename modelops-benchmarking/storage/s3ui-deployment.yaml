@@ -1,0 +1,103 @@
+# -------------------------------------------------------------------
+#  Persistent Volume Claim: Requests storage for our config files.
+# -------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s3-ui-config-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi # 1 Gibibyte is plenty for config files
+
+---
+# -------------------------------------------------------------------
+#  Deployment: Deploys the application and mounts the volume.
+# -------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: s3-ui
+  labels:
+    app: s3-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: s3-ui
+  template:
+    metadata:
+      labels:
+        app: s3-ui
+    spec:
+      containers:
+        - name: s3-ui
+          image: quay.io/jhurlocker/s3ui:latest 
+          ports:
+            - containerPort: 5001
+          env:
+            - name: S3_ENDPOINT_URL
+              value: "http://minio-service.s3-storage.svc.cluster.local:9000"
+            - name: S3_ACCESS_KEY
+              value: "minio"
+            - name: S3_SECRET_KEY
+              value: "minio123"
+            - name: S3_REGION
+              value: "none"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /data/config # Mount the PVC to the config directory
+      volumes:
+        - name: config-volume
+          persistentVolumeClaim:
+            claimName: s3-ui-config-pvc # Link to the PVC created above
+
+---
+# -------------------------------------------------------------------
+#  Service (for access)
+# -------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: s3-ui-service
+  labels:
+    app: s3-ui
+    app.kubernetes.io/component: s3-ui
+    app.kubernetes.io/instance: s3-ui
+spec:
+  selector:
+    app: s3-ui
+  ports:
+    - name: 5001-tcp
+      protocol: TCP
+      port: 5001
+      targetPort: 5001
+    - name: 8080-tcp
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+---
+# -------------------------------------------------------------------
+#  Route (for access)
+# -------------------------------------------------------------------
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: s3-ui-route
+  labels:
+    app: s3-ui
+    app.kubernetes.io/component: s3-ui
+    app.kubernetes.io/instance: s3-ui
+spec:
+  to:
+    kind: Service
+    name: s3-ui-service
+    weight: 100
+  port:
+    targetPort: 5001-tcp
+  tls:
+    termination: edge
+  wildcardPolicy: None

@@ -1,0 +1,103 @@
+{"question": "What is the primary container orchestrator used by OpenShift?", "choices": ["Docker Swarm", "Kubernetes", "Nomad", "Mesos"], "answer": 1}
+{"question": "Which command-line tool is used to interact with an OpenShift cluster?", "choices": ["kubectl", "oc", "docker", "podman"], "answer": 1}
+{"question": "What Tekton resource defines a reusable, parameterized set of steps?", "choices": ["Pipeline", "Task", "TaskRun", "PipelineRun"], "answer": 1}
+{"question": "What OpenShift resource provides a DNS-resolvable CNAME for a Service?", "choices": ["Route", "Ingress", "Pod", "Build"], "answer": 0}
+{"question": "In OpenShift, what object is an abstraction for a 'user project'?", "choices": ["Namespace", "Project", "Team", "Group"], "answer": 1}
+{"question": "What is the purpose of an ImageStream in OpenShift?", "choices": ["To store container images", "To provide a virtual machine", "To manage CI/CD pipelines", "To track changes to images in a registry"], "answer": 3}
+{"question": "Which OpenShift component manages the lifecycle of applications using Operators?", "choices": ["OLM - Operator Lifecycle Manager", "ODF - OpenShift Data Foundation", "OVN - OpenShift Virtual Networking", "OCS - OpenShift Container Storage"], "answer": 0}
+{"question": "What command creates a new application from a Git repository in OpenShift?", "choices": ["oc new-app", "oc create-app", "oc deploy-app", "oc new-build"], "answer": 0}
+{"question": "What is a 'DeploymentConfig' (DC) in OpenShift?", "choices": ["A template for a Deployment", "A resource that defines the desired state of an application", "A CNI plugin", "A security policy"], "answer": 1}
+{"question": "What is the primary function of a 'Build' in OpenShift?", "choices": ["To run a Pod", "To create a container image", "To expose a Service", "To manage storage"], "answer": 1}
+{"question": "Which build strategy uses a `Dockerfile` in the source repository?", "choices": ["Source-to-Image (S2I)", "Docker", "Pipeline", "Custom"], "answer": 1}
+{"question": "What resource is used to define fine-grained security policies for pods in OpenShift?", "choices": ["Security Context Constraints (SCC)", "Role", "RoleBinding", "NetworkPolicy"], "answer": 0}
+{"question": "What is the OpenShift equivalent of a Kubernetes Ingress resource?", "choices": ["Route", "Service", "LoadBalancer", "NodePort"], "answer": 0}
+{"question": "What is the default CNI plugin for OpenShift 4.x?", "choices": ["Flannel", "Calico", "OVN-Kubernetes", "Cilium"], "answer": 2}
+{"question": "What does OLM stand for in OpenShift?", "choices": ["OpenShift Lifecycle Manager", "Operator Lifecycle Manager", "OpenShift Logging Manager", "Operator Logging Manager"], "answer": 1}
+{"question": "What is the web-based interface for OpenShift called?", "choices": ["Dashboard", "Console", "Cockpit", "Lens"], "answer": 1}
+{"question": "What component in OpenShift handles authentication?", "choices": ["OAuth Server", "API Server", "etcd", "Kubelet"], "answer": 0}
+{"question": "What is a 'Project' in OpenShift functionally equivalent to in Kubernetes?", "choices": ["Namespace", "Deployment", "Cluster", "Pod"], "answer": 0}
+{"question": "What is the purpose of the `oc rsync` command?", "choices": ["To sync files between a local machine and a pod", "To re-sync a failed deployment", "To rotate security certificates", "To sync images between registries"], "answer": 0}
+{"question": "What OpenShift feature allows you to build images directly from source code without a Dockerfile?", "choices": ["Source-to-Image (S2I)", "Custom Build", "Docker Build", "Pipeline Build"], "answer": 0}
+{"question": "What component is responsible for node-level operations in OpenShift?", "choices": ["Kubelet", "API Server", "Scheduler", "Controller Manager"], "answer": 0}
+{"question": "What is OpenShift GitOps built on top of?", "choices": ["Argo CD", "Jenkins", "Tekton", "Flux"], "answer": 0}
+{"question": "What is OpenShift's integrated image registry?", "choices": ["Quay", "Docker Hub", "OpenShift Container Registry", "Harbor"], "answer": 2}
+{"question": "What is the smallest deployable unit in Kubernetes?", "choices": ["Pod", "Container", "Deployment", "Service"], "answer": 0}
+{"question": "What Kubernetes object defines a set of rules for network traffic between Pods?", "choices": ["NetworkPolicy", "Service", "Ingress", "Endpoint"], "answer": 0}
+{"question": "What is the function of a Kubernetes 'Service'?", "choices": ["To run a container", "To provide a stable endpoint for a set of Pods", "To manage pod scaling", "To store configuration data"], "answer": 1}
+{"question": "Which Service type exposes a port on each Node's IP?", "choices": ["ClusterIP", "NodePort", "LoadBalancer", "ExternalName"], "answer": 1}
+{"question": "What is a 'ConfigMap' used for?", "choices": ["To store secrets", "To store non-confidential configuration data", "To manage pod deployments", "To store container images"], "answer": 1}
+{"question": "What Kubernetes resource is used to store sensitive information?", "choices": ["Secret", "ConfigMap", "PodSecurityPolicy", "Role"], "answer": 0}
+{"question": "What is the function of a 'Deployment' in Kubernetes?", "choices": ["To define a storage class", "To expose a service", "To declaratively manage a set of Pods", "To schedule a job"], "answer": 2}
+{"question": "What resource is used for running one-off or batch tasks to completion?", "choices": ["Job", "CronJob", "Deployment", "StatefulSet"], "answer": 0}
+{"question": "What resource is used for running scheduled tasks?", "choices": ["Job", "CronJob", "Deployment", "StatefulSet"], "answer": 1}
+{"question": "What is a 'StatefulSet' designed for?", "choices": ["Stateless applications", "Batch jobs", "Applications requiring stable, unique network identifiers", "Short-lived tasks"], "answer": 2}
+{"question": "What is the function of the 'kube-scheduler'?", "choices": ["To start containers", "To manage node health", "To assign pods to nodes", "To store cluster state"], "answer": 2}
+{"question": "What is the primary datastore for a Kubernetes cluster?", "choices": ["etcd", "MySQL", "PostgreSQL", "Redis"], "answer": 0}
+{"question": "What is the command-line tool for interacting with a Kubernetes cluster?", "choices": ["kubectl", "kcadm", "kubelet", "oc"], "answer": 0}
+{"question": "What object holds a list of Pod IP addresses for a Service?", "choices": ["Endpoints", "NetworkPolicy", "Ingress", "PodDisruptionBudget"], "answer": 0}
+{"question": "What is a 'PersistentVolume' (PV)?", "choices": ["A pod-specific storage", "A piece of storage in the cluster", "A storage request", "A storage driver"], "answer": 1}
+{"question": "What is a 'PersistentVolumeClaim' (PVC)?", "choices": ["A request for storage by a user", "A piece of storage in the cluster", "A pod-specific storage", "A storage driver"], "answer": 0}
+{"question": "What Kubernetes object defines how storage is dynamically provisioned?", "choices": ["StorageClass", "PersistentVolume", "PersistentVolumeClaim", "VolumeSnapshot"], "answer": 0}
+{"question": "What is a 'DaemonSet'?", "choices": ["A set of pods that run once", "A set of pods for stateless apps", "A resource that ensures a copy of a pod runs on all (or some) nodes", "A security policy"], "answer": 2}
+{"question": "What is the function of the 'kubelet'?", "choices": ["It's the cluster's API server", "It's the agent that runs on each node", "It schedules pods", "It manages cluster-wide state"], "answer": 1}
+{"question": "What is a 'Namespace' in Kubernetes?", "choices": ["A way to divide cluster resources", "A type of pod", "A storage unit", "A network plugin"], "answer": 0}
+{"question": "What does 'HPA' stand for?", "choices": ["High Pod Availability", "Horizontal Pod Autoscaler", "Host Pod Allocator", "High Performance Application"], "answer": 1}
+{"question": "What is the role of the 'kube-proxy'?", "choices": ["It's a user-facing proxy", "It authenticates users", "It maintains network rules on nodes", "It proxies the API server"], "answer": 2}
+{"question": "How do you get the logs of a pod named 'my-pod'?", "choices": ["kubectl logs my-pod", "kubectl get logs my-pod", "kubectl pod logs my-pod", "kubectl show logs my-pod"], "answer": 0}
+{"question": "What is an 'Init Container'?", "choices": ["A container that runs after the main app container", "A container that runs before the main app container", "A sidecar container", "A privileged container"], "answer": 1}
+{"question": "What resource limits the number of pods that can be disrupted during a voluntary disruption?", "choices": ["PodDisruptionBudget", "LimitRange", "ResourceQuota", "NetworkPolicy"], "answer": 0}
+{"question": "What object is used to define resource constraints for a Namespace?", "choices": ["LimitRange", "ResourceQuota", "PodDisruptionBudget", "NetworkPolicy"], "answer": 1}
+{"question": "What object is used to define default resource constraints for Pods in a Namespace?", "choices": ["LimitRange", "ResourceQuota", "PodDisruptionBudget", "NetworkPolicy"], "answer": 0}
+{"question": "What is a 'ServiceAccount' in Kubernetes?", "choices": ["An account for a human user", "An identity for processes running in a Pod", "A billing account", "A group of users"], "answer": 1}
+{"question": "What Kubernetes object grants permissions *within* a namespace?", "choices": ["Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"], "answer": 0}
+{"question": "What Kubernetes object grants permissions *cluster-wide*?", "choices": ["Role", "ClusterRole", "RoleBinding", "ClusterRoleBinding"], "answer": 1}
+{"question": "What is the fundamental, reusable unit of work in Tekton?", "choices": ["Task", "Pipeline", "TaskRun", "Step"], "answer": 0}
+{"question": "What is a 'Step' in a Tekton Task?", "choices": ["A complete CI/CD flow", "A separate pipeline", "A container image that runs a command", "A workspace definition"], "answer": 2}
+{"question": "What Tekton resource defines a series of Tasks in a graph?", "choices": ["Pipeline", "Task", "PipelineRun", "TaskRun"], "answer": 0}
+{"question": "What Tekton resource instantiates and runs a Task?", "choices": ["Pipeline", "Task", "PipelineRun", "TaskRun"], "answer": 3}
+{"question": "What Tekton resource instantiates and runs a Pipeline?", "choices": ["Pipeline", "Task", "PipelineRun", "TaskRun"], "answer": 2}
+{"question": "How is data shared between Tekton Tasks in a Pipeline?", "choices": ["Workspaces", "ConfigMaps", "Volumes", "Secrets"], "answer": 0}
+{"question": "What Tekton resource is used to store the output of a Task?", "choices": ["Result", "Output", "Artifact", "Workspace"], "answer": 0}
+{"question": "What is a 'Trigger' in Tekton?", "choices": ["A way to start a pipeline", "A type of task", "A resource for storing results", "A security policy"], "answer": 0}
+{"question": "What Tekton component listens for events (like Git pushes)?", "choices": ["TriggerEventListener", "TriggerBinding", "TriggerTemplate", "Interceptor"], "answer": 0}
+{"question": "What Tekton component extracts data from an event payload?", "choices": ["TriggerEventListener", "TriggerBinding", "TriggerTemplate", "Interceptor"], "answer": 1}
+{"question": "What Tekton component defines the resource to be created (e.g., a PipelineRun) by a Trigger?", "choices": ["TriggerEventListener", "TriggerBinding", "TriggerTemplate", "Interceptor"], "answer": 2}
+{"question": "What is a Tekton 'Interceptor'?", "choices": ["A way to validate or modify a trigger event", "A type of pipeline", "A storage mechanism", "A UI component"], "answer": 0}
+{"question": "What is the main advantage of Tekton being 'cloud-native'?", "choices": ["It only runs on one cloud", "It's written in Go", "It runs on Kubernetes as CRDs", "It's free"], "answer": 2}
+{"question": "What is a `when` expression in a Tekton Pipeline?", "choices": ["To define a workspace", "To define a parameter", "To define a condition for a task to run", "To define a final task"], "answer": 2}
+{"question": "What is a `finally` block in a Tekton Pipeline?", "choices": ["A task that runs first", "A task that runs on failure", "A set of tasks that run regardless of pipeline success or failure", "A task that defines parameters"], "answer": 2}
+{"question": "How are credentials typically managed in Tekton?", "choices": ["Hard-coded in the Task", "Using Kubernetes Secrets", "Using ConfigMaps", "Using environment variables"], "answer": 1}
+{"question": "What is the Tekton 'Dashboard'?", "choices": ["A command-line tool", "A web-based UI for Tekton", "A type of Trigger", "An API endpoint"], "answer": 1}
+{"question": "What is a 'TaskRun' composed of?", "choices": ["A list of Pipelines", "A list of Steps", "A list of Pods", "A list of Pods, one for each Step"], "answer": 3}
+{"question": "What is the purpose of `params` in a Tekton Task?", "choices": ["To define workspaces", "To pass input values to a Task", "To store output results", "To define security constraints"], "answer": 1}
+{"question": "What is OpenShift Pipelines based on?", "choices": ["Jenkins", "Argo CD", "Tekton", "Flux"], "answer": 2}
+{"question": "What does 'KServe' (formerly KFServing) provide?", "choices": ["A CI/CD pipeline", "A model training framework", "A standard for serverless model inference", "A data storage solution"], "answer": 2}
+{"question": "What is the core component of KServe for defining a model deployment?", "choices": ["InferenceService", "ModelServer", "Transformer", "Predictor"], "answer": 0}
+{"question": "What is a 'Predictor' in an KServe `InferenceService`?", "choices": ["It preprocesses data", "It runs the actual model server container", "It postprocesses data", "It routes traffic"], "answer": 1}
+{"question": "What is a 'Transformer' in an KServe `InferenceService`?", "choices": ["A model server", "A component for data pre/post-processing", "A CI/CD tool", "A storage layer"], "answer": 1}
+{"question": "What is 'vLLM'?", "choices": ["A framework for building models", "A high-throughput LLM inference engine", "A data labeling tool", "A type of GPU"], "answer": 1}
+{"question": "What is the primary benefit of vLLM's 'PagedAttention' mechanism?", "choices": ["Faster model training", "Reduced memory usage and higher throughput", "Better model accuracy", "Smaller model file size"], "answer": 1}
+{"question": "What does 'RHOAI' stand for?", "choices": ["Red Hat OpenShift AI", "Red Hat Optimized AI", "Red Hat OpenShift Analytics Infrastructure", "Red Hat OpenShift AI-Ops"], "answer": 0}
+{"question": "What is 'Knative'?", "choices": ["A CI/CD tool", "A model serving framework", "A platform for building serverless applications on Kubernetes", "A storage orchestrator"], "answer": 2}
+{"question": "What is the 'Knative Serving' component responsible for?", "choices": ["Running build pipelines", "Request-driven autoscaling and scale-to-zero", "Storing event data", "Managing GPUs"], "answer": 1}
+{"question": "What is a 'Knative Eventing' component used for?", "choices": ["Serving models", "Managing a system for consuming and producing events", "Scaling pods to zero", "Running CI/CD"], "answer": 1}
+{"question": "In OpenShift Serverless, what CRD is used to define a serverless application?", "choices": ["Service", "Deployment", "KnativeService", "KService"], "answer": 2}
+{"question": "What is a 'model-mesh' in OpenShift AI?", "choices": ["A way to train models", "A system for intelligently loading/unloading models to save memory", "A type of neural network", "A data pipeline tool"], "answer": 1}
+{"question": "What is a 'Data Science Project' in OpenShift AI?", "choices": ["A standard Kubernetes namespace", "A specialized namespace with pre-installed tools and permissions", "A Git repository", "A Tekton Pipeline"], "answer": 1}
+{"question": "What is OpenShift Data Foundation (ODF)?", "choices": ["A CI/CD tool", "A software-defined storage solution for OpenShift", "A serverless platform", "A GPU driver"], "answer": 1}
+{"question": "What open-source project is OpenShift Data Foundation based on?", "choices": ["GlusterFS", "Ceph", "MinIO", "Rook"], "answer": 1}
+{"question": "What is the purpose of a 'StorageClass' in Kubernetes/OpenShift?", "choices": ["To define a type of storage", "To request storage", "To backup storage", "To secure storage"], "answer": 0}
+{"question": "What is a `VolumeSnapshot` in Kubernetes?", "choices": ["A backup of a pod", "A backup of a namespace", "A point-in-time copy of a PersistentVolume", "A type of storage class"], "answer": 2}
+{"question": "What is the 'etcd' component in Kubernetes?", "choices": ["A network plugin", "The cluster's key-value store", "A container runtime", "The API server"], "answer": 1}
+{"question": "What is the 'container runtime' used by default in OpenShift 4.x nodes?", "choices": ["Docker", "containerd", "CRI-O", "rkt"], "answer": 2}
+{"question": "What is 'KubeVirt'?", "choices": ["A CI/CD tool", "A project for running virtual machines on Kubernetes", "A serverless framework", "A storage plugin"], "answer": 1}
+{"question": "What is 'Argo CD'?", "choices": ["A CI/CD pipeline tool", "A declarative, GitOps continuous delivery tool", "A model serving framework", "A data-processing tool"], "answer": 1}
+{"question": "What is 'GitOps'?", "choices": ["A way to do CI/CD", "Using Git as the single source of truth for declarative infrastructure", "A specific Git command", "A type of code review"], "answer": 1}
+{"question": "What is the purpose of a 'NetworkPolicy' in Kubernetes?", "choices": ["To create a service", "To define how pods communicate with each other and the network", "To expose an application", "To load balance traffic"], "answer": 1}
+{"question": "What is 'Helm'?", "choices": ["A CI/CD tool", "A package manager for Kubernetes", "A serverless framework", "A CNI plugin"], "answer": 1}
+{"question": "A Helm 'Chart' is a...", "choices": ["A running application", "A monitoring dashboard", "A collection of templates for Kubernetes resources", "A storage definition"], "answer": 2}
+{"question": "What is `LMEvalJob` (which you've been using)?", "choices": ["A standard Kubernetes resource", "A custom resource (CRD) from TrustyAI", "A Tekton Task", "A type of pod"], "answer": 1}
+{"question": "What is the goal of 'TrustyAI' in the OpenShift AI stack?", "choices": ["To serve models", "To train models", "To provide explainability and trust for AI models", "To run CI/CD pipelines"], "answer": 2}
+{"question": "What is the purpose of the `oc debug` command?", "choices": ["To delete a pod", "To create a debugging pod associated with a node or pod", "To check cluster health", "To scale a deployment"], "answer": 1}
+{"question": "What is 'Source-to-Image' (S2I)?", "choices": ["A way to run VMs", "A way to build container images from source code", "A storage mechanism", "A network policy"], "answer": 1}
+{"question": "What is the core of OpenShift's cluster management?", "choices": ["A set of Ansible playbooks", "A set of Operators managing the cluster", "A custom dashboard", "A fork of Jenkins"], "answer": 1}

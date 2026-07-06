@@ -1,0 +1,63 @@
+apiVersion: trustyai.opendatahub.io/v1alpha1
+kind: LMEvalJob
+metadata:
+  name: custom-eval-job 
+  namespace: vllm
+spec:
+  # --- Config is all correct ---
+  model: local-completions
+  taskList:
+    taskNames:
+      - custom-lmeval-task
+  
+  modelArgs:
+    - name: model
+      value: granite-2b
+    - name: base_url
+      value: http://granite-2b-predictor.vllm.svc.cluster.local:8080/v1/completions
+    # This must match the DIRECTORY where you mount the task.yaml
+    - name: include_path
+      value: /opt/app-root/src/my_tasks
+    - name: num_concurrent
+      value:  '1'
+    - name: max_retries
+      value:  '6'
+    - name: tokenized_requests
+      value: 'False'
+    - name: tokenizer
+      value: ibm-granite/granite-3.3-8b-instruct # the tokenizer to use during the evaluation. For best results, this should match your model
+
+  logSamples: true
+  batchSize: '1'
+  allowOnline: true
+  allowCodeExecution: false
+  outputs:
+    pvcManaged:
+      size: 5Gi
+      
+  # --- THIS IS THE FIX ---
+  pod:
+    volumes:
+      # 1. The volume source is still your ConfigMap. This is correct.
+      - name: custom-benchmark-volume
+        configMap:
+          name: custom-lmeval-benchmark-files
+
+    container:
+      # 2. We now have TWO volume mounts, not one.
+      volumeMounts:
+        # Mount #1: The task.yaml file
+        - name: custom-benchmark-volume
+          # Mount this file AT this exact path
+          mountPath: /opt/app-root/src/my_tasks/task.yaml
+          # Use the 'task.yaml' KEY from the ConfigMap
+          subPath: task.yaml
+          readOnly: true
+        
+        # Mount #2: The data.jsonl file
+        - name: custom-benchmark-volume
+          # Mount this file AT this exact path
+          mountPath: /opt/app-root/src/my_tasks/data.jsonl
+          # Use the 'data.jsonl' KEY from the ConfigMap
+          subPath: data.jsonl
+          readOnly: true

@@ -1,0 +1,117 @@
+---
+# ===================================================================
+#  1. THE SECRET
+#  This holds your AWS credentials. The Deployment will mount these
+#  as environment variables.
+#
+#  Fill in your base64-encoded values OR use 'stringData'
+#  with plain text and OpenShift will encode it for you.
+# ===================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: s3-creds
+type: Opaque
+stringData: # Use stringData for plain text. OpenShift will auto-encode.
+  S3_BUCKET_NAME: "benchmark-results"
+  S3_ACCESS_KEY: "minio"
+  S3_SECRET_KEY: "minio123"
+  S3_ENDPOINT_URL: "http://minio-service.s3-storage.svc.cluster.local:9000"
+
+---
+# ===================================================================
+#  2. THE DEPLOYMENT
+#  This describes the desired state of your application:
+#  - Use the image from the internal build (ImageStream)
+#  - Inject the 's3-creds' Secret as environment variables
+#  - Run 1 replica, listening on port 8080
+# ===================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: benchmark-viewer
+  labels:
+    app: benchmark-viewer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: benchmark-viewer
+  template:
+    metadata:
+      labels:
+        app: benchmark-viewer
+    spec:
+      containers:
+        - name: app
+          # This pulls from the ImageStream 'benchmark-viewer:latest'
+          # in the 'benchmark-viewer' project.
+          # The path is: <registry>/<project_name>/<imagestream_name>:<tag>
+          image: quay.io/jhurlocker/guide-lmeval-results-ui:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080 # The port Gunicorn is bound to
+              protocol: TCP
+          # Inject all key/value pairs from the Secret 's3-creds'
+          # as environment variables (S3_BUCKET_NAME, S3_ACCESS_KEY, etc.)
+          envFrom:
+            - secretRef:
+                name: s3-creds
+          # Define resource requests and limits for production
+          # You can adjust these values based on your app's needs
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      restartPolicy: Always
+
+---
+# ===================================================================
+#  3. THE SERVICE
+#  This gives your Deployment a stable internal DNS name
+#  ('benchmark-viewer') and routes internal traffic to
+#  your pod(s) on port 8080.
+# ===================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: benchmark-viewer
+  labels:
+    app: benchmark-viewer
+spec:
+  selector:
+    app: benchmark-viewer # Finds pods with this label
+  ports:
+    - name: 8080-tcp
+      protocol: TCP
+      port: 8080 # The port the Service exposes
+      targetPort: 8080 # The port on the container to send traffic to
+
+---
+# ===================================================================
+#  4. THE ROUTE
+#  This exposes your Service to the outside world,
+#  giving you a public URL.
+# ===================================================================
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: benchmark-viewer
+  labels:
+    app: benchmark-viewer
+spec:
+  # This will be your public URL, e.g.,
+  # benchmark-viewer-benchmark-viewer.apps.your-cluster.com
+  # You can specify a 'host' field here if you have a custom domain.
+  to:
+    kind: Service
+    name: benchmark-viewer # The name of the Service to route to
+    weight: 100
+  port:
+    targetPort: 8080-tcp # The named port on the Service
+  tls:
+    termination: edge # OpenShift handles the cert
+    insecureEdgeTerminationPolicy: Redirect # HTTP -> HTTPS

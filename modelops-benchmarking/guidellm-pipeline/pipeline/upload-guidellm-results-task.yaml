@@ -1,0 +1,109 @@
+﻿apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: upload-guidellm-benchmark-results
+spec:
+  description: Upload guidellm benchmark results to s3 bucket
+  params:
+    - default: 'http://s3.openshift-storage.svc.cluster.local:80'
+      description: s3 API endpoint
+      name: s3-api-endpoint
+      type: string
+    - default: test
+      description: s3 access key ID
+      name: s3-access-key-id
+      type: string
+    - default: test
+      description: s3 secret access key
+      name: s3-secret-access-key
+      type: string
+  steps:
+    - computeResources: {}
+      env:
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/ssl/certs/ca-bundle.crt
+        - name: SSL_CERT_FILE
+          value: /etc/ssl/certs/ca-bundle.crt
+        - name: PARAM_S3_ENDPOINT_URL
+          value: $(params.s3-api-endpoint)
+        - name: PARAM_S3_USERNAME
+          value: $(params.s3-api-endpoint)
+        - name: PARAM_S3_PASSWORD
+          value: $(params.s3-api-endpoint)
+      image: registry.access.redhat.com/ubi9/python-311
+      name: upload-benchmark
+      script: |
+        #!/usr/bin/env python3
+
+        import os
+
+        # Install dependencies quietly
+        os.system('pip install -q boto3')
+
+        import boto3
+        import glob
+        import sys
+        from botocore.client import Config
+
+        # --- Get credentials and endpoint from environment variables ---
+        S3_ENDPOINT_URL = "$(params.s3-api-endpoint)"
+        S3_USERNAME = "$(params.s3-access-key-id)"
+        S3_PASSWORD = "$(params.s3-secret-access-key)"
+
+        def upload_files_to_s3(bucket_name, search_directory, file_pattern):
+            """
+            Finds all files matching a pattern in a directory and uploads them to an S3 bucket.
+            It explicitly skips directories.
+            """
+            try:
+                s3_client = boto3.client(
+                    's3',
+                    endpoint_url=S3_ENDPOINT_URL,
+                    aws_access_key_id=S3_USERNAME,
+                    aws_secret_access_key=S3_PASSWORD,
+                    config=Config(s3={'addressing_style': 'path'})
+                )
+            except Exception as e:
+                print(f"Failed to create S3 client: {e}")
+                return
+
+            search_path = os.path.join(search_directory, file_pattern)
+            print(f"Searching for items with pattern: {search_path}")
+            found_items = glob.glob(search_path)
+
+            if not found_items:
+                print("No items found matching the pattern.")
+                return
+
+            print(f"Found {len(found_items)} item(s). Starting upload process...")
+
+            for item_path in found_items:
+                if os.path.isfile(item_path):
+                    try:
+                        s3_object_key = os.path.basename(item_path)
+                        print(f"  Uploading '{item_path}' to bucket '{bucket_name}' as '{s3_object_key}'...")
+                        s3_client.upload_file(item_path, bucket_name, s3_object_key)
+                        print(f"Upload successful for: {item_path}")
+                    except Exception as e:
+                        print(f"Error uploading file {item_path}: {e}")
+                else:
+                    print(f" Skipping '{item_path}' because it is a directory.")
+
+        if __name__ == '__main__':
+            S3_BUCKET = 'benchmark-results'
+            LOCAL_DIRECTORY = '/workspace/shared-workspace/'
+
+            try:
+                with open("/workspace/shared-workspace/timestamp.txt", "r") as f:
+                    timestamp = f.read().strip()
+                print(f"Using timestamp '{timestamp}' to find files.")
+                WILDCARD_PATTERN = f"*{timestamp}*"
+                upload_files_to_s3(S3_BUCKET, LOCAL_DIRECTORY, WILDCARD_PATTERN)
+            except FileNotFoundError:
+                print("Error: timestamp.txt not found. Cannot determine files to upload.")
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
+      workingDir: $(workspaces.shared-workspace.path)
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace

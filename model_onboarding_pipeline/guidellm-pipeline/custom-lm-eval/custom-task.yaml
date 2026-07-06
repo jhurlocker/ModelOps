@@ -1,0 +1,30 @@
+# A unique name for your task.
+task: custom-lmeval-task
+
+# Use 'json' as the dataset_path to load local JSON/JSONL/CSV files.
+dataset_path: json
+
+# Specify the path to your data file.
+dataset_kwargs:
+  # THIS IS THE FIX:
+  # It now points to the correct mount path and the correct filename ("data.jsonl")
+  data_files: "/my_tasks/data.jsonl" 
+
+# Defines the prompt given to the model.
+doc_to_text: !Template "Question: {{question}}\n\nChoices:\n{% for i, choice in enumerate(choices) %}- ({{'ABCD'[i]}}) {{choice}}\n{% endfor %}\nAnswer:"
+
+# Defines where the harness finds the correct answer.
+doc_to_target: answer
+
+# Defines the evaluation type. 'multiple_choice' is standard.
+output_type: multiple_choice
+
+# List of metrics to calculate. 'acc' is standard accuracy for multiple choice.
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+
+# Metadata is good practice.
+metadata:
+  version: 1.0

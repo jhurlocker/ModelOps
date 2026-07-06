@@ -1,0 +1,79 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: guidellm-benchmark-run-
+spec:
+  params:
+    - name: target
+      value: 'http://granite-2b-predictor.vllm.svc.cluster.local:8080/v1'
+    - name: model-name
+      value: granite-2b
+    - name: processor
+      value: ibm-granite/granite-3.3-2b-instruct
+    - name: data-config
+      value: "prompt_tokens=800,output_tokens=128"
+    - name: max-seconds
+      value: '30'
+    - name: rate-type
+      value: sweep
+    - name: rate
+      value: '2.0'
+    - name: api-key
+      value: ''
+    - name: max-concurrency
+      value: '10'
+    - name: huggingface-token
+      value: ''
+    - name: s3-api-endpoint
+      value: 'http://minio-service.s3-storage.svc.cluster.local:9000'
+    - name: s3-access-key-id
+      value: 'minio'
+    - name: s3-secret-access-key
+      value: 'minio123'
+    - name: model-url
+      value: '<REPLACE_ME_WITH_QUAY_ROUTE>/admin/granite-3.3-2b-instruct'
+    - name: lm-eval-job-name
+      value: 'mmlu-jurisprudence-eval-job'
+    - name: lm-eval-custom
+      value: 'False'
+    - name: custom-data
+      value: 'False'
+    - name: custom-filename
+      value: 'no-file'
+    - name: model-reg-author
+      value: 'ModelOps Platform Team'
+    - name: valuesContent
+      value: |
+          deploymentMode: RawDeployment
+          fullnameOverride: "granite-2b"
+          model:
+            modelNameOverride: "granite-2b"
+            uri: "oci://<REPLACE_ME_WITH_QUAY_ROUTE>/admin/granite-3.3-2b-instruct:latest"
+            args:
+              - "--disable-log-requests"
+              - "--max-num-seqs=32"
+  pipelineRef:
+    name: guidellm-benchmark-pipeline
+  taskRunSpecs:
+  - pipelineTaskName: deploy-model
+    computeResources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  timeouts:
+    pipeline: 1h0m0s
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: guidellm-output-pvc
+    - name: manifests           
+      configMap:                      
+        name: mmlu-manifest
+    - name: custom-mmlu          
+      configMap:                      
+        name: custom-mmlu

@@ -1,0 +1,79 @@
+# FILE: helm-deploy-task.yaml (Corrected)
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-model
+spec:
+  description: Deploys a Helm chart to an OpenShift cluster using inline values.
+  params:
+    - name: releaseName
+      type: string
+      description: "The name for the Helm release."
+      default: "granite-2b"
+    - name: namespace
+      type: string
+      default: vllm
+    - name: chartUrl
+      type: string
+      default: "https://redhat-ai-services.github.io/helm-charts/"
+    - name: valuesContent
+      type: string
+  steps:
+    - name: deploy
+      image: quay.io/jhurlocker/deploy-model-task-helm-oc:latest
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # STEP 1: Create a local bin directory and add it to the PATH
+        mkdir -p ~/bin
+        export PATH=$PATH:~/bin
+        OC_VERSION="4.16.11" # Specify an OC version
+        HELM_VERSION="v3.19.0"
+
+        # STEP 2: Install OpenShift CLI (oc)
+        # echo "✅ Installing OpenShift CLI (oc)..."
+        # curl -fsSL -o oc.tar.gz "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz"
+        # tar -zxvf oc.tar.gz
+        # mv oc kubectl ~/bin/
+        # rm -f oc.tar.gz README.md
+        echo "oc/kubectl installation complete. Version: $(oc version --client)"
+
+        echo "✅ Installing Helm locally..."
+        # curl -fsSL -o helm.tar.gz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+        # tar -zxvf helm.tar.gz
+        # mv linux-amd64/helm ~/bin/
+        # rm -rf helm.tar.gz linux-amd64
+        echo "Helm installation complete. Version: $(helm version --short)"
+
+        # STEP 4: Deploy with Helm
+        echo "Adding Helm repository..."
+        helm repo add redhat-ai-services "$(params.chartUrl)"
+        helm repo update
+
+        echo "Deploying release [$(params.releaseName)] to namespace [$(params.namespace)]"
+        
+        # Run the Helm deploy command
+        echo "$(params.valuesContent)" | helm upgrade --install \
+          "$(params.releaseName)" \
+          redhat-ai-services/vllm-kserve \
+          --version 0.5.11 \
+          --namespace "$(params.namespace)" \
+          -f -
+
+        # STEP 5: Wait for the model to be ready
+        echo "⏳ Waiting for InferenceService [$(params.releaseName)] to be Ready..."
+        
+        # This command will poll the resource and only exit (0) when the
+        # 'Ready' condition is 'True'. It will fail (non-zero) if it times out.
+        # Model downloads can take time, so we use a long timeout (e.g., 15-20 minutes).
+        oc wait --for=condition=Ready \
+          "inferenceservice/$(params.releaseName)" \
+          --namespace "$(params.namespace)" \
+          --timeout=1200s # 20 minute timeout
+
+        echo "InferenceService [$(params.releaseName)] is Ready."
+      workingDir: $(workspaces.shared-workspace.path)
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace

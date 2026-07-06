@@ -1,0 +1,424 @@
+{
+  "doc_type": "pipeline",
+  "version": "3.0",
+  "json_schema": "http://api.dataplatform.ibm.com/schemas/common-pipeline/pipeline-flow/pipeline-flow-v3-schema.json",
+  "id": "elyra-auto-generated-pipeline",
+  "primary_pipeline": "primary",
+  "pipelines": [
+    {
+      "id": "primary",
+      "nodes": [
+        {
+          "id": "328985b2-64b0-4ebe-bbdc-79d3d32a6555",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": true,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "deploy-model.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "Deploy Model",
+            "ui_data": {
+              "label": "Deploy Model",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 144,
+              "y_pos": 185,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "bbc8986b-e3d0-4799-9181-0a9880ead67e",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": false,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "guidellm-benchmark.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "GuideLLM",
+            "ui_data": {
+              "label": "GuideLLM",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 371,
+              "y_pos": 185,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              },
+              "links": [
+                {
+                  "id": "e1844355-6945-477c-9467-eef0d65dc4f7",
+                  "node_id_ref": "328985b2-64b0-4ebe-bbdc-79d3d32a6555",
+                  "port_id_ref": "outPort"
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "24b194ad-0490-4bdf-9d72-0f8d1086073d",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": false,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "upload-guidellm-results.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "Upload Results",
+            "ui_data": {
+              "label": "Upload Results",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 593,
+              "y_pos": 184,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              },
+              "links": [
+                {
+                  "id": "eddece2e-d44d-4e26-bff3-7ec5dfb15a64",
+                  "node_id_ref": "bbc8986b-e3d0-4799-9181-0a9880ead67e",
+                  "port_id_ref": "outPort"
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "0e335bfc-10e8-4d21-ab2d-080b967c4bd1",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": false,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "lm-eval.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "lm-eval",
+            "ui_data": {
+              "label": "lm-eval",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 134,
+              "y_pos": 294,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              },
+              "links": [
+                {
+                  "id": "5fa688a7-f162-4d59-bc82-4203e9bd2277",
+                  "node_id_ref": "24b194ad-0490-4bdf-9d72-0f8d1086073d",
+                  "port_id_ref": "outPort"
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "ff9d220a-7204-4520-a246-ef68c847306c",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": false,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "upload-lmeval-results.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "Upload Results",
+            "ui_data": {
+              "label": "Upload Results",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 376,
+              "y_pos": 294,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              },
+              "links": [
+                {
+                  "id": "ffd6130d-b858-4ffc-bf50-8779cbd44e2c",
+                  "node_id_ref": "0e335bfc-10e8-4d21-ab2d-080b967c4bd1",
+                  "port_id_ref": "outPort"
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "9e26ee88-0ece-49e8-8f09-1552a3a59344",
+          "type": "execution_node",
+          "op": "execute-notebook-node",
+          "app_data": {
+            "component_parameters": {
+              "dependencies": [],
+              "include_subdirectories": false,
+              "outputs": [],
+              "env_vars": [],
+              "kubernetes_pod_annotations": [],
+              "kubernetes_pod_labels": [],
+              "kubernetes_secrets": [],
+              "kubernetes_shared_mem_size": {},
+              "kubernetes_tolerations": [],
+              "mounted_volumes": [],
+              "filename": "register-model-and-results.ipynb",
+              "runtime_image": "quay.io/modh/odh-pipeline-runtime-datascience-cpu-py311-ubi9@sha256:00dbb78af70bf9bcfb15dad7ae5a1a90e47ac33efbd6573a090cf56531e22ffb"
+            },
+            "label": "Register Model",
+            "ui_data": {
+              "label": "Register Model",
+              "image": "/notebook/vllm/benchmark-workbench/static/elyra/notebook.svg",
+              "x_pos": 607,
+              "y_pos": 293,
+              "description": "Run notebook file"
+            }
+          },
+          "inputs": [
+            {
+              "id": "inPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Input Port"
+                }
+              },
+              "links": [
+                {
+                  "id": "ae84485f-94f8-413c-b3fc-88a0b0d01cb5",
+                  "node_id_ref": "ff9d220a-7204-4520-a246-ef68c847306c",
+                  "port_id_ref": "outPort"
+                }
+              ]
+            }
+          ],
+          "outputs": [
+            {
+              "id": "outPort",
+              "app_data": {
+                "ui_data": {
+                  "cardinality": {
+                    "min": 0,
+                    "max": -1
+                  },
+                  "label": "Output Port"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "app_data": {
+        "ui_data": {
+          "comments": []
+        },
+        "version": 8,
+        "runtime_type": "KUBEFLOW_PIPELINES",
+        "properties": {
+          "name": "benchmark-eval",
+          "runtime": "Data Science Pipelines",
+          "pipeline_defaults": {
+            "kubernetes_tolerations": [],
+            "kubernetes_pod_annotations": [],
+            "kubernetes_shared_mem_size": {},
+            "kubernetes_pod_labels": [],
+            "mounted_volumes": [],
+            "kubernetes_secrets": [],
+            "env_vars": []
+          },
+          "pipeline_parameters": [
+            {
+              "name": "",
+              "description": "",
+              "default_value": {
+                "type": "String",
+                "value": ""
+              },
+              "required": false
+            }
+          ]
+        }
+      },
+      "runtime_ref": ""
+    }
+  ],
+  "schemas": []
+}

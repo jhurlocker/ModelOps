@@ -1,0 +1,213 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: guidellm-benchmark-pipeline
+spec:
+  description: Pipeline to run guidellm benchmarks against model endpoints
+  params:
+    - default: 'http://llama32-3b.llama-serve.svc.cluster.local:8000/v1'
+      description: Target endpoint URL
+      name: target
+      type: string
+    - default: granite-2b-instruct-vllm-kserve
+      description: Model name identifier
+      name: model-name
+      type: string
+    - default: ibm-granite/granite-3.3-2b-instruct
+      description: Processor/model path
+      name: processor
+      type: string
+    - default: "prompt_tokens=800,output_tokens=128"
+      description: Data configuration JSON
+      name: data-config
+      type: string
+    - default: '30'
+      description: Maximum benchmark duration in seconds
+      name: max-seconds
+      type: string
+    - default: 'sweep'
+      description: Rate type for benchmark
+      name: rate-type
+      type: string
+    - default: '1.0, 4.0, 8.0, 16.0'
+      description: Rate for benchmark
+      name: rate
+      type: string
+    - description: OpenAI API key for authentication
+      name: api-key
+      type: string
+    - default: '10'
+      description: Maximum concurrency for benchmark
+      name: max-concurrency
+      type: string
+    - description: Hugging Face token for accessing gated models
+      name: huggingface-token
+      type: string
+    - description: s3 endpoint
+      name: s3-api-endpoint
+      type: string
+      default: 'http://s3.openshift-storage.svc.cluster.local:80'
+    - description: s3 access key ID
+      name: s3-access-key-id
+      type: string
+    - description: s3 secret access key
+      name: s3-secret-access-key
+      type: string
+    - name: valuesContent
+      type: string
+    - name: model-url
+      type: string
+    - name: lm-eval-job-name
+      type: string
+    - name: lm-eval-custom
+      type: string
+    - name: custom-data
+      type: string
+    - name: custom-filename
+      type: string
+    - name: model-reg-author
+      type: string
+  tasks:
+    - name: deploy-model
+      params:
+        - name: target
+          value: $(params.target)
+        - name: model-name
+          value: $(params.model-name)
+        - name: processor
+          value: $(params.processor)
+        - name: data-config
+          value: $(params.data-config)
+        - name: output-filename
+          value: $(params.model-name)-results.yaml
+        - name: rate-type
+          value: $(params.rate-type)
+        - name: rate
+          value: $(params.rate)
+        - name: max-seconds
+          value: $(params.max-seconds)
+        - name: api-key
+          value: $(params.api-key)
+        - name: max-concurrency
+          value: $(params.max-concurrency)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: valuesContent
+          value: $(params.valuesContent)
+      taskRef:
+        kind: Task
+        name: deploy-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: benchmark
+      params:
+        - name: target
+          value: $(params.target)
+        - name: model-name
+          value: $(params.model-name)
+        - name: processor
+          value: $(params.processor)
+        - name: data-config
+          value: $(params.data-config)
+        - name: output-filename
+          value: $(params.model-name)-results.yaml
+        - name: rate-type
+          value: $(params.rate-type)
+        - name: rate
+          value: $(params.rate)
+        - name: max-seconds
+          value: $(params.max-seconds)
+        - name: api-key
+          value: $(params.api-key)
+        - name: max-concurrency
+          value: $(params.max-concurrency)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: model-url
+          value: $(params.model-url)
+        - name: custom-data
+          value:  $(params.custom-data)
+        - name: custom-filename
+          value: $(params.custom-filename)
+      runAfter:
+        - deploy-model
+      taskRef:
+        kind: Task
+        name: guidellm-benchmark
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: upload-guide-llm-results
+      params:
+        - name: s3-api-endpoint
+          value: $(params.s3-api-endpoint)
+        - name: s3-access-key-id
+          value: $(params.s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.s3-secret-access-key)
+      runAfter:
+        - benchmark
+      taskRef:
+        kind: Task
+        name: upload-guidellm-benchmark-results
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: lm-eval
+      params:
+        - name: lm-eval-job-name
+          value: $(params.lm-eval-job-name)
+        - name: lm-eval-custom
+          value: $(params.lm-eval-custom)
+      runAfter:
+        - upload-guide-llm-results
+      taskRef:
+        kind: Task
+        name: lm-eval
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+        - name: manifests
+          workspace: manifests
+        - name: custom-mmlu
+          workspace: custom-mmlu
+    - name: upload-lm-eval-results
+      params:
+        - name: s3-api-endpoint
+          value: $(params.s3-api-endpoint)
+        - name: s3-access-key-id
+          value: $(params.s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.s3-secret-access-key)
+      runAfter:
+        - lm-eval
+      taskRef:
+        kind: Task
+        name: upload-lm-eval-results
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: register-model-and-results
+      params:
+        - name: model-url
+          value: $(params.model-url)
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+      runAfter:
+        - upload-lm-eval-results
+      taskRef:
+        kind: Task
+        name: model-registry
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace
+    - description: Configmap with lm eval job
+      name: manifests
+    - description: Configmap with custom lm eval job
+      name: custom-mmlu

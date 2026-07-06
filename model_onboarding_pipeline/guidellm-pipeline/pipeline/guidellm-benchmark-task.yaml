@@ -1,0 +1,320 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: guidellm-benchmark
+spec:
+  description: Run guidellm benchmark against an endpoint and extract results
+  params:
+    - default: 'http://llama32-3b.llama-serve.svc.cluster.local:8000/v1'
+      description: Target endpoint URL
+      name: target
+      type: string
+    - default: llama32
+      description: Model name identifier
+      name: model-name
+      type: string
+    - default: ibm-granite/granite-3.3-2b-instruct
+      description: Processor/model path
+      name: processor
+      type: string
+    - default: "prompt_tokens=800,output_tokens=128"
+      description: Data configuration JSON
+      name: data-config
+      type: string
+    - default: benchmark-results.yaml
+      description: Output filename
+      name: output-filename
+      type: string
+    - default: synchronous
+      description: Rate type for benchmark
+      name: rate-type
+      type: string
+    - default: '4'
+      description: Rate for benchmark
+      name: rate
+      type: string
+    - default: '15'
+      description: Maximum benchmark duration in seconds
+      name: max-seconds
+      type: string
+    - default: registry.access.redhat.com/ubi9/python-311
+      description: Guidellm container image
+      name: guidellm-image
+      type: string
+    - default: ''
+      description: OpenAI API key for authentication
+      name: api-key
+      type: string
+    - default: '10'
+      description: Maximum concurrency for benchmark
+      name: max-concurrency
+      type: string
+    - default: your-huggingface-token-here
+      description: Hugging Face token for accessing gated models
+      name: huggingface-token
+      type: string
+    - name: custom-data
+      default: "False"
+      description: "Is custom benchmark data provided for this benchmark run?"
+      type: string
+    - name: custom-filename
+      default: 'historical_prompts.csv'
+      type: string
+      description: "The name of the custom filename loaded from the custom-data bucket in s3"
+    - default: 'http://minio-service.s3-storage.svc.cluster.local:9000'
+      description: s3 API endpoint
+      name: s3-api-endpoint
+      type: string
+    - default: test
+      description: s3 access key ID
+      name: s3-access-key-id
+      type: string
+    - default: test
+      description: s3 secret access key
+      name: s3-secret-access-key
+      type: string
+  results:
+    - description: The benchmark results.
+      name: benchmark-results
+      type: string
+  steps:
+    - computeResources: {}
+      env:
+        - name: GUIDELLM__OPENAI__API_KEY
+          value: $(params.api-key)
+        - name: GUIDELLM__MAX_CONCURRENCY
+          value: $(params.max-concurrency)
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/ssl/certs/ca-bundle.crt
+        - name: SSL_CERT_FILE
+          value: /etc/ssl/certs/ca-bundle.crt
+      image: registry.access.redhat.com/ubi9/python-311
+      name: download-custom-data
+      script: |
+        #!/usr/bin/env python3
+        import os
+        import sys
+        import shutil
+
+        CUSTOM_DATA_ENABLED = "$(params.custom-data)"
+        CUSTOM_FILENAME = "$(params.custom-filename)"
+        S3_ENDPOINT_URL = "$(params.s3-api-endpoint)"
+        S3_USERNAME = "$(params.s3-access-key-id)"
+        S3_PASSWORD = "$(params.s3-secret-access-key)"
+        S3_BUCKET = "custom-data"
+        LOCAL_DIRECTORY = "/workspace/shared-workspace/"
+
+        workspace = "/workspace/shared-workspace"
+
+        for item in os.listdir(workspace):
+            item_path = os.path.join(workspace, item)
+            try:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)  # removes file or symlink
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)  # removes folder recursively
+            except Exception as e:
+                print(f"Failed to delete {item_path}: {e}")
+
+        # --- Check if custom data should be downloaded ---
+        if CUSTOM_DATA_ENABLED.lower() != "true":
+            print("Skipping custom data download: 'custom-data' param is not 'true'.")
+            sys.exit(0)
+
+        if not CUSTOM_FILENAME:
+            print("Error: 'custom_filename' parameter is missing or empty.")
+            sys.exit(1)
+
+        # Install dependencies quietly
+        os.system('pip install -q boto3')
+        import boto3
+        from botocore.client import Config
+
+        # --- Create S3 client ---
+        try:
+            s3_client = boto3.client(
+                's3',
+                endpoint_url=S3_ENDPOINT_URL,
+                aws_access_key_id=S3_USERNAME,
+                aws_secret_access_key=S3_PASSWORD,
+                config=Config(s3={'addressing_style': 'path'}, signature_version="s3v4"),
+                use_ssl=False
+            )
+        except Exception as e:
+            print(f"Failed to create S3 client: {e}")
+            sys.exit(1)
+
+        # --- Download the specific file ---
+        local_path = os.path.join(LOCAL_DIRECTORY, CUSTOM_FILENAME)
+        print(f"Attempting to download '{CUSTOM_FILENAME}' from bucket '{S3_BUCKET}' to '{local_path}'...")
+
+        try:
+            s3_client.download_file(S3_BUCKET, CUSTOM_FILENAME, local_path)
+            #file_name = "your_file.txt"
+
+            with open(local_path) as file:
+                content = file.read()
+                print(content)
+            print(f"✅ Download successful: {local_path}")
+        except Exception as e:
+            print(f"❌ Failed to download '{CUSTOM_FILENAME}': {e}")
+            sys.exit(1)
+
+      workingDir: $(workspaces.shared-workspace.path)
+    - computeResources: {}
+      env:
+        - name: GUIDELLM__OPENAI__API_KEY
+          value: $(params.api-key)
+        - name: GUIDELLM__MAX_CONCURRENCY
+          value: $(params.max-concurrency)
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/ssl/certs/ca-bundle.crt
+        - name: SSL_CERT_FILE
+          value: /etc/ssl/certs/ca-bundle.crt
+      image: registry.access.redhat.com/ubi9/python-311
+      name: run-benchmark
+      script: |
+        #!/bin/bash
+        set -e # Exit immediately if a command fails
+
+        export REQUESTS_CA_BUNDLE="/etc/ssl/certs/ca-bundle.crt"
+
+        echo "--- Installing guidellm ---"
+        pip -q install git+https://github.com/jhurlocker/guidellm.git
+        #Uncomment to install the latest guidellm version
+        #pip -q install git+https://github.com/vllm-project/guidellm.git
+
+        # Create timestamped directory
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+        echo "--- Starting benchmark ---"
+
+        # Check if the rate-type parameter is equal to "throughput"
+        if [ "$(params.rate-type)" == "throughput" ]; then
+          # If it is "throughput", run the command WITHOUT the --rate argument
+          echo "Rate type is 'throughput', running without --rate flag."
+              #if [ "$(params.custom-data).lower()" = "true" ]; then
+              if [ "$(echo "$(params.custom-data)" | tr '[:upper:]' '[:lower:]')" == "true" ]; then
+                echo "Custom data without the rate argument"
+                COLUMNS=500 guidellm benchmark \
+                  --target "$(params.target)" \
+                  --model "$(params.model-name)" \
+                  --processor "$(params.processor)" \
+                  --rate-type "$(params.rate-type)" \
+                  --output-path "$(workspaces.shared-workspace.path)/$(params.output-filename)" \
+                  --data "$(workspaces.shared-workspace.path)/$(params.custom-filename)" \
+                  --max-seconds "$(params.max-seconds)" > benchmark_${TIMESTAMP}.txt
+              else
+                echo "Default data without the rate argument"
+                COLUMNS=500 guidellm benchmark \
+                  --target "$(params.target)" \
+                  --model "$(params.model-name)" \
+                  --processor "$(params.processor)" \
+                  --rate-type "$(params.rate-type)" \
+                  --output-path "$(workspaces.shared-workspace.path)/$(params.output-filename)" \
+                  --data="$(params.data-config)" \
+                  --max-seconds "$(params.max-seconds)" > benchmark_${TIMESTAMP}.txt
+              fi
+        else
+          # If it is anything else, run the command WITH the --rate argument
+              #if [ "$(params.custom-data).lower()" = "true" ]; then
+              if [ "$(echo "$(params.custom-data)" | tr '[:upper:]' '[:lower:]')" == "true" ]; then
+                echo "Custom data with the rate argument"
+                COLUMNS=500 guidellm benchmark \
+                  --target "$(params.target)" \
+                  --model "$(params.model-name)" \
+                  --processor "$(params.processor)" \
+                  --rate "$(params.rate)" \
+                  --rate-type "$(params.rate-type)" \
+                  --output-path "$(workspaces.shared-workspace.path)/$(params.output-filename)" \
+                  --data "$(workspaces.shared-workspace.path)/$(params.custom-filename)" \
+                  --max-seconds "$(params.max-seconds)" > benchmark_${TIMESTAMP}.txt
+              else
+                echo "Default data with the rate argument"
+                COLUMNS=500 guidellm benchmark \
+                  --target "$(params.target)" \
+                  --model "$(params.model-name)" \
+                  --processor "$(params.processor)" \
+                  --rate "$(params.rate)" \
+                  --rate-type "$(params.rate-type)" \
+                  --output-path "$(workspaces.shared-workspace.path)/$(params.output-filename)" \
+                  --data="$(params.data-config)" \
+                  --max-seconds "$(params.max-seconds)" > benchmark_${TIMESTAMP}.txt
+              fi
+        fi
+        # --- End of Conditional Logic ---
+
+        # COLUMNS=500 guidellm benchmark run \
+        #   --target '$(params.target)' \
+        #   --model '$(params.model-name)' \
+        #   --processor '$(params.processor)' \
+        #   --output-path '$(workspaces.shared-workspace.path)/$(params.output-filename)' \
+        #   --rate-type sweep \
+        #   --data '$(workspaces.shared-workspace.path)/prompts.txt' \
+        #   --max-seconds 30 > benchmark_$TIMESTAMP.txt
+
+        # # Build the base command
+        # CMD="COLUMNS=500 guidellm benchmark run \
+        #   --target '$(params.target)' \
+        #   --model '$(params.model-name)' \
+        #   --processor '$(params.processor)' \
+        #   --output-path '$(workspaces.shared-workspace.path)/$(params.output-filename)' \
+        #   --rate-type sweep \
+        #   --data '$(workspaces.shared-workspace.path)/prompts.txt' \
+        #   --max-seconds 30"
+
+        # # Add optional data file
+        # if [ "$(params.custom-data)" = "True" ]; then
+        #   echo "Custom data being used for benchmark"
+        #   CMD="$CMD --data=$(workspaces.shared-workspace.path)/historical_prompts_single_col.csv"
+        # else
+        #   echo "Not using custom data for benchmark"
+        #   #CMD="$CMD --data='$(params.data-config)'"
+        #   CMD="$CMD --data=$(workspaces.shared-workspace.path)/historical_prompts_single_col.csv"
+        # fi
+
+        # Conditionally add rate flag
+        # if [ "$(params.rate-type)" = "throughput" ]; then
+        #   echo "Rate type is 'throughput', running without --rate flag."
+        # else
+        #   CMD="$CMD --rate='$(params.rate)'"
+        # fi
+
+        echo "Extracting and organizing benchmark results..."
+
+        RESULT_DIR="$(params.model-name)_${TIMESTAMP}"
+        mkdir -p $RESULT_DIR
+
+        # Copy and organize results
+        if [ -f "$(params.output-filename)" ]; then
+          cp "$(params.output-filename)" "$RESULT_DIR/"
+          cp "$(params.output-filename)" "${TIMESTAMP}_$(params.output-filename)"
+          
+          # Create summary info
+          cat > "$RESULT_DIR/benchmark_info.txt" << EOF
+        Model: $(params.model-name)
+        Target: $(params.target)
+        Processor: $(params.processor)
+        Data Config: $(params.data-config)
+        Rate Type: $(params.rate-type)
+        Max Seconds: $(params.max-seconds)
+        Timestamp: $TIMESTAMP
+        EOF
+          
+          # Set timestamp for next task in pipeline
+          echo "$TIMESTAMP" > timestamp.txt
+          
+          # Package results
+          tar czf "${RESULT_DIR}_rate_$(params.rate).tar.gz" "$RESULT_DIR"
+          
+          echo "Results packaged to: ${RESULT_DIR}.tar.gz"
+          echo "Contents of workspace:"
+          ls -la
+        else
+          echo "ERROR: Benchmark output file not found: $(params.output-filename)"
+          exit 1
+        fi
+      workingDir: $(workspaces.shared-workspace.path)
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace

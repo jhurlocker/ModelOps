@@ -1,0 +1,24 @@
+# A unique name for your task.
+task: custom-lmeval-task
+
+# Use 'json' as the dataset_path to load local JSON/JSONL/CSV files.
+dataset_path: json
+
+# Specify the path to your data file.
+dataset_kwargs:
+  # This path MUST match the 'mountPath' in your LMEvalJob's subPath
+  data_files: "/opt/app-root/src/my_tasks/data.jsonl"
+
+test_split: train
+doc_to_choice: choices
+# Defines the prompt given to the model.
+doc_to_text: "Question: {{question}}\n\nChoices:\n{% for choice in choices %}- ({{'ABCD'[loop.index0]}}) {{choice}}\n{% endfor %}\nAnswer:"
+
+doc_to_target: answer
+output_type: multiple_choice
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0
