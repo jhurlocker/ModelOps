@@ -1,0 +1,852 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: model-intake-pipeline
+spec:
+  description: |
+    ModelOps LLM onboarding pipeline (single-cluster demo).
+
+    PHASE 1 - Sandbox governance (namespace: target-namespace, e.g. vllm):
+      1. compliance-artifact-scan : pull the candidate model into a sandbox,
+         run a compliance policy check on its OCI artifact and a real Trivy
+         vulnerability scan of the serving image; REGISTER the model in the
+         OpenShift AI Model Registry with the results. On failure the model is
+         still registered (marked FAILED, with S3 report links) and the
+         pipeline halts BEFORE any deploy.
+      2. gpu-advisor-sandbox : GPU capacity plan for sandbox deploy.
+      3. apply-gpu-sharing-sandbox : enable time-slicing if needed.
+      4. deploy-model : deploy via Helm so it can be scanned live.
+      5. security-scan (garak) : live LLM red-team scan via EvalHub;
+         UPDATES the registry entry (FAILED-with-links on failure), then gates.
+
+    Because tasks are chained with runAfter, a failure in either the
+    compliance/artifact scan OR the garak scan halts the pipeline - so the
+    staging phase is reached ONLY when both gates pass.
+
+    PHASE 2 - Promote to staging (namespace: staging-namespace, e.g.
+    vllm-staging):
+      6. teardown-model : free the sandbox GPU.
+      7. gpu-advisor-staging : GPU capacity plan for staging.
+      8. wait-for-approval : human approval gate.
+      9. apply-gpu-sharing-staging : enable staging time-slicing if needed.
+      10. deploy-model-staging : deploy via Helm into staging.
+      11. grant-model-access : namespace RBAC for RHOAI dashboard visibility.
+      12. benchmark (GuideLLM via EvalHub) -> upload-guide-llm-results (S3)
+      13. register-model-and-results : UPDATE registry entry with benchmark
+          + EvalHub links and mark it PRODUCTION-READY.
+
+    PHASE 3 - Models-as-a-Service production deployment (optional):
+      14. deploy-maas : deploy the model via MaaS CRDs (LLMInferenceService,
+          MaaSModelRef, MaaSAuthPolicy, MaaSSubscription) in the llm
+          namespace, behind the MaaS Gateway with API-key auth and rate
+          limiting. Toggled by the deploy-maas param (default: false).
+  params:
+    # Model identification
+    - default: ibm-granite/granite-3.3-2b-instruct
+      description: Hugging Face model ID
+      name: model-id
+      type: string
+    - default: granite-2b
+      description: Model name identifier (registry identity across the whole pipeline)
+      name: model-name
+      type: string
+    - default: "v1"
+      description: Model Registry version name for this onboarding run
+      name: model-version
+      type: string
+    - default: ""
+      description: Who triggered this pipeline run (shown in the approval UI)
+      name: requested-by
+      type: string
+    # Namespaces
+    - default: "vllm"
+      description: Sandbox namespace for the compliance/deploy/garak (phase 1) stage
+      name: target-namespace
+      type: string
+    - default: "vllm-staging"
+      description: Staging (models-as-a-service) namespace for phase 2
+      name: staging-namespace
+      type: string
+    # Model access (RHOAI dashboard visibility via namespace RBAC)
+    - default: ""
+      description: >-
+        Comma-separated users and/or groups allowed to SEE the promoted model in
+        the OpenShift AI dashboard. Prefix an entry with 'group:' for an
+        OpenShift Group; otherwise it is a User. Empty = default visibility
+        (cluster-admins / existing project members only).
+      name: authorized-viewers
+      type: string
+    - default: "view"
+      description: ClusterRole bound for each authorized viewer (view = read-only).
+      name: access-role
+      type: string
+    # Compliance / artifact scan (phase 1, gate 1)
+    - default: "redhat-ai-services/modelcar-catalog"
+      description: Quay repo (org/name) holding the prebuilt modelcar OCI images
+      name: modelcar-repo
+      type: string
+    - default: ""
+      description: >-
+        Optional explicit modelcar OCI image ref (e.g.
+        quay.io/redhat-ai-services/modelcar-catalog:llama-3.2-1b-instruct).
+        When set, both the compliance scan and the deploy tasks use it verbatim
+        and skip the model-id -> modelcar-repo:tag derivation.
+      name: modelcar-image
+      type: string
+    - default: "registry.access.redhat.com/ubi9/python-311:latest"
+      description: >-
+        Image scanned by Trivy for the artifact security scan. For a real
+        onboarding set this to the serving-runtime image (needs a pull secret).
+      name: artifact-scan-image
+      type: string
+    - default: "critical"
+      description: "Artifact CVE gate: none | critical | high"
+      name: artifact-cve-threshold
+      type: string
+    - default: "true"
+      description: Only count vulnerabilities with an available fix toward the gate
+      name: ignore-unfixed
+      type: string
+    - default: "amd64,x86_64"
+      description: CPU architectures permitted by compliance policy
+      name: allowed-architectures
+      type: string
+    # Model Registry (in-cluster REST service)
+    - default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      description: OpenShift AI Model Registry REST base URL (in-cluster service)
+      name: mr-server
+      type: string
+    - default: "8080"
+      description: Model Registry REST port
+      name: mr-port
+      type: string
+    - default: "ModelOps Platform Team"
+      name: model-reg-author
+      type: string
+    # Scan-result S3 (MinIO) - used by compliance-artifact-scan + security-scan
+    - default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+      description: S3 endpoint for compliance/artifact + garak scan reports
+      name: scan-s3-endpoint
+      type: string
+    - default: "minio"
+      name: scan-s3-access-key-id
+      type: string
+    - default: "minio123"
+      name: scan-s3-secret-access-key
+      type: string
+    - default: "compliance-artifact-results"
+      description: S3 bucket for compliance + artifact scan reports
+      name: compliance-s3-bucket
+      type: string
+    - default: "security-scan-results"
+      description: S3 bucket for garak security-scan reports
+      name: security-s3-bucket
+      type: string
+    - default: ""
+      description: >-
+        Optional external S3 browser UI base URL. When set, registry report
+        links point at the UI; otherwise raw s3:// paths are recorded.
+      name: s3-ui-route
+      type: string
+    # Gate 1 (phase 2) - GPU advisor
+    - default: "32768"
+      description: Context length for model
+      name: context-length
+      type: string
+    - default: "4"
+      description: Concurrency (number of sequences)
+      name: concurrency
+      type: string
+    - default: "true"
+      description: Allow time-slicing if GPUs insufficient
+      name: allow-time-slicing
+      type: string
+    - default: "false"
+      description: Allow MIG (Multi-Instance GPU)
+      name: allow-mig
+      type: string
+    - default: "dedicated"
+      description: GPU isolation policy (dedicated, shared)
+      name: gpu-isolation-policy
+      type: string
+    - default: "nvidia-gpu-operator"
+      description: Namespace of the NVIDIA GPU Operator (for the time-slicing ConfigMap)
+      name: gpu-operator-namespace
+      type: string
+    - default: "gpu-cluster-policy"
+      description: NVIDIA ClusterPolicy CR name to patch when enabling time-slicing
+      name: clusterpolicy-name
+      type: string
+    - default: "modelops-time-slicing"
+      description: Name of the time-slicing device-plugin ConfigMap the advisor generates
+      name: time-slicing-configmap
+      type: string
+    - default: "8"
+      description: Upper bound on time-slicing replicas the advisor will recommend per GPU
+      name: max-time-slices
+      type: string
+    - default: ""
+      description: >-
+        Optional URL of an external GPU Deployment Advisor agentic endpoint
+        (e.g. a RunPod endpoint). Empty = use the built-in local heuristic.
+      name: advisor-endpoint
+      type: string
+    - default: "gpu-advisor-credentials"
+      description: Secret (in this namespace) with an "api-key" key for advisor-endpoint
+      name: advisor-secret-name
+      type: string
+    - default: "300"
+      description: HTTP timeout (seconds) when calling advisor-endpoint
+      name: advisor-timeout-seconds
+      type: string
+    # Gate 2 (phase 2) - Human approval
+    - default: ""
+      description: >-
+        Base URL of the model-intake app, e.g.
+        http://model-intake.vllm.svc.cluster.local:8080. Empty = auto-approve.
+      name: approval-api-url
+      type: string
+    - default: "15"
+      description: Seconds between approval status polls
+      name: approval-poll-interval-seconds
+      type: string
+    - default: "3600"
+      description: Max seconds to wait for human approval before failing
+      name: approval-timeout-seconds
+      type: string
+    # Deploy
+    - default: "granite-2b"
+      description: Helm release name (and InferenceService name) for the deployment
+      name: release-name
+      type: string
+    - default: "https://redhat-ai-services.github.io/helm-charts/"
+      description: Helm chart repo URL
+      name: chart-url
+      type: string
+    - default: "0.7.1"
+      description: vllm-kserve Helm chart version
+      name: chart-version
+      type: string
+    - default: ""
+      description: Optional full Helm values override (skips gpu-advisor-derived sizing)
+      name: values-content
+      type: string
+    - default: ""
+      description: Optional manual GPU-count override for deploy-model
+      name: gpu-count-override
+      type: string
+    - default: "gpu-profile"
+      description: Name of a pre-registered OpenShift AI HardwareProfile CR providing GPU sizing
+      name: hardware-profile-name
+      type: string
+    - default: "redhat-ods-applications"
+      description: Namespace of the HardwareProfile CR named above.
+      name: hardware-profile-namespace
+      type: string
+    # Gate 3 (phase 1) - Security scan (garak via EvalHub)
+    - default: "block"
+      description: Max tolerated garak attack-success rate before BLOCK (block, high, medium, low)
+      name: severity-threshold
+      type: string
+    - default: "evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com"
+      description: EvalHub base URL (host only, no protocol prefix)
+      name: evalhub-url
+      type: string
+    - default: ""
+      description: Bearer token for EvalHub API (OpenShift OAuth token)
+      name: evalhub-token
+      type: string
+    - default: ""
+      description: Tenant namespace for EvalHub (must have evalhub.trustyai.opendatahub.io/tenant label)
+      name: tenant-ns
+      type: string
+    - default: "rh-ai.apps.ocp.h64s4.sandbox324.opentlc.com"
+      description: OpenShift AI console apps domain for EvalHub result links
+      name: openshift-console-domain
+      type: string
+    # Benchmark (GuideLLM via EvalHub)
+    - default: "constant"
+      description: GuideLLM benchmark profile (constant, sweep, throughput)
+      name: guidellm-profile
+      type: string
+    - default: "4.0"
+      description: GuideLLM request rate (requests per second)
+      name: guidellm-rate
+      type: string
+    - default: "15"
+      description: GuideLLM max benchmark duration in seconds
+      name: guidellm-max-seconds
+      type: string
+    - default: "2"
+      description: GuideLLM max benchmark requests
+      name: guidellm-max-requests
+      type: string
+    - default: "False"
+      description: Use custom benchmark data for GuideLLM
+      name: custom-data
+      type: string
+    - default: "no-file"
+      description: Name of the custom prompt file
+      name: custom-filename
+      type: string
+    # Benchmark/eval upload S3 (existing plumbing)
+    - default: "http://s3.openshift-storage.svc.cluster.local:80"
+      description: S3 endpoint for benchmark/eval result uploads
+      name: s3-api-endpoint
+      type: string
+    - name: s3-access-key-id
+      type: string
+      description: S3 access key ID (benchmark/eval uploads)
+    - name: s3-secret-access-key
+      type: string
+      description: S3 secret access key (benchmark/eval uploads)
+    # lm-eval
+    - default: "mmlu-jurisprudence-eval-job"
+      name: lm-eval-job-name
+      type: string
+    - default: "False"
+      name: lm-eval-custom
+      type: string
+    # MaaS (Models-as-a-Service) final deployment
+    - default: "llm"
+      description: Namespace for LLMInferenceService + MaaSModelRef
+      name: maas-serving-ns
+      type: string
+    - default: "models-as-a-service"
+      description: Namespace for MaaSAuthPolicy + MaaSSubscription
+      name: maas-policy-ns
+      type: string
+    - default: "false"
+      description: Set to "true" to deploy the model via MaaS as a final production step
+      name: deploy-maas
+      type: string
+    - default: "1"
+      description: Number of GPUs for the MaaS LLMInferenceService
+      name: maas-gpu-count
+      type: string
+    - default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+      description: Runtime container image for the MaaS LLMInferenceService
+      name: maas-runtime-image
+      type: string
+    - default: "system:authenticated"
+      description: >-
+        OpenShift Group authorized to access the production MaaS deployment
+        (used in MaaSAuthPolicy + MaaSSubscription). Leave as
+        "system:authenticated" to allow all users, or specify a group like
+        "ml-team" to restrict access.
+      name: maas-authorized-group
+      type: string
+    - default: ""
+      description: HuggingFace API token for gated models (required by lm-eval)
+      name: huggingface-token
+      type: string
+  tasks:
+    # ================================================================
+    # PHASE 1 - SANDBOX GOVERNANCE
+    # ================================================================
+
+    # --- GATE 1: Compliance + artifact security scan (runs FIRST, pre-deploy) ---
+    - name: compliance-artifact-scan
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: modelcar-repo
+          value: $(params.modelcar-repo)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: artifact-scan-image
+          value: $(params.artifact-scan-image)
+        - name: artifact-cve-threshold
+          value: $(params.artifact-cve-threshold)
+        - name: ignore-unfixed
+          value: $(params.ignore-unfixed)
+        - name: allowed-architectures
+          value: $(params.allowed-architectures)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: $(params.compliance-s3-bucket)
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+      taskRef:
+        kind: Task
+        name: compliance-artifact-scan
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # ==== PHASE 1 (sandbox cluster = vllm) GPU planning - automated ====
+    # Assess the SANDBOX "cluster" (a namespace here) for GPU capacity. Runs
+    # right after the compliance/artifact scan (needs no GPU). Recommends
+    # time-slicing ONLY if the sandbox GPU is already occupied by another
+    # model; otherwise a dedicated deploy. No human approval in the sandbox -
+    # the whole sandbox scan phase is automated.
+    - name: gpu-advisor-sandbox
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: plan-id
+          value: $(context.pipelineRun.name)-sandbox
+        - name: environment
+          value: "sandbox (cluster 1)"
+        - name: target-namespace
+          value: $(params.target-namespace)
+        - name: context-length
+          value: $(params.context-length)
+        - name: concurrency
+          value: $(params.concurrency)
+        - name: allow-time-slicing
+          value: $(params.allow-time-slicing)
+        - name: allow-mig
+          value: $(params.allow-mig)
+        - name: gpu-isolation-policy
+          value: $(params.gpu-isolation-policy)
+        - name: gpu-operator-namespace
+          value: $(params.gpu-operator-namespace)
+        - name: clusterpolicy-name
+          value: $(params.clusterpolicy-name)
+        - name: time-slicing-configmap
+          value: $(params.time-slicing-configmap)
+        - name: max-time-slices
+          value: $(params.max-time-slices)
+        - name: advisor-endpoint
+          value: $(params.advisor-endpoint)
+        - name: advisor-secret-name
+          value: $(params.advisor-secret-name)
+        - name: advisor-timeout-seconds
+          value: $(params.advisor-timeout-seconds)
+      runAfter:
+        - compliance-artifact-scan
+      taskRef:
+        kind: Task
+        name: gpu-advisor
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: apply-gpu-sharing-sandbox
+      runAfter:
+        - gpu-advisor-sandbox
+      taskRef:
+        kind: Task
+        name: apply-gpu-sharing
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- DEPLOY (sandbox) so the model can be scanned live by garak ---
+    - name: deploy-model
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+        - name: chartUrl
+          value: $(params.chart-url)
+        - name: chartVersion
+          value: $(params.chart-version)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: valuesContent
+          value: $(params.values-content)
+        - name: gpu-count-override
+          value: $(params.gpu-count-override)
+        - name: hardwareProfileName
+          value: $(params.hardware-profile-name)
+        - name: hardwareProfileNamespace
+          value: $(params.hardware-profile-namespace)
+      runAfter:
+        - apply-gpu-sharing-sandbox
+      taskRef:
+        kind: Task
+        name: deploy-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- GATE 3: Live security scan (garak via EvalHub); updates the registry entry ---
+    - name: security-scan
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: evalhub-url
+          value: $(params.evalhub-url)
+        - name: evalhub-token
+          value: $(params.evalhub-token)
+        - name: tenant-ns
+          value: $(params.target-namespace)
+        - name: severity-threshold
+          value: $(params.severity-threshold)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: $(params.security-s3-bucket)
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+      runAfter:
+        - deploy-model
+      taskRef:
+        kind: Task
+        name: security-scan
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # ================================================================
+    # PHASE 2 - PROMOTE TO STAGING (reached only if phase 1 fully passed)
+    # ================================================================
+
+    # --- Free the single GPU from the sandbox deployment ---
+    - name: teardown-model
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+      runAfter:
+        - security-scan
+      taskRef:
+        kind: Task
+        name: teardown-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # ==== PHASE 2 (staging cluster = vllm-staging) GPU planning - human-gated ====
+    # After the model clears the sandbox scans and its sandbox deployment is
+    # torn down, assess the STAGING "cluster" (a separate namespace here) for
+    # GPU capacity, recommend time-slicing if the staging GPU is already
+    # occupied, get HUMAN APPROVAL, then apply any sharing before promoting.
+    - name: gpu-advisor-staging
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: plan-id
+          value: $(context.pipelineRun.name)
+        - name: environment
+          value: "staging (cluster 2)"
+        - name: target-namespace
+          value: $(params.staging-namespace)
+        - name: context-length
+          value: $(params.context-length)
+        - name: concurrency
+          value: $(params.concurrency)
+        - name: allow-time-slicing
+          value: $(params.allow-time-slicing)
+        - name: allow-mig
+          value: $(params.allow-mig)
+        - name: gpu-isolation-policy
+          value: $(params.gpu-isolation-policy)
+        - name: gpu-operator-namespace
+          value: $(params.gpu-operator-namespace)
+        - name: clusterpolicy-name
+          value: $(params.clusterpolicy-name)
+        - name: time-slicing-configmap
+          value: $(params.time-slicing-configmap)
+        - name: max-time-slices
+          value: $(params.max-time-slices)
+        - name: advisor-endpoint
+          value: $(params.advisor-endpoint)
+        - name: advisor-secret-name
+          value: $(params.advisor-secret-name)
+        - name: advisor-timeout-seconds
+          value: $(params.advisor-timeout-seconds)
+      runAfter:
+        - teardown-model
+      taskRef:
+        kind: Task
+        name: gpu-advisor
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- Human approval of the staging deployment plan (incl. any time-slicing) ---
+    - name: wait-for-approval
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: model-name
+          value: $(params.model-name)
+        - name: target-namespace
+          value: $(params.staging-namespace)
+        - name: plan-id
+          value: $(context.pipelineRun.name)
+        - name: requested-by
+          value: $(params.requested-by)
+        - name: approval-api-url
+          value: $(params.approval-api-url)
+        - name: poll-interval-seconds
+          value: $(params.approval-poll-interval-seconds)
+        - name: timeout-seconds
+          value: $(params.approval-timeout-seconds)
+      runAfter:
+        - gpu-advisor-staging
+      taskRef:
+        kind: Task
+        name: wait-for-approval
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- Apply the STAGING GPU-sharing plan (time-slicing + co-resident
+    # redeploy). No-op when the staging GPU has a free dedicated slot. ---
+    - name: apply-gpu-sharing-staging
+      runAfter:
+        - wait-for-approval
+      taskRef:
+        kind: Task
+        name: apply-gpu-sharing
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- DEPLOY (staging / models-as-a-service) ---
+    - name: deploy-model-staging
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.staging-namespace)
+        - name: chartUrl
+          value: $(params.chart-url)
+        - name: chartVersion
+          value: $(params.chart-version)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: valuesContent
+          value: $(params.values-content)
+        - name: gpu-count-override
+          value: $(params.gpu-count-override)
+        - name: hardwareProfileName
+          value: $(params.hardware-profile-name)
+        - name: hardwareProfileNamespace
+          value: $(params.hardware-profile-namespace)
+      runAfter:
+        - apply-gpu-sharing-staging
+      taskRef:
+        kind: Task
+        name: deploy-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # --- Grant selected users/groups visibility of the staging model ---
+    # (RHOAI dashboard visibility via namespace RBAC). Runs in parallel with the
+    # benchmark; both depend only on the staging deployment existing.
+    - name: grant-model-access
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.staging-namespace)
+        - name: authorized-viewers
+          value: $(params.authorized-viewers)
+        - name: access-role
+          value: $(params.access-role)
+      runAfter:
+        - deploy-model-staging
+      taskRef:
+        kind: Task
+        name: grant-model-access
+
+    # --- Benchmark (GuideLLM via EvalHub) against the staging endpoint ---
+    - name: benchmark
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.staging-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: evalhub-url
+          value: $(params.evalhub-url)
+        - name: evalhub-token
+          value: $(params.evalhub-token)
+        - name: tenant-ns
+          value: $(params.staging-namespace)
+        - name: guidellm-profile
+          value: $(params.guidellm-profile)
+        - name: guidellm-rate
+          value: $(params.guidellm-rate)
+        - name: guidellm-max-seconds
+          value: $(params.guidellm-max-seconds)
+        - name: guidellm-max-requests
+          value: $(params.guidellm-max-requests)
+      runAfter:
+        - deploy-model-staging
+      taskRef:
+        kind: Task
+        name: guidellm-benchmark
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    - name: upload-guide-llm-results
+      params:
+        - name: s3-api-endpoint
+          value: $(params.s3-api-endpoint)
+        - name: s3-access-key-id
+          value: $(params.s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.s3-secret-access-key)
+      runAfter:
+        - benchmark
+      taskRef:
+        kind: Task
+        name: upload-guidellm-benchmark-results
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+    # --- lm-eval + upload-lm-eval-results are intentionally DISABLED for the
+    # model-onboarding pipeline. Scientific/quality evaluation (lm-eval-harness)
+    # is left to the AI engineers / application teams that consume the model
+    # AFTER onboarding, not to the platform onboarding flow. To re-enable,
+    # uncomment both tasks below and change register-model-and-results'
+    # runAfter back to [upload-lm-eval-results].
+    #
+    # - name: lm-eval
+    #   params:
+    #     - name: lm-eval-job-name
+    #       value: $(params.lm-eval-job-name)
+    #     - name: lm-eval-custom
+    #       value: $(params.lm-eval-custom)
+    #   runAfter:
+    #     - upload-guide-llm-results
+    #   taskRef:
+    #     kind: Task
+    #     name: lm-eval
+    #   workspaces:
+    #     - name: shared-workspace
+    #       workspace: shared-workspace
+    #     - name: manifests
+    #       workspace: manifests
+    #     - name: custom-mmlu
+    #       workspace: custom-mmlu
+    # - name: upload-lm-eval-results
+    #   params:
+    #     - name: s3-api-endpoint
+    #       value: $(params.s3-api-endpoint)
+    #     - name: s3-access-key-id
+    #       value: $(params.s3-access-key-id)
+    #     - name: s3-secret-access-key
+    #       value: $(params.s3-secret-access-key)
+    #   runAfter:
+    #     - lm-eval
+    #   taskRef:
+    #     kind: Task
+    #     name: upload-lm-eval-results
+    #   workspaces:
+    #     - name: shared-workspace
+    #       workspace: shared-workspace
+
+    # --- FINAL: update the existing registry entry -> PRODUCTION-READY ---
+    - name: register-model-and-results
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: model-url
+          value: $(params.model-id)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: staging-namespace
+          value: $(params.staging-namespace)
+        - name: custom-data
+          value: $(params.custom-data)
+        - name: openshift-console-domain
+          value: $(params.openshift-console-domain)
+        - name: evalhub-garak-job-id
+          value: ""
+        - name: evalhub-guidellm-job-id
+          value: ""
+        - name: tenant-ns
+          value: $(params.staging-namespace)
+      runAfter:
+        - upload-guide-llm-results
+      taskRef:
+        kind: Task
+        name: model-registry
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    # ================================================================
+    # PHASE 3 - MODELS-AS-A-SERVICE PRODUCTION DEPLOYMENT (optional)
+    # Deploys the model via MaaS CRDs with API-key auth, rate limiting,
+    # and Gateway routing. Toggled by the deploy-maas pipeline param.
+    # ================================================================
+    - name: deploy-maas
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: maas-serving-ns
+          value: $(params.maas-serving-ns)
+        - name: maas-policy-ns
+          value: $(params.maas-policy-ns)
+        - name: gpu-count
+          value: $(params.maas-gpu-count)
+        - name: runtime-image
+          value: $(params.maas-runtime-image)
+        - name: authorized-group
+          value: $(params.maas-authorized-group)
+      runAfter:
+        - register-model-and-results
+      when:
+        - input: $(params.deploy-maas)
+          operator: in
+          values: ["true"]
+      taskRef:
+        kind: Task
+        name: deploy-maas
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+  workspaces:
+    - description: Shared workspace for storing benchmark results
+      name: shared-workspace
+    - description: Configmap with lm eval job
+      name: manifests
+    - description: Configmap with custom lm eval job
+      name: custom-mmlu

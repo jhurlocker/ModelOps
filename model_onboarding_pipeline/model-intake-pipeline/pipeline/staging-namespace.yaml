@@ -1,0 +1,46 @@
+# FILE: staging-namespace.yaml
+# Simulated "staging" / models-as-a-service environment for the demo. On a
+# single-cluster/single-GPU setup this is a separate namespace (not a separate
+# cluster) that the pipeline promotes a model into after it clears the
+# compliance/artifact scan and the live garak security scan. The sandbox
+# deployment in `vllm` is torn down first (teardown-model) so the one GPU is
+# free for the staging deployment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vllm-staging
+  labels:
+    kubernetes.io/metadata.name: vllm-staging
+    modelops.role: staging
+    # Surface this namespace as a Data Science Project in the OpenShift AI
+    # dashboard, so promoted models (and the per-user visibility RBAC created by
+    # grant-model-access) are shown/hidden there per user.
+    opendatahub.io/dashboard: "true"
+    evalhub.trustyai.opendatahub.io/tenant: ""
+    # Match the sandbox namespace's pod-security posture (KServe predictors
+    # run fine under the default restricted SCC).
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+---
+# Let the pipeline ServiceAccount (which lives in `vllm`) create/manage
+# ServingRuntimes, InferenceServices, Deployments, etc. in the staging
+# namespace via `oc`/`helm` from inside the pipeline pods.
+#
+# NOTE: this is `admin` (not `edit`) so the pipeline can ALSO manage
+# RoleBindings inside vllm-staging - that is what the grant-model-access task
+# uses to grant specific users/groups permission to see the deployed model in
+# the OpenShift AI dashboard. `admin` carries the `bind` verb, so it may bind
+# the view/edit ClusterRoles to those subjects without an escalation error.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-admin-staging
+  namespace: vllm-staging
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: ClusterRole
+  name: admin
+  apiGroup: rbac.authorization.k8s.io

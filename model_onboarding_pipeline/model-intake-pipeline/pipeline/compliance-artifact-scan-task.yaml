@@ -1,0 +1,622 @@
+# FILE: compliance-artifact-scan-task.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: compliance-artifact-scan
+  namespace: vllm
+spec:
+  description: |
+    FIRST gate in the onboarding pipeline. Simulates pulling a candidate LLM
+    into a sandbox and running governance checks on it BEFORE it is ever
+    deployed:
+
+      1. compliance scan  - skopeo-inspects the model's OCI "modelcar" artifact
+         (metadata only, no multi-GB layer pull) and evaluates a small set of
+         organizational policy checks (supported architecture/OS, provenance/
+         creation date, license + source labels).
+      2. artifact security scan - runs a real Trivy vulnerability scan against
+         the container image that will serve the model (the serving-runtime
+         image by default) and gates on fixable HIGH/CRITICAL CVEs.
+
+    Both reports are uploaded to S3, and the model is REGISTERED in the
+    OpenShift AI Model Registry with the scan results attached as metadata.
+    If either scan fails the model is STILL registered (marked FAILED, with
+    links to the S3 reports) and only THEN is the task failed - so the
+    pipeline halts before deploy, but there is a permanent, auditable record
+    in the registry of why the model was rejected.
+  params:
+    - name: model-id
+      type: string
+      description: "Hugging Face model ID (used to resolve the modelcar OCI artifact for the compliance inspect)."
+    - name: model-name
+      type: string
+      description: "Registered-model name; the identity this model keeps across the whole pipeline."
+    - name: model-version
+      type: string
+      default: "v1"
+      description: "Model Registry version name for this onboarding run."
+    - name: modelcar-repo
+      type: string
+      default: "redhat-ai-services/modelcar-catalog"
+      description: "Quay repo (org/name) holding the prebuilt modelcar OCI images."
+    - name: modelcar-image
+      type: string
+      default: ""
+      description: >-
+        Optional explicit modelcar OCI image reference (e.g.
+        'quay.io/redhat-ai-services/modelcar-catalog:llama-3.2-1b-instruct',
+        with or without an 'oci://'/'docker://' scheme). When set, it is used
+        verbatim and the model-id -> modelcar-repo:tag derivation is skipped.
+    - name: artifact-scan-image
+      type: string
+      default: "registry.access.redhat.com/ubi9/python-311:latest"
+      description: >-
+        Container image scanned by Trivy for the artifact security scan. Defaults
+        to a fast, publicly-pullable image for demos. For a real onboarding, set
+        this to the serving-runtime image the model will actually run in
+        (e.g. registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.2.4) - note that image
+        requires a registry pull secret on the node.
+    - name: artifact-cve-threshold
+      type: string
+      default: "critical"
+      description: >-
+        Artifact-scan gate. 'critical' blocks only when fixable CRITICAL CVEs are
+        found; 'high' blocks on fixable HIGH or CRITICAL; 'none' never blocks on
+        CVEs (report only).
+    - name: ignore-unfixed
+      type: string
+      default: "true"
+      description: "When true, only vulnerabilities with an available fix are counted toward the gate."
+    - name: allowed-architectures
+      type: string
+      default: "amd64,x86_64"
+      description: "Comma-separated CPU architectures permitted by compliance policy."
+    - name: mr-server
+      type: string
+      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      description: "OpenShift AI Model Registry REST base URL (in-cluster service)."
+    - name: mr-port
+      type: string
+      default: "8080"
+      description: "Model Registry REST port."
+    - name: model-reg-author
+      type: string
+      default: "ModelOps Platform Team"
+      description: "Author recorded on the Model Registry entry."
+    - name: s3-api-endpoint
+      type: string
+      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - name: s3-access-key-id
+      type: string
+      default: "minio"
+    - name: s3-secret-access-key
+      type: string
+      default: "minio123"
+    - name: s3-bucket
+      type: string
+      default: "compliance-artifact-results"
+      description: "S3 bucket for compliance + artifact scan reports (created if absent)."
+    - name: s3-ui-route
+      type: string
+      default: ""
+      description: >-
+        Optional external S3 browser UI base URL. When set, registry links point
+        at the UI; otherwise raw s3:// paths are recorded.
+  results:
+    - name: passed
+      description: "true if BOTH compliance and artifact scans passed."
+    - name: summary
+      description: "One-line human-readable verdict."
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace / sandbox for scan artifacts.
+  steps:
+    # ----------------------------------------------------------------------
+    # STEP 1: compliance scan - skopeo-inspect the model's OCI artifact into
+    # the sandbox (metadata only, fast). Resolve model-id -> modelcar tag the
+    # same way deploy-model does, so we inspect the exact artifact that will
+    # be deployed.
+    # ----------------------------------------------------------------------
+    - name: compliance-inspect
+      image: quay.io/skopeo/stable:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODELCAR_REPO
+          value: $(params.modelcar-repo)
+        - name: MODELCAR_IMAGE
+          value: $(params.modelcar-image)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        SANDBOX="$(pwd)/compliance-artifact-sandbox"
+        mkdir -p "$SANDBOX"
+        chmod 777 "$(pwd)" 2>/dev/null || true
+        chmod 777 "$SANDBOX" 2>/dev/null || true
+        echo "--- Compliance scan: pulling model artifact metadata into sandbox ---"
+        echo "Sandbox: $SANDBOX"
+
+        REF=""
+        if [ -n "${MODELCAR_IMAGE:-}" ]; then
+          # Explicit override: use it verbatim (strip any scheme prefix).
+          BARE="$(echo "$MODELCAR_IMAGE" | sed -E 's#^(oci|docker)://##')"
+          CANDIDATE="docker://${BARE}"
+          echo "  Using explicit modelcar-image override: $CANDIDATE"
+          if skopeo inspect --no-tags "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
+            REF="$BARE"
+          fi
+        else
+          SHORT_TAG="$(echo "${MODEL_ID##*/}" | tr '[:upper:]' '[:lower:]')"
+          ORG_TAG="$(echo "$MODEL_ID" | tr '[:upper:]' '[:lower:]' | sed 's#/#--#g')"
+
+          for TAG in "$SHORT_TAG" "$ORG_TAG"; do
+            CANDIDATE="docker://quay.io/${MODELCAR_REPO}:${TAG}"
+            echo "  Trying modelcar artifact: $CANDIDATE"
+            if skopeo inspect --no-tags "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
+              REF="quay.io/${MODELCAR_REPO}:${TAG}"
+              break
+            fi
+          done
+        fi
+
+        if [ -z "$REF" ]; then
+          echo "WARN: could not inspect a modelcar artifact for '$MODEL_ID' (tried '$SHORT_TAG' and '$ORG_TAG')."
+          cat /tmp/skopeo.err || true
+          # Record the failure to inspect as an empty inspect; the evaluate step
+          # will treat a missing/empty artifact as a compliance FAIL.
+          echo "{}" > "$SANDBOX/modelcar-inspect.json"
+          echo "" > "$SANDBOX/modelcar-ref.txt"
+        else
+          echo "  Resolved modelcar artifact: $REF"
+          echo "oci://$REF" > "$SANDBOX/modelcar-ref.txt"
+          echo "--- Artifact metadata (skopeo inspect) ---"
+          head -c 600 "$SANDBOX/modelcar-inspect.json"; echo
+        fi
+
+    # ----------------------------------------------------------------------
+    # STEP 2: artifact security scan - real Trivy CVE scan of the serving
+    # image. Writes trivy-report.json into the sandbox for the evaluate step.
+    # ----------------------------------------------------------------------
+    - name: artifact-scan
+      image: ghcr.io/aquasecurity/trivy:0.72.0
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: HOME
+          value: /tmp
+        - name: TRIVY_CACHE_DIR
+          value: /tmp/trivycache
+        - name: XDG_CACHE_HOME
+          value: /tmp
+        - name: SCAN_IMAGE
+          value: $(params.artifact-scan-image)
+        - name: IGNORE_UNFIXED
+          value: $(params.ignore-unfixed)
+      script: |
+        #!/bin/sh
+        set -eu
+        SANDBOX="$(pwd)/compliance-artifact-sandbox"
+        mkdir -p "$SANDBOX"
+        chmod 777 "$SANDBOX" 2>/dev/null || true
+        echo "--- Artifact security scan (Trivy) ---"
+        echo "Scanning image: $SCAN_IMAGE"
+
+        UNFIXED_FLAG=""
+        if [ "$IGNORE_UNFIXED" = "true" ]; then
+          UNFIXED_FLAG="--ignore-unfixed"
+        fi
+
+        # Non-fatal: a scan/pull error must not skip registration. Record an
+        # empty report on failure; the evaluate step marks artifact-scan FAILED.
+        if trivy image --quiet --scanners vuln \
+             --severity LOW,MEDIUM,HIGH,CRITICAL $UNFIXED_FLAG \
+             --format json -o "$SANDBOX/trivy-report.json" \
+             "$SCAN_IMAGE"; then
+          echo "Trivy scan complete."
+        else
+          echo "WARN: Trivy scan failed (image pull/auth/db error). Recording empty report."
+          echo '{"Results":[],"_scan_error":true}' > "$SANDBOX/trivy-report.json"
+        fi
+
+    # ----------------------------------------------------------------------
+    # STEP 3: evaluate policy, upload reports to S3, REGISTER the model in the
+    # OpenShift AI Model Registry (even on failure), then gate the pipeline.
+    # ----------------------------------------------------------------------
+    - name: evaluate-register-gate
+      image: registry.access.redhat.com/ubi9/python-311
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_VERSION
+          value: $(params.model-version)
+        - name: ARTIFACT_SCAN_IMAGE
+          value: $(params.artifact-scan-image)
+        - name: CVE_THRESHOLD
+          value: $(params.artifact-cve-threshold)
+        - name: ALLOWED_ARCHES
+          value: $(params.allowed-architectures)
+        - name: MR_SERVER
+          value: $(params.mr-server)
+        - name: MR_PORT
+          value: $(params.mr-port)
+        - name: MR_AUTHOR
+          value: $(params.model-reg-author)
+        - name: S3_ENDPOINT_URL
+          value: $(params.s3-api-endpoint)
+        - name: S3_ACCESS_KEY_ID
+          value: $(params.s3-access-key-id)
+        - name: S3_SECRET_ACCESS_KEY
+          value: $(params.s3-secret-access-key)
+        - name: S3_BUCKET
+          value: $(params.s3-bucket)
+        - name: S3_UI_ROUTE
+          value: $(params.s3-ui-route)
+        - name: WORKSPACE_PATH
+          value: $(workspaces.shared-workspace.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        chmod 777 "$(pwd)" 2>/dev/null || true
+        chmod 777 compliance-artifact-sandbox 2>/dev/null || true
+        pip install -q boto3 model-registry 2>&1 | grep -v "already satisfied" || true
+
+        TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+        export TIMESTAMP
+        PREFIX="${TIMESTAMP}_compliance_artifact"
+        export S3_PREFIX="$PREFIX"
+
+        # --- Evaluate compliance + artifact policy, write status + summary. ---
+        cat > /tmp/evaluate.py << 'PYEOF'
+        import json
+        import os
+
+        ws = os.environ["WORKSPACE_PATH"]
+        sandbox = os.path.join(ws, "compliance-artifact-sandbox")
+        allowed_arches = {a.strip().lower() for a in os.environ.get("ALLOWED_ARCHES", "").split(",") if a.strip()}
+        cve_threshold = os.environ.get("CVE_THRESHOLD", "critical").strip().lower()
+
+        def load(path, default):
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception:
+                return default
+
+        inspect = load(os.path.join(sandbox, "modelcar-inspect.json"), {})
+        trivy = load(os.path.join(sandbox, "trivy-report.json"), {"Results": []})
+        try:
+            with open(os.path.join(sandbox, "modelcar-ref.txt")) as f:
+                modelcar_ref = f.read().strip()
+        except Exception:
+            modelcar_ref = ""
+
+        # ---------- Compliance checks (on the modelcar artifact metadata) ----------
+        checks = []   # (name, ok, required, detail)
+        labels = inspect.get("Labels") or {}
+        arch = str(inspect.get("Architecture", "")).lower()
+        os_name = str(inspect.get("Os", "")).lower()
+
+        artifact_resolved = bool(modelcar_ref) and bool(inspect)
+        checks.append(("artifact-resolvable", artifact_resolved, True,
+                       modelcar_ref or "no modelcar OCI artifact found for model-id"))
+        checks.append(("architecture-allowed",
+                       (arch in allowed_arches) if arch else False, True,
+                       "architecture={} allowed={}".format(arch or "?", sorted(allowed_arches))))
+        checks.append(("os-linux", (os_name == "linux") if os_name else False, False,
+                       "os={}".format(os_name or "?")))
+        has_created = bool(inspect.get("Created"))
+        checks.append(("provenance-created-date", has_created, False,
+                       "created={}".format(inspect.get("Created", "?"))))
+        license_val = labels.get("license") or labels.get("org.opencontainers.image.licenses")
+        checks.append(("license-label-present", bool(license_val), False,
+                       "license={}".format(license_val or "<none>")))
+        source_val = labels.get("org.opencontainers.image.source") or labels.get("io.openshift.build.source-location")
+        checks.append(("source-provenance-label", bool(source_val), False,
+                       "source={}".format(source_val or "<none>")))
+
+        compliance_required_failed = [c for c in checks if c[2] and not c[1]]
+        compliance_passed = len(compliance_required_failed) == 0
+
+        # ---------- Artifact CVE gate (Trivy) ----------
+        sev_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
+        for r in trivy.get("Results", []) or []:
+            for v in (r.get("Vulnerabilities") or []):
+                s = v.get("Severity", "UNKNOWN").upper()
+                if s in sev_counts:
+                    sev_counts[s] += 1
+        scan_errored = bool(trivy.get("_scan_error"))
+
+        if scan_errored:
+            artifact_passed = False
+            cve_reason = "trivy scan could not run (image pull/auth/db error)"
+        elif cve_threshold == "none":
+            artifact_passed = True
+            cve_reason = "CVE gate disabled (threshold=none)"
+        elif cve_threshold == "high":
+            artifact_passed = (sev_counts["HIGH"] + sev_counts["CRITICAL"]) == 0
+            cve_reason = "HIGH={} CRITICAL={} (gate=high)".format(sev_counts["HIGH"], sev_counts["CRITICAL"])
+        else:  # critical
+            artifact_passed = sev_counts["CRITICAL"] == 0
+            cve_reason = "CRITICAL={} (gate=critical)".format(sev_counts["CRITICAL"])
+
+        overall_passed = compliance_passed and artifact_passed
+
+        # ---------- Human-readable summary ----------
+        lines = []
+        verdict = "PASSED" if overall_passed else "FAILED"
+        lines.append("COMPLIANCE & ARTIFACT SCAN: {}".format(verdict))
+        lines.append("Model: {}  artifact: {}".format(os.environ.get("MODEL_NAME"), modelcar_ref or "<unresolved>"))
+        lines.append("")
+        lines.append("Compliance policy checks:")
+        for name, ok, required, detail in checks:
+            tag = "PASS" if ok else ("FAIL" if required else "WARN")
+            req = " (required)" if required else ""
+            lines.append("  [{}] {}{} - {}".format(tag, name, req, detail))
+        lines.append("Compliance verdict: {}".format("PASSED" if compliance_passed else "FAILED"))
+        lines.append("")
+        lines.append("Artifact security scan (Trivy) image: {}".format(os.environ.get("ARTIFACT_SCAN_IMAGE")))
+        lines.append("  CVE counts: CRITICAL={CRITICAL} HIGH={HIGH} MEDIUM={MEDIUM} LOW={LOW}".format(**sev_counts))
+        lines.append("  Gate: {}".format(cve_reason))
+        lines.append("Artifact verdict: {}".format("PASSED" if artifact_passed else "FAILED"))
+
+        summary = "\n".join(lines)
+        with open(os.path.join(ws, "compliance-artifact-summary.txt"), "w") as f:
+            f.write(summary + "\n")
+        with open(os.path.join(ws, "compliance-artifact-passed.txt"), "w") as f:
+            f.write("true" if overall_passed else "false")
+
+        machine = {
+            "timestamp": os.environ.get("TIMESTAMP"),
+            "model_name": os.environ.get("MODEL_NAME"),
+            "model_id": os.environ.get("MODEL_ID"),
+            "modelcar_ref": modelcar_ref,
+            "compliance_passed": compliance_passed,
+            "compliance_checks": [
+                {"name": n, "ok": ok, "required": req, "detail": d} for (n, ok, req, d) in checks
+            ],
+            "artifact_scan_image": os.environ.get("ARTIFACT_SCAN_IMAGE"),
+            "artifact_passed": artifact_passed,
+            "cve_counts": sev_counts,
+            "cve_gate": cve_reason,
+            "overall_passed": overall_passed,
+        }
+        with open(os.path.join(sandbox, "compliance-artifact-summary.json"), "w") as f:
+            json.dump(machine, f, indent=2)
+
+        # Expose values to the shell for the registry step (via a sourced file).
+        with open("/tmp/scan_env.sh", "w") as f:
+            f.write("COMPLIANCE_STATUS={}\n".format("PASSED" if compliance_passed else "FAILED"))
+            f.write("ARTIFACT_STATUS={}\n".format("PASSED" if artifact_passed else "FAILED"))
+            f.write("OVERALL_PASSED={}\n".format("true" if overall_passed else "false"))
+            f.write("CVE_CRITICAL={}\n".format(sev_counts["CRITICAL"]))
+            f.write("CVE_HIGH={}\n".format(sev_counts["HIGH"]))
+            f.write("MODELCAR_REF={}\n".format(modelcar_ref))
+
+        print(summary)
+        PYEOF
+        python3 /tmp/evaluate.py
+        # Auto-export everything sourced so downstream python subprocesses see it.
+        set -a
+        # shellcheck disable=SC1091
+        source /tmp/scan_env.sh
+        set +a
+
+        # --- Upload the sandbox reports + summary to S3 (always). ---
+        echo ""
+        echo "--- Uploading compliance + artifact reports to S3 (bucket: $S3_BUCKET) ---"
+        cat > /tmp/upload.py << 'PYEOF'
+        import glob
+        import os
+        import sys
+        try:
+            import boto3
+            from botocore.client import Config
+        except Exception as e:
+            print("WARN: boto3 unavailable, skipping S3 upload: {}".format(e))
+            sys.exit(0)
+
+        ws = os.environ["WORKSPACE_PATH"]
+        sandbox = os.path.join(ws, "compliance-artifact-sandbox")
+        bucket = os.environ["S3_BUCKET"]
+        prefix = os.environ["S3_PREFIX"]
+        try:
+            s3 = boto3.client(
+                "s3", endpoint_url=os.environ["S3_ENDPOINT_URL"],
+                aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+                config=Config(s3={"addressing_style": "path"}),
+            )
+            existing = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
+            if bucket not in existing:
+                s3.create_bucket(Bucket=bucket)
+                print("Created bucket '{}'.".format(bucket))
+        except Exception as e:
+            print("WARN: could not init S3/bucket, skipping upload: {}".format(e))
+            sys.exit(0)
+
+        files = [p for p in glob.glob(os.path.join(sandbox, "*")) if os.path.isfile(p)]
+        p = os.path.join(ws, "compliance-artifact-summary.txt")
+        if os.path.isfile(p):
+            files.append(p)
+        for path in files:
+            key = "{}/{}".format(prefix, os.path.basename(path))
+            try:
+                s3.upload_file(path, bucket, key)
+                print("  uploaded s3://{}/{}".format(bucket, key))
+            except Exception as e:
+                print("  WARN: failed to upload {}: {}".format(path, e))
+        PYEOF
+        python3 /tmp/upload.py || echo "WARN: S3 upload errored (non-fatal)."
+
+        # --- Compose registry links to the S3 reports. ---
+        if [ -n "${S3_UI_ROUTE}" ]; then
+          COMPLIANCE_LINK="${S3_UI_ROUTE%/}/download/${S3_BUCKET}/${S3_PREFIX}/compliance-artifact-summary.txt"
+          TRIVY_LINK="${S3_UI_ROUTE%/}/download/${S3_BUCKET}/${S3_PREFIX}/trivy-report.json"
+        else
+          COMPLIANCE_LINK="s3://${S3_BUCKET}/${S3_PREFIX}/compliance-artifact-summary.txt"
+          TRIVY_LINK="s3://${S3_BUCKET}/${S3_PREFIX}/trivy-report.json"
+        fi
+
+        if [ "$OVERALL_PASSED" = "true" ]; then
+          OVERALL_STATUS="SCANNING (compliance+artifact PASSED, pending deploy)"
+        else
+          OVERALL_STATUS="FAILED - compliance/artifact scan"
+        fi
+        export COMPLIANCE_LINK TRIVY_LINK OVERALL_STATUS
+
+        # --- Register (or create) the model in the Model Registry. Best-effort:
+        # this writes the result EVEN ON FAILURE so there is an audit trail. ---
+        echo ""
+        echo "--- Registering model + scan results in the Model Registry ---"
+        export MODEL_URI="${MODELCAR_REF:-oci://quay.io/unknown}"
+        export MODEL_DESCRIPTION="Onboarding candidate ${MODEL_ID} - registered at compliance/artifact scan stage by the ModelOps pipeline."
+        export MR_STAGE="compliance-artifact-scan"
+        export MR_PROPS_JSON="$(python3 -c '
+        import json, os
+        print(json.dumps({
+          "model-id": os.environ.get("MODEL_ID"),
+          "model-source": os.environ.get("MODELCAR_REF"),
+          "overall-status": os.environ.get("OVERALL_STATUS"),
+          "compliance-status": os.environ.get("COMPLIANCE_STATUS"),
+          "artifact-scan-status": os.environ.get("ARTIFACT_STATUS"),
+          "artifact-scan-image": os.environ.get("ARTIFACT_SCAN_IMAGE"),
+          "artifact-scan-critical-cves": os.environ.get("CVE_CRITICAL"),
+          "artifact-scan-high-cves": os.environ.get("CVE_HIGH"),
+          "compliance-report": os.environ.get("COMPLIANCE_LINK"),
+          "artifact-scan-report": os.environ.get("TRIVY_LINK"),
+        }))
+        ')"
+
+        cat > /tmp/registry_helper.py << 'PYEOF'
+        #!/usr/bin/env python3
+        # Canonical model-registry upsert helper, embedded (identically) into every
+        # Tekton task that writes to the OpenShift AI Model Registry. Driven entirely
+        # by environment variables so the same code works at every onboarding stage.
+        #
+        #   MR_SERVER          registry REST base, e.g.
+        #                      http://modelops-registry.rhoai-model-registries.svc.cluster.local
+        #   MR_PORT            registry REST port (default 8080)
+        #   MR_AUTHOR          author recorded on the entry
+        #   MODEL_NAME         registered-model name (identity across the whole pipeline)
+        #   MODEL_VERSION      version name (default v1)
+        #   MODEL_URI          artifact URI (used only when first registering)
+        #   MODEL_DESCRIPTION  optional description (set on first registration)
+        #   MODEL_FORMAT       model format name (default vLLM)
+        #   MR_STAGE           furthest onboarding stage reached (e.g. compliance-artifact-scan)
+        #   MR_PROPS_JSON      JSON object of custom properties to MERGE onto the version
+        #
+        # It is intentionally best-effort: a registry hiccup logs a WARNING and exits 0
+        # so it can never, by itself, fail the pipeline. The *gating* is done by the
+        # scan steps, not here.
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
+
+
+        def log(msg):
+            print("[model-registry] {}".format(msg), flush=True)
+
+
+        def main():
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "model-registry"], check=True)
+            from model_registry import ModelRegistry
+
+            server = os.environ["MR_SERVER"].rstrip("/")
+            port = int(os.environ.get("MR_PORT", "8080"))
+            author = os.environ.get("MR_AUTHOR", "ModelOps Platform")
+            name = os.environ["MODEL_NAME"]
+            version = os.environ.get("MODEL_VERSION", "v1")
+            uri = os.environ.get("MODEL_URI", "") or "oci://unknown/{}:{}".format(name, version)
+            description = os.environ.get("MODEL_DESCRIPTION", "")
+            fmt = os.environ.get("MODEL_FORMAT", "vLLM")
+            stage = os.environ.get("MR_STAGE", "")
+
+            try:
+                props = json.loads(os.environ.get("MR_PROPS_JSON", "{}") or "{}")
+            except Exception as e:
+                log("WARNING: MR_PROPS_JSON not valid JSON ({}); ignoring.".format(e))
+                props = {}
+
+            # Registry custom_properties must be scalar; coerce everything to str.
+            merged = {str(k): ("" if v is None else str(v)) for k, v in props.items()}
+            if stage:
+                merged["onboarding-stage"] = stage
+            merged["last-updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+            is_secure = server.lower().startswith("https")
+            try:
+                client = ModelRegistry(server_address=server, port=port, author=author, is_secure=is_secure)
+            except Exception as e:
+                log("WARNING: could not connect to model registry at {}:{} ({}). "
+                    "Skipping registry update.".format(server, port, e))
+                return
+
+            try:
+                existing = {m.name for m in client.get_registered_models()}
+            except Exception as e:
+                log("WARNING: could not list registered models ({}). Skipping.".format(e))
+                return
+
+            if name in existing:
+                log("Model '{}' already registered - updating version '{}'.".format(name, version))
+                try:
+                    v = client.get_model_version(name, version)
+                except Exception:
+                    v = None
+                if v is None:
+                    # Model exists but this version doesn't yet; create it.
+                    try:
+                        client.register_model(
+                            name=name, uri=uri, version=version,
+                            model_format_name=fmt, model_format_version="1",
+                            description=description or "Registered by ModelOps pipeline",
+                            metadata=merged,
+                        )
+                        log("Created new version '{}' with {} properties.".format(version, len(merged)))
+                        return
+                    except Exception as e:
+                        log("WARNING: could not create version '{}' ({}).".format(version, e))
+                        return
+                current = dict(v.custom_properties) if v.custom_properties else {}
+                current.update(merged)
+                v.custom_properties = current
+                try:
+                    client.update(v)
+                    log("Updated version '{}' - merged {} properties.".format(version, len(merged)))
+                except Exception as e:
+                    log("WARNING: could not update version '{}' ({}).".format(version, e))
+            else:
+                log("Model '{}' not found - registering new entry (version '{}').".format(name, version))
+                try:
+                    client.register_model(
+                        name=name, uri=uri, version=version,
+                        model_format_name=fmt, model_format_version="1",
+                        description=description or "Onboarding via ModelOps pipeline",
+                        metadata=merged,
+                    )
+                    log("Registered '{}' with {} properties.".format(name, len(merged)))
+                except Exception as e:
+                    log("WARNING: could not register model '{}' ({}).".format(name, e))
+
+
+        if __name__ == "__main__":
+            try:
+                main()
+            except Exception as e:
+                log("WARNING: unexpected registry error ({}); continuing (non-fatal).".format(e))
+        PYEOF
+        python3 /tmp/registry_helper.py || echo "WARN: registry update errored (non-fatal)."
+
+        # --- Gate LAST, so the model is always registered first. ---
+        echo ""
+        echo "--- Compliance/artifact gate: passed=$OVERALL_PASSED ---"
+        if [ "$OVERALL_PASSED" != "true" ]; then
+          echo "RESULT: BLOCKED - halting pipeline before deploy. Model registered as FAILED with report links."
+          exit 1
+        fi
+        echo "RESULT: PASSED - model cleared to deploy for the live security (garak) scan."

@@ -1,0 +1,15 @@
+# FILE: sandbox-namespace.yaml
+# Sandbox / Phase 1 namespace where the model is deployed and live-scanned
+# (garak) before promotion to staging.  This namespace must exist before any
+# pipeline resources are applied.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vllm
+  labels:
+    kubernetes.io/metadata.name: vllm
+    modelops.role: sandbox
+    opendatahub.io/dashboard: "true"
+    evalhub.trustyai.opendatahub.io/tenant: ""
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

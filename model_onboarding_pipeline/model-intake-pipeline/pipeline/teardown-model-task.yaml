@@ -1,0 +1,75 @@
+# FILE: teardown-model-task.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: teardown-model
+  namespace: vllm
+spec:
+  description: |
+    Frees the single shared GPU after the live security (garak) scan passes,
+    BEFORE the model is promoted to the "staging" (models-as-a-service)
+    namespace. On a one-GPU cluster the sandbox deployment and the staging
+    deployment cannot both hold the GPU at once, and the staging gpu-advisor
+    would (correctly) see 0 free GPUs and BLOCK. This task helm-uninstalls the
+    sandbox release, deletes its ServingRuntime, and waits until the predictor
+    pods are gone (GPU released). It is best-effort and idempotent - a missing
+    release is not an error.
+  params:
+    - name: releaseName
+      type: string
+      default: "granite-2b"
+      description: "Helm release / model name to tear down from the sandbox namespace."
+    - name: namespace
+      type: string
+      default: "vllm"
+      description: "Sandbox namespace the model was deployed into for the garak scan."
+    - name: servingRuntimeName
+      type: string
+      default: ""
+      description: "ServingRuntime to delete. Defaults to releaseName when empty."
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace (unused; kept for pipeline wiring consistency).
+  steps:
+    - name: teardown
+      image: quay.io/jhurlocker/deploy-model-task-helm-oc:latest
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        REL="$(params.releaseName)"
+        NS="$(params.namespace)"
+        SR="$(params.servingRuntimeName)"
+        [ -z "$SR" ] && SR="$REL"
+
+        echo "--- Tearing down sandbox deployment [$REL] in namespace [$NS] to free the GPU ---"
+
+        if helm status "$REL" -n "$NS" >/dev/null 2>&1; then
+          echo "helm uninstall $REL -n $NS"
+          helm uninstall "$REL" -n "$NS" || echo "WARN: helm uninstall reported an error (continuing)."
+        else
+          echo "No Helm release [$REL] in [$NS] (already gone)."
+        fi
+
+        # The chart's InferenceService/predictor + our ServingRuntime.
+        oc delete inferenceservice "$REL" -n "$NS" --ignore-not-found --wait=false || true
+        oc delete servingruntime "$SR" -n "$NS" --ignore-not-found --wait=false || true
+        oc delete servingruntime "${REL}-vllm-kserve" -n "$NS" --ignore-not-found --wait=false || true
+
+        echo "--- Waiting for predictor pods to terminate (GPU release) ---"
+        DEADLINE=$(( $(date +%s) + 300 ))
+        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+          REMAINING="$(oc get pods -n "$NS" \
+            -l "serving.kserve.io/inferenceservice=$REL" \
+            -o name 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$REMAINING" = "0" ]; then
+            echo "All predictor pods for [$REL] are gone - GPU released."
+            break
+          fi
+          echo "  $REMAINING predictor pod(s) still terminating..."
+          sleep 10
+        done
+
+        # Report free GPU capacity for visibility (best-effort).
+        echo "--- GPU allocatable/requests snapshot ---"
+        oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" gpu-allocatable="}{.status.allocatable.nvidia\.com/gpu}{"\n"}{end}' 2>/dev/null || true
+        echo "Teardown complete."

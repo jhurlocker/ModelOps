@@ -1,0 +1,194 @@
+# FILE: apply-gpu-sharing-task.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: apply-gpu-sharing
+  namespace: vllm
+spec:
+  description: |
+    Applies the GPU-sharing plan produced by the gpu-advisor task (read from
+    gpu-sharing-plan.json on the shared workspace). Runs AFTER the human
+    approval gate and BEFORE the model is deployed.
+
+    When the plan calls for time-slicing (the GPU is fully allocated but the
+    new model can share the card with the existing model(s)):
+      1. Applies the advisor-generated time-slicing ConfigMap to the NVIDIA
+         GPU Operator namespace.
+      2. Patches the NVIDIA ClusterPolicy so the device plugin advertises N
+         time-sliced GPU replicas, and waits for the target node to report the
+         new allocatable count.
+      3. Redeploys each co-resident model at the lower per-model
+         --gpu-memory-utilization split (patching its InferenceService), so
+         there is room for the incoming model.
+
+    When the plan does NOT require sharing (a free dedicated GPU is available,
+    or the GPU is already correctly time-sliced) this task is a safe no-op.
+  params:
+    - name: node-ready-timeout-seconds
+      type: string
+      default: "420"
+      description: "How long to wait for the GPU node to advertise the new time-sliced replica count."
+    - name: model-ready-timeout-seconds
+      type: string
+      default: "600"
+      description: "How long to wait for each redeployed co-resident model to become Ready again."
+  workspaces:
+    - name: shared-workspace
+      description: Workspace holding gpu-sharing-plan.json + generated YAML from the gpu-advisor.
+  steps:
+    - name: apply-sharing
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: NODE_READY_TIMEOUT
+          value: $(params.node-ready-timeout-seconds)
+        - name: MODEL_READY_TIMEOUT
+          value: $(params.model-ready-timeout-seconds)
+      script: |
+        #!/usr/bin/env python3
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
+
+
+        def sh(args, check=True, capture=True):
+            print("  $ {}".format(" ".join(args)), flush=True)
+            r = subprocess.run(args, capture_output=capture, text=True)
+            if capture and r.stdout:
+                print(r.stdout.rstrip(), flush=True)
+            if check and r.returncode != 0:
+                if capture and r.stderr:
+                    print(r.stderr.rstrip(), file=sys.stderr, flush=True)
+                raise SystemExit("Command failed ({}): {}".format(r.returncode, " ".join(args)))
+            return r
+
+
+        plan_path = "gpu-sharing-plan.json"
+        if not os.path.isfile(plan_path):
+            print("No gpu-sharing-plan.json on the workspace - nothing to do (GPU advisor "
+                  "may have run in an older mode). Skipping.")
+            raise SystemExit(0)
+
+        plan = json.load(open(plan_path))
+        print("--- GPU sharing plan ---")
+        print(json.dumps(plan, indent=2))
+
+        if not plan.get("enabled"):
+            print("\nGPU sharing NOT required: {}".format(plan.get("reason", "n/a")))
+            print("No-op. The model will deploy onto a dedicated GPU.")
+            raise SystemExit(0)
+
+        node = plan["node"]
+        replicas = int(plan["replicas"])
+        node_timeout = int(os.environ.get("NODE_READY_TIMEOUT", "420"))
+        model_timeout = int(os.environ.get("MODEL_READY_TIMEOUT", "600"))
+
+        # 1 + 2. (Re)configure time-slicing on the device plugin if needed.
+        if plan.get("reconfigure_time_slicing"):
+            print("\n--- Applying time-slicing ConfigMap ---")
+            if not os.path.isfile("time-slicing-config.yaml"):
+                raise SystemExit("reconfigure requested but time-slicing-config.yaml is missing")
+            sh(["oc", "apply", "-f", "time-slicing-config.yaml"])
+
+            print("\n--- Patching ClusterPolicy [{}] to enable time-slicing ---".format(
+                plan["clusterpolicy_name"]))
+            if not os.path.isfile("clusterpolicy-patch.json"):
+                raise SystemExit("reconfigure requested but clusterpolicy-patch.json is missing")
+            patch = open("clusterpolicy-patch.json").read()
+            sh(["oc", "patch", "clusterpolicy", plan["clusterpolicy_name"],
+                "--type", "merge", "--patch", patch])
+
+            print("\n--- Waiting for node [{}] to advertise {} nvidia.com/gpu ---".format(
+                node, replicas))
+            deadline = time.time() + node_timeout
+            ok = False
+            while time.time() < deadline:
+                r = subprocess.run(
+                    ["oc", "get", "node", node, "-o",
+                     "jsonpath={.status.allocatable.nvidia\\.com/gpu}"],
+                    capture_output=True, text=True)
+                cur = (r.stdout or "").strip()
+                print("  node allocatable nvidia.com/gpu = {!r}".format(cur))
+                if cur.isdigit() and int(cur) >= replicas:
+                    ok = True
+                    break
+                time.sleep(15)
+            if not ok:
+                raise SystemExit("Node did not advertise {} GPU replicas within {}s".format(
+                    replicas, node_timeout))
+            print("Node now advertises {} time-sliced GPU replicas.".format(replicas))
+        else:
+            print("\nTime-slicing already configured with enough replicas - not touching "
+                  "the device plugin.")
+
+        # 3. Redeploy each co-resident model at the lower memory split.
+        target_util = plan["target_gpu_memory_utilization"]
+        redeployed = []
+        for cm in plan.get("coresident_models", []):
+            if not cm.get("needs_redeploy"):
+                print("\nCo-resident {}/{} already at an acceptable "
+                      "--gpu-memory-utilization; skipping.".format(
+                          cm["namespace"], cm["inferenceservice"]))
+                continue
+            ns = cm["namespace"]
+            isvc = cm["inferenceservice"]
+            if not isvc:
+                print("\nWARNING: a co-resident GPU pod ({}/{}) is not a KServe "
+                      "InferenceService; cannot auto-redeploy it. It must be "
+                      "manually reconfigured to --gpu-memory-utilization={}.".format(
+                          cm["namespace"], cm["pod"], target_util))
+                continue
+
+            print("\n--- Redeploying co-resident model {}/{} at "
+                  "--gpu-memory-utilization={} ---".format(ns, isvc, target_util))
+            r = sh(["oc", "get", "inferenceservice", isvc, "-n", ns,
+                    "-o", "jsonpath={.spec.predictor.model.args}"], check=False)
+            try:
+                args = json.loads(r.stdout) if r.stdout.strip() else []
+            except Exception:
+                args = []
+
+            new_args = []
+            replaced = False
+            for a in args:
+                if a.startswith("--gpu-memory-utilization"):
+                    new_args.append("--gpu-memory-utilization={}".format(target_util))
+                    replaced = True
+                else:
+                    new_args.append(a)
+            if not replaced:
+                new_args.append("--gpu-memory-utilization={}".format(target_util))
+
+            patch = {"spec": {"predictor": {"model": {"args": new_args}}}}
+            sh(["oc", "patch", "inferenceservice", isvc, "-n", ns,
+                "--type", "merge", "--patch", json.dumps(patch)])
+
+            print("  Waiting for {}/{} to become Ready again...".format(ns, isvc))
+            deadline = time.time() + model_timeout
+            ready = False
+            while time.time() < deadline:
+                r = subprocess.run(
+                    ["oc", "get", "inferenceservice", isvc, "-n", ns, "-o",
+                     "jsonpath={.status.conditions[?(@.type=='Ready')].status}"],
+                    capture_output=True, text=True)
+                st = (r.stdout or "").strip()
+                if st == "True":
+                    ready = True
+                    break
+                time.sleep(15)
+            if ready:
+                print("  {}/{} is Ready at --gpu-memory-utilization={}.".format(ns, isvc, target_util))
+                redeployed.append("{}/{}".format(ns, isvc))
+            else:
+                # Non-fatal: log loudly but let the pipeline proceed to deploy
+                # the new model; operators can inspect the co-resident model.
+                print("  WARNING: {}/{} did not report Ready within {}s after "
+                      "the memory-split change.".format(ns, isvc, model_timeout))
+
+        print("\n--- GPU sharing applied ---")
+        print("Time-sliced node: {} ({} replicas/GPU)".format(node, replicas))
+        print("Co-resident models redeployed: {}".format(redeployed or "none"))
+        print("The incoming model can now be deployed onto a shared time-slice at "
+              "--gpu-memory-utilization={}.".format(target_util))

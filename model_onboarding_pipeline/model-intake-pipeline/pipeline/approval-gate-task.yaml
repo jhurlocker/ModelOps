@@ -1,0 +1,213 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: wait-for-approval
+  namespace: vllm
+spec:
+  description: |
+    Gate 2 - Runs immediately after gpu-advisor. Publishes the GPU advisor's
+    deployment plan to the model-intake web app and BLOCKS the pipeline
+    (polling) until a human approves or rejects it there, or the task
+    times out.
+
+    If approval-api-url is left empty, the gate auto-approves immediately
+    (useful for local/dev pipelines that don't have the model-intake app
+    deployed) but prints a loud warning, since this skips human review.
+  params:
+    - name: model-id
+      type: string
+    - name: model-name
+      type: string
+    - name: target-namespace
+      type: string
+      default: "vllm"
+    - name: plan-id
+      type: string
+      default: "$(context.taskRun.name)"
+      description: >-
+        Must match the plan-id used by the gpu-advisor Task for the same
+        PipelineRun. $(context.pipelineRun.name) only resolves in
+        Pipeline-level fields, not inside a Task's own steps/param
+        defaults, so the Pipeline must pass this in explicitly as a param
+        (e.g. value: $(context.pipelineRun.name)) rather than relying on
+        this default.
+    - name: requested-by
+      type: string
+      default: ""
+    - name: approval-api-url
+      type: string
+      default: ""
+      description: >-
+        Base URL of the model-intake app, e.g.
+        http://model-intake.vllm.svc.cluster.local:8080. Empty = auto-approve.
+    - name: poll-interval-seconds
+      type: string
+      default: "15"
+    - name: timeout-seconds
+      type: string
+      default: "3600"
+  results:
+    - name: approval-status
+      description: "approved, rejected, or auto-approved"
+    - name: approved-by
+      description: "Who approved/rejected the plan (or 'auto' if no gate configured)"
+  workspaces:
+    - name: shared-workspace
+      description: Workspace holding gpu-advisor artifacts
+  steps:
+    - name: submit-and-wait
+      image: registry.access.redhat.com/ubi9/python-311
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: TARGET_NS
+          value: $(params.target-namespace)
+        - name: PLAN_ID
+          value: $(params.plan-id)
+        - name: REQUESTED_BY
+          value: $(params.requested-by)
+        - name: APPROVAL_API_URL
+          value: $(params.approval-api-url)
+        - name: POLL_INTERVAL
+          value: $(params.poll-interval-seconds)
+        - name: TIMEOUT_SECONDS
+          value: $(params.timeout-seconds)
+        - name: PIPELINE_RUN_NAME
+          value: $(params.plan-id)
+        - name: RESULT_APPROVAL_STATUS_PATH
+          value: $(results.approval-status.path)
+        - name: RESULT_APPROVED_BY_PATH
+          value: $(results.approved-by.path)
+      script: |
+        #!/usr/bin/env python3
+        import json
+        import os
+        import sys
+        import time
+
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "requests"], check=True)
+        import requests
+
+        MODEL_ID = os.environ["MODEL_ID"]
+        MODEL_NAME = os.environ["MODEL_NAME"]
+        TARGET_NS = os.environ["TARGET_NS"]
+        PLAN_ID = os.environ["PLAN_ID"]
+        REQUESTED_BY = os.environ.get("REQUESTED_BY", "")
+        APPROVAL_API_URL = os.environ.get("APPROVAL_API_URL", "").rstrip("/")
+        POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "15"))
+        TIMEOUT_SECONDS = int(os.environ.get("TIMEOUT_SECONDS", "3600"))
+        PIPELINE_RUN_NAME = os.environ.get("PIPELINE_RUN_NAME", PLAN_ID)
+        RESULT_APPROVAL_STATUS_PATH = os.environ["RESULT_APPROVAL_STATUS_PATH"]
+        RESULT_APPROVED_BY_PATH = os.environ["RESULT_APPROVED_BY_PATH"]
+
+        def write_result(name, value):
+            path = {
+                "approval-status": RESULT_APPROVAL_STATUS_PATH,
+                "approved-by": RESULT_APPROVED_BY_PATH,
+            }[name]
+            with open(path, "w") as f:
+                f.write(value)
+
+        if not APPROVAL_API_URL:
+            print("WARNING: approval-api-url is empty. Skipping human approval gate")
+            print("WARNING: and AUTO-APPROVING plan '{}'.".format(PLAN_ID))
+            print("WARNING: Configure approval-api-url to require human review.")
+            write_result("approval-status", "auto-approved")
+            write_result("approved-by", "auto (no approval-api-url configured)")
+            sys.exit(0)
+
+        def read_file(name, default=""):
+            try:
+                with open(name) as f:
+                    return f.read()
+            except FileNotFoundError:
+                return default
+
+        recommendation_md = read_file("gpu-advisor-summary.txt")
+        deployment_options = read_file("deployment-options.json", "{}")
+        gpu_inventory = read_file("gpu-inventory.json", "{}")
+        recommended_vllm_command = read_file("recommended-vllm-command.sh")
+        plan_status = read_file("plan-status.txt", "UNKNOWN").strip()
+
+        try:
+            deployment_options_json = json.loads(deployment_options)
+        except json.JSONDecodeError:
+            deployment_options_json = {}
+        try:
+            gpu_inventory_json = json.loads(gpu_inventory)
+        except json.JSONDecodeError:
+            gpu_inventory_json = {}
+
+        print("--- Submitting plan '{}' for approval ---".format(PLAN_ID))
+        print("Approval API: {}".format(APPROVAL_API_URL))
+
+        submit_payload = {
+            "plan_id": PLAN_ID,
+            "pipelinerun_name": PIPELINE_RUN_NAME,
+            "model_id": MODEL_ID,
+            "model_name": MODEL_NAME,
+            "target_namespace": TARGET_NS,
+            "requested_by": REQUESTED_BY,
+            "plan_status": plan_status,
+            "recommendation_md": recommendation_md,
+            "deployment_options": deployment_options_json,
+            "gpu_inventory": gpu_inventory_json,
+            "recommended_vllm_command": recommended_vllm_command,
+        }
+
+        try:
+            resp = requests.post(
+                "{}/api/plans".format(APPROVAL_API_URL),
+                json=submit_payload,
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except Exception as e:
+            print("FATAL: could not submit plan to model-intake app: {}".format(e), file=sys.stderr)
+            write_result("approval-status", "error")
+            write_result("approved-by", "")
+            sys.exit(1)
+
+        print("Plan submitted. Waiting for a human to approve/reject at:")
+        print("  {}/plans/{}".format(APPROVAL_API_URL, PLAN_ID))
+        print("Polling every {}s, timeout {}s.".format(POLL_INTERVAL, TIMEOUT_SECONDS))
+
+        deadline = time.time() + TIMEOUT_SECONDS
+        status = "pending"
+        approved_by = ""
+        while time.time() < deadline:
+            try:
+                r = requests.get(
+                    "{}/api/plans/{}".format(APPROVAL_API_URL, PLAN_ID), timeout=15
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    status = data.get("status", "pending")
+                    approved_by = data.get("decided_by", "") or ""
+                    if status in ("approved", "rejected"):
+                        break
+                else:
+                    print("  poll returned HTTP {}, retrying...".format(r.status_code))
+            except Exception as e:
+                print("  poll error: {}, retrying...".format(e))
+            time.sleep(POLL_INTERVAL)
+
+        if status == "approved":
+            print("APPROVED by '{}'. Continuing pipeline (deploy -> security-scan -> ...).".format(approved_by))
+            write_result("approval-status", "approved")
+            write_result("approved-by", approved_by)
+            sys.exit(0)
+        elif status == "rejected":
+            print("REJECTED by '{}'. Halting pipeline before deployment.".format(approved_by))
+            write_result("approval-status", "rejected")
+            write_result("approved-by", approved_by)
+            sys.exit(1)
+        else:
+            print("TIMEOUT after {}s waiting for approval of plan '{}'.".format(TIMEOUT_SECONDS, PLAN_ID))
+            write_result("approval-status", "timeout")
+            write_result("approved-by", "")
+            sys.exit(1)

@@ -1,0 +1,232 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: guidellm-benchmark
+spec:
+  description: Submit a GuideLLM benchmark via EvalHub, poll for completion, and save results.
+  params:
+    - name: target
+      type: string
+      description: "Model inference endpoint URL (v1/completions or v1/chat)."
+      default: 'http://llama32-3b.llama-serve.svc.cluster.local:8000/v1'
+    - name: model-name
+      type: string
+      description: "Model name identifier."
+      default: llama32
+    - name: evalhub-url
+      type: string
+      description: "EvalHub base URL (e.g. evalhub-redhat-ods-applications.apps.<cluster>)."
+    - name: evalhub-token
+      type: string
+      description: "Bearer token for EvalHub API (OpenShift OAuth token)."
+    - name: tenant-ns
+      type: string
+      description: "Tenant namespace for EvalHub (must have evalhub.trustyai.* label)."
+    - name: guidellm-profile
+      type: string
+      default: "constant"
+      description: "GuideLLM benchmark profile (constant, sweep, throughput)."
+    - name: guidellm-rate
+      type: string
+      default: "1"
+      description: "Request rate for benchmark (rps, comma-separated for sweep)."
+    - name: guidellm-max-seconds
+      type: string
+      default: "30"
+      description: "Maximum benchmark duration in seconds."
+    - name: guidellm-max-requests
+      type: string
+      default: "5"
+      description: "Maximum number of benchmark requests."
+  results:
+    - name: evalhub-job-id
+      description: "EvalHub job ID for the guidellm benchmark (linked from model registry)."
+    - name: benchmark-results
+      description: "Summary of benchmark results."
+      type: string
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for storing benchmark results
+  steps:
+    - name: run-evalhub-guidellm
+      image: registry.access.redhat.com/ubi9/python-311
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: EVALHUB_URL
+          value: $(params.evalhub-url)
+        - name: EVALHUB_TOKEN
+          value: $(params.evalhub-token)
+        - name: TENANT_NS
+          value: $(params.tenant-ns)
+        - name: TARGET_URL
+          value: $(params.target)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: GUIDELLM_PROFILE
+          value: $(params.guidellm-profile)
+        - name: GUIDELLM_RATE
+          value: $(params.guidellm-rate)
+        - name: GUIDELLM_MAX_SECONDS
+          value: $(params.guidellm-max-seconds)
+        - name: GUIDELLM_MAX_REQUESTS
+          value: $(params.guidellm-max-requests)
+        - name: WORKSPACE_PATH
+          value: $(workspaces.shared-workspace.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        echo "--- EvalHub GuideLLM Benchmark ---"
+        echo "Model: $MODEL_NAME"
+        echo "Target: $TARGET_URL"
+        echo "EvalHub: $EVALHUB_URL"
+        echo "Tenant: $TENANT_NS"
+        echo "Profile: $GUIDELLM_PROFILE | Rate: $GUIDELLM_RATE | Max seconds: $GUIDELLM_MAX_SECONDS | Max requests: $GUIDELLM_MAX_REQUESTS"
+        echo ""
+
+        export PIP_DISABLE_PIP_VERSION_CHECK=1
+        pip install -q requests pyyaml 2>&1 | grep -v "already satisfied" || true
+
+        python3 - << 'PYEOF'
+        import json, os, sys, time, warnings, urllib3
+        warnings.filterwarnings("ignore")
+
+        evalhub_url = os.environ["EVALHUB_URL"]
+        token = os.environ["EVALHUB_TOKEN"]
+        tenant_ns = os.environ["TENANT_NS"]
+        target = os.environ["TARGET_URL"]
+        model_name = os.environ["MODEL_NAME"]
+        profile = os.environ.get("GUIDELLM_PROFILE", "constant")
+        rate = os.environ.get("GUIDELLM_RATE", "1")
+        max_seconds = int(os.environ.get("GUIDELLM_MAX_SECONDS", "30"))
+        max_requests = int(os.environ.get("GUIDELLM_MAX_REQUESTS", "5"))
+        ws = os.environ.get("WORKSPACE_PATH", "/workspace/shared-workspace")
+
+        import requests as r
+        sess = r.Session()
+        sess.headers.update({
+            "Authorization": "Bearer " + token,
+            "X-Tenant": tenant_ns,
+        })
+
+        base = "https://{}/api/v1/evaluations".format(evalhub_url)
+
+        print("--- Submitting guidellm job to EvalHub ---")
+        payload = {
+            "name": "{}-guidellm-bench".format(model_name),
+            "model": {
+                "url": target,
+                "name": model_name,
+            },
+            "benchmarks": [
+                {
+                    "id": "constant",
+                    "provider_id": "guidellm",
+                    "config": {
+                        "type": profile,
+                        "rate": float(rate) if rate else 1.0,
+                        "max_seconds": max_seconds,
+                        "max_requests": max_requests,
+                        "sweep_size": 1,
+                        "warmup": 0,
+                    },
+                }
+            ],
+        }
+        resp = sess.post(base + "/jobs", json=payload, verify=False)
+        print("Response:", resp.status_code)
+        if resp.status_code not in (200, 201, 202):
+            print("ERROR submitting job:", resp.text)
+            sys.exit(1)
+        data = resp.json()
+        resource = data.get("resource", data)
+        job_id = resource.get("id", resource.get("metadata", {}).get("id", ""))
+        print("Job ID:", job_id)
+
+        with open(os.path.join(ws, "guidellm-evalhub-job-id.txt"), "w") as f:
+            f.write(job_id)
+
+        print("--- Polling for completion (max 60 attempts, 15s each = 15 min) ---")
+        for attempt in range(1, 61):
+            time.sleep(15)
+            resp = sess.get(base + "/jobs/" + job_id, verify=False)
+            if resp.status_code != 200:
+                print("  [{}] Poll error: {} {}".format(attempt, resp.status_code, resp.text[:200]))
+                continue
+            job = resp.json()
+            state = job.get("status", {}).get("state", "unknown")
+            print("  [{}] State: {}".format(attempt, state))
+            if state in ("completed", "failed", "cancelled"):
+                break
+        else:
+            print("ERROR: Timed out waiting for EvalHub job.")
+            sys.exit(1)
+
+        print("\n--- Job final state: {} ---".format(state))
+
+        TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+        RESULT_DIR = os.path.join(ws, "{}_{}".format(TIMESTAMP, model_name))
+        os.makedirs(RESULT_DIR, exist_ok=True)
+
+        with open(os.path.join(RESULT_DIR, "evalhub-job.json"), "w") as f:
+            json.dump(job, f, indent=2)
+
+        # Parse results for summary
+        results = job.get("status", {}).get("results", {})
+        output_tps = results.get("output_tokens_per_second", results.get("output_tps", 0))
+        reqs_per_sec = results.get("requests_per_second", results.get("rps", 0))
+        mean_ttft = results.get("mean_ttft_ms", results.get("mean_ttft", 0))
+        mean_itl = results.get("mean_itl_ms", results.get("mean_itl", 0))
+        job_passed = results.get("pass", results.get("passed", False))
+
+        summary = {
+            "model": model_name,
+            "target": target,
+            "evalhub_job_id": job_id,
+            "profile": profile,
+            "rate": rate,
+            "max_seconds": max_seconds,
+            "max_requests": max_requests,
+            "timestamp": TIMESTAMP,
+            "output_tokens_per_second": output_tps,
+            "requests_per_second": reqs_per_sec,
+            "mean_ttft_ms": mean_ttft,
+            "mean_itl_ms": mean_itl,
+            "passed": job_passed,
+        }
+
+        with open(os.path.join(RESULT_DIR, "{}-results.yaml".format(model_name)), "w") as f:
+            import yaml
+            yaml.dump(summary, f, default_flow_style=False)
+
+        with open(os.path.join(RESULT_DIR, "benchmark_info.txt"), "w") as f:
+            f.write("Model: {}\n".format(model_name))
+            f.write("Target: {}\n".format(target))
+            f.write("Profile: {}\n".format(profile))
+            f.write("Rate: {}\n".format(rate))
+            f.write("Max Seconds: {}\n".format(max_seconds))
+            f.write("Max Requests: {}\n".format(max_requests))
+            f.write("Timestamp: {}\n".format(TIMESTAMP))
+            f.write("EvalHub Job ID: {}\n".format(job_id))
+
+        # Copy results to workspace root with timestamp prefix so the upload
+        # task's glob *${timestamp}* finds them.
+        import shutil
+        for fname in os.listdir(RESULT_DIR):
+            src = os.path.join(RESULT_DIR, fname)
+            dst = os.path.join(ws, "{}_{}".format(TIMESTAMP, fname))
+            if os.path.isfile(src):
+                shutil.copy(src, dst)
+
+        # Write timestamp for downstream upload+registry tasks
+        with open(os.path.join(ws, "timestamp.txt"), "w") as f:
+            f.write(TIMESTAMP)
+
+        print("\n--- Benchmark Summary ---")
+        print("Output tokens/sec: {}".format(output_tps))
+        print("Requests/sec: {}".format(reqs_per_sec))
+        print("Mean TTFT: {} ms".format(mean_ttft))
+        print("Mean ITL: {} ms".format(mean_itl))
+        print("Passed: {}".format(job_passed))
+        print("Results saved to: {}".format(RESULT_DIR))
+        PYEOF

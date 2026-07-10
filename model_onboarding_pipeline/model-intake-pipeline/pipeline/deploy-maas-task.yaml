@@ -1,0 +1,449 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: deploy-maas
+  namespace: vllm
+spec:
+  description: >-
+    Deploys a model via Red Hat OpenShift AI Models-as-a-Service (MaaS) CRDs:
+    LLMInferenceService, MaaSModelRef, MaaSAuthPolicy, MaaSSubscription.
+    Runs after model registration and benchmarking. Requires MaaS platform installed.
+  params:
+    - name: model-name
+      type: string
+      description: Short k8s-safe identifier for the model (used for CR names).
+    - name: model-id
+      type: string
+      description: HuggingFace model ID (used for display name and served-model-name).
+    - name: modelcar-image
+      type: string
+      description: OCI modelcar image URI (e.g. oci://quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct).
+    - name: maas-serving-ns
+      type: string
+      default: "llm"
+      description: Namespace for LLMInferenceService + MaaSModelRef.
+    - name: maas-policy-ns
+      type: string
+      default: "models-as-a-service"
+      description: Namespace for MaaSAuthPolicy + MaaSSubscription.
+    - name: gpu-count
+      type: string
+      default: "1"
+      description: Number of NVIDIA GPUs to request.
+    - name: runtime-image
+      type: string
+      default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+      description: Runtime container image for vLLM inference.
+    - name: gpu-memory-utilization
+      type: string
+      default: "0.90"
+      description: vLLM --gpu-memory-utilization value.
+    - name: cpu-request
+      type: string
+      default: "2"
+    - name: cpu-limit
+      type: string
+      default: "4"
+    - name: memory-request
+      type: string
+      default: "8Gi"
+    - name: memory-limit
+      type: string
+      default: "24Gi"
+    - name: authorized-group
+      type: string
+      default: "system:authenticated"
+      description: >-
+        OpenShift Group authorized to access this model via MaaS.
+        Used in MaaSAuthPolicy subjects and MaaSSubscription owners.
+        Default is "system:authenticated" (all users); set to a specific group
+        to restrict access (e.g. "ml-team").
+  workspaces:
+    - description: Shared workspace for writing MaaS deployment info
+      name: shared-workspace
+  steps:
+    - name: deploy-maas-resources
+      image: registry.access.redhat.com/ubi9/python-311
+      workingDir: $(workspaces.shared-workspace.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        pip install -q pyyaml 2>&1 | grep -v "already satisfied" || true
+        python3 <<'PYEOF'
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
+        import yaml
+
+        def run(cmd_args, check=True):
+            print("+ " + " ".join(cmd_args))
+            result = subprocess.run(cmd_args, capture_output=True, text=True)
+            if result.stdout:
+                for line in result.stdout.strip().split("\n"):
+                    print("  " + line)
+            if result.stderr:
+                print(result.stderr, file=sys.stderr)
+            if check and result.returncode != 0:
+                sys.exit(result.returncode)
+            return result
+
+        model_name = os.environ["MODEL_NAME"]
+        model_id   = os.environ["MODEL_ID"]
+        modelcar   = os.environ["MODELCAR_IMAGE"]
+        serving_ns = os.environ["MAAS_SERVING_NS"]
+        policy_ns  = os.environ["MAAS_POLICY_NS"]
+        gpu_count  = os.environ["GPU_COUNT"]
+        runtime    = os.environ["RUNTIME_IMAGE"]
+        gpu_mem    = os.environ["GPU_MEM_UTIL"]
+        cpu_req    = os.environ["CPU_REQUEST"]
+        cpu_lim    = os.environ["CPU_LIMIT"]
+        mem_req    = os.environ["MEMORY_REQUEST"]
+        mem_lim    = os.environ["MEMORY_LIMIT"]
+        auth_group = os.environ["AUTHORIZED_GROUP"]
+
+        display_name = model_id
+        safe_name = model_name.lower().replace("_", "-").replace(".", "-").replace(" ", "-")
+        auth_policy_name = safe_name + "-access"
+        sub_free_name    = safe_name + "-free"
+        sub_premium_name = safe_name + "-premium"
+
+        # ------------------------------------------------------------------
+        # 1. Ensure namespaces exist and are labeled for MaaS
+        # ------------------------------------------------------------------
+        print("\n=== Step 1: Namespace preparation ===")
+        for ns, labels in [
+            (serving_ns, [
+                "opendatahub.io/generated-namespace=true",
+                "maas.opendatahub.io/gateway-access=true",
+                "opendatahub.io/dashboard=true",
+            ]),
+            (policy_ns, []),
+        ]:
+            r = run(["oc", "get", "namespace", ns], check=False)
+            if r.returncode != 0:
+                run(["oc", "create", "namespace", ns])
+            for lbl in labels:
+                k = lbl.split("=")[0]
+                v = "=".join(lbl.split("=")[1:])
+                run(["oc", "label", "namespace", ns, "{}={}".format(k, v), "--overwrite"], check=False)
+
+        # ------------------------------------------------------------------
+        # 2. LLMInferenceService
+        # ------------------------------------------------------------------
+        print("\n=== Step 2: LLMInferenceService ===")
+        # Normalise modelcar to oci:// form if not already
+        modelcar_uri = modelcar
+        for scheme in ("oci://", "docker://"):
+            if modelcar_uri.startswith(scheme):
+                modelcar_uri = modelcar_uri[len(scheme):]
+                break
+        if not modelcar_uri.startswith("oci://"):
+            modelcar_uri = "oci://" + modelcar_uri
+
+        llm_inference_svc = {
+            "apiVersion": "serving.kserve.io/v1alpha1",
+            "kind": "LLMInferenceService",
+            "metadata": {
+                "name": safe_name,
+                "namespace": serving_ns,
+                "annotations": {
+                    "openshift.io/display-name": display_name,
+                    "opendatahub.io/model-type": "generative",
+                    "security.opendatahub.io/enable-auth": "true",
+                },
+                "labels": {
+                    "opendatahub.io/dashboard": "true",
+                    "opendatahub.io/genai-asset": "true",
+                },
+            },
+            "spec": {
+                "model": {
+                    "name": model_id.split("/")[-1],
+                    "uri": modelcar_uri,
+                },
+                "replicas": 1,
+                "router": {
+                    "route": {},
+                    "gateway": {
+                        "refs": [{
+                            "name": "maas-default-gateway",
+                            "namespace": "openshift-ingress",
+                        }],
+                    },
+                },
+                "template": {
+                    "tolerations": [{
+                        "effect": "NoSchedule",
+                        "key": "nvidia.com/gpu",
+                        "operator": "Exists",
+                    }],
+                    "containers": [{
+                        "name": "main",
+                        "image": runtime,
+                        "command": ["python", "-m", "vllm.entrypoints.openai.api_server"],
+                        "args": [
+                            "--served-model-name={{.Name}}",
+                            "--model=/mnt/models",
+                            "--enable-ssl-refresh",
+                            "--ssl-certfile=/var/run/kserve/tls/tls.crt",
+                            "--ssl-keyfile=/var/run/kserve/tls/tls.key",
+                            "--enable-force-include-usage",
+                            "--gpu-memory-utilization=" + gpu_mem,
+                        ],
+                        "ports": [{
+                            "containerPort": 8000,
+                            "name": "http",
+                            "protocol": "TCP",
+                        }],
+                        "livenessProbe": {
+                            "httpGet": {"path": "/health", "port": 8000, "scheme": "HTTPS"},
+                            "initialDelaySeconds": 300,
+                            "periodSeconds": 30,
+                            "timeoutSeconds": 30,
+                            "failureThreshold": 5,
+                        },
+                        "readinessProbe": {
+                            "httpGet": {"path": "/health", "port": 8000, "scheme": "HTTPS"},
+                            "initialDelaySeconds": 300,
+                            "periodSeconds": 15,
+                            "timeoutSeconds": 15,
+                            "failureThreshold": 30,
+                        },
+                        "resources": {
+                            "requests": {
+                                "cpu": cpu_req,
+                                "memory": mem_req,
+                                "nvidia.com/gpu": gpu_count,
+                            },
+                            "limits": {
+                                "cpu": cpu_lim,
+                                "memory": mem_lim,
+                                "nvidia.com/gpu": gpu_count,
+                            },
+                        },
+                        "volumeMounts": [{
+                            "mountPath": "/dev/shm",
+                            "name": "shm",
+                        }],
+                    }],
+                    "volumes": [{
+                        "name": "shm",
+                        "emptyDir": {
+                            "medium": "Memory",
+                            "sizeLimit": "2Gi",
+                        },
+                    }],
+                },
+            },
+        }
+
+        yaml_str = yaml.dump(llm_inference_svc, default_flow_style=False, sort_keys=False)
+        print("Applying LLMInferenceService [" + safe_name + "] in namespace [" + serving_ns + "]")
+        run(["oc", "apply", "-n", serving_ns, "-f", "-"], input=yaml_str)
+
+        # ------------------------------------------------------------------
+        # 3. MaaSModelRef
+        # ------------------------------------------------------------------
+        print("\n=== Step 3: MaaSModelRef ===")
+        maas_model_ref = {
+            "apiVersion": "maas.opendatahub.io/v1alpha1",
+            "kind": "MaaSModelRef",
+            "metadata": {
+                "name": safe_name,
+                "namespace": serving_ns,
+                "annotations": {
+                    "openshift.io/display-name": display_name,
+                    "openshift.io/description": model_id + " deployed via MaaS",
+                },
+            },
+            "spec": {
+                "modelRef": {
+                    "kind": "LLMInferenceService",
+                    "name": safe_name,
+                },
+            },
+        }
+        yaml_str = yaml.dump(maas_model_ref, default_flow_style=False, sort_keys=False)
+        print("Applying MaaSModelRef [" + safe_name + "] in namespace [" + serving_ns + "]")
+        run(["oc", "apply", "-n", serving_ns, "-f", "-"], input=yaml_str)
+
+        # ------------------------------------------------------------------
+        # 4. MaaSAuthPolicy
+        # ------------------------------------------------------------------
+        print("\n=== Step 4: MaaSAuthPolicy ===")
+        auth_policy = {
+            "apiVersion": "maas.opendatahub.io/v1alpha1",
+            "kind": "MaaSAuthPolicy",
+            "metadata": {
+                "name": auth_policy_name,
+                "namespace": policy_ns,
+                "annotations": {
+                    "openshift.io/display-name": display_name + " Access",
+                    "openshift.io/description": "Grants group " + auth_group + " access to " + display_name,
+                },
+            },
+            "spec": {
+                "modelRefs": [{
+                    "name": safe_name,
+                    "namespace": serving_ns,
+                }],
+                "subjects": {
+                    "groups": [{"name": auth_group}],
+                    "users": [],
+                },
+            },
+        }
+        yaml_str = yaml.dump(auth_policy, default_flow_style=False, sort_keys=False)
+        print("Applying MaaSAuthPolicy [" + auth_policy_name + "] in namespace [" + policy_ns + "]")
+        run(["oc", "apply", "-n", policy_ns, "-f", "-"], input=yaml_str)
+
+        # ------------------------------------------------------------------
+        # 5. MaaSSubscriptions (free + premium)
+        # ------------------------------------------------------------------
+        print("\n=== Step 5: MaaSSubscriptions ===")
+        sub_free = {
+            "apiVersion": "maas.opendatahub.io/v1alpha1",
+            "kind": "MaaSSubscription",
+            "metadata": {
+                "name": sub_free_name,
+                "namespace": policy_ns,
+                "annotations": {
+                    "openshift.io/display-name": display_name + " Free Tier",
+                    "openshift.io/description": "Free tier: 100 tokens/min for group " + auth_group,
+                },
+            },
+            "spec": {
+                "owner": {
+                    "groups": [{"name": auth_group}],
+                    "users": [],
+                },
+                "modelRefs": [{
+                    "name": safe_name,
+                    "namespace": serving_ns,
+                    "tokenRateLimits": [{"limit": 100, "window": "1m"}],
+                }],
+                "priority": 10,
+            },
+        }
+        yaml_str = yaml.dump(sub_free, default_flow_style=False, sort_keys=False)
+        print("Applying MaaSSubscription [" + sub_free_name + "] in namespace [" + policy_ns + "]")
+        run(["oc", "apply", "-n", policy_ns, "-f", "-"], input=yaml_str)
+
+        sub_premium = {
+            "apiVersion": "maas.opendatahub.io/v1alpha1",
+            "kind": "MaaSSubscription",
+            "metadata": {
+                "name": sub_premium_name,
+                "namespace": policy_ns,
+                "annotations": {
+                    "openshift.io/display-name": display_name + " Premium Tier",
+                    "openshift.io/description": "Premium tier: 100000 tokens/min for group " + auth_group,
+                },
+            },
+            "spec": {
+                "owner": {
+                    "groups": [{"name": auth_group}],
+                    "users": [],
+                },
+                "modelRefs": [{
+                    "name": safe_name,
+                    "namespace": serving_ns,
+                    "tokenRateLimits": [{"limit": 100000, "window": "1m"}],
+                }],
+                "priority": 20,
+            },
+        }
+        yaml_str = yaml.dump(sub_premium, default_flow_style=False, sort_keys=False)
+        print("Applying MaaSSubscription [" + sub_premium_name + "] in namespace [" + policy_ns + "]")
+        run(["oc", "apply", "-n", policy_ns, "-f", "-"], input=yaml_str)
+
+        # ------------------------------------------------------------------
+        # 6. Wait for LLMInferenceService to be Ready (up to 20 min for first pull)
+        # ------------------------------------------------------------------
+        print("\n=== Step 6: Waiting for LLMInferenceService readiness ===")
+        deadline = time.time() + 1200
+        while time.time() < deadline:
+            result = run(
+                ["oc", "get", "llminferenceservice", safe_name, "-n", serving_ns,
+                 "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}"],
+                check=False,
+            )
+            if result.stdout.strip() == "True":
+                print("LLMInferenceService [" + safe_name + "] is Ready.")
+                break
+            print("  Not Ready yet; waiting 15s...")
+            time.sleep(15)
+        else:
+            print("WARNING: LLMInferenceService did not become Ready within 20 min. Check pod status:")
+            run(["oc", "get", "pods", "-n", serving_ns, "-l", "serving.kserve.io/llminferenceservice=" + safe_name],
+                check=False)
+            run(["oc", "describe", "llminferenceservice", safe_name, "-n", serving_ns], check=False)
+
+        # ------------------------------------------------------------------
+        # 7. Write deployment info to workspace
+        # ------------------------------------------------------------------
+        print("\n=== Step 7: Writing MaaS deployment info ===")
+        cluster_domain = run(
+            ["oc", "get", "ingresses.config/cluster", "-o", "jsonpath={.spec.domain}"],
+            check=False,
+        ).stdout.strip()
+
+        maas_info = {
+            "model_name": model_name,
+            "model_id": model_id,
+            "maas_api_url": "https://maas.{}".format(cluster_domain),
+            "llm_inference_service": safe_name,
+            "serving_namespace": serving_ns,
+            "policy_namespace": policy_ns,
+            "subscriptions": {
+                "free": sub_free_name,
+                "premium": sub_premium_name,
+            },
+            "instructions": "Create an API key:  curl -k -X POST {}/maas-api/v1/api-keys -H 'Authorization: Bearer $(oc whoami -t)' -H 'Content-Type: application/json' -d '{{\"name\":\"my-key\",\"subscription\":\"{}-free\",\"expiresIn\":\"24h\"}}' | jq -r '.key'".format(
+                "https://maas." + cluster_domain, sub_free_name
+            ),
+        }
+        with open("maas-deployment-info.json", "w") as f:
+            json.dump(maas_info, f, indent=2)
+
+        print("\n--- MaaS Deployment Complete ---")
+        print("Model registered as: " + safe_name)
+        print("MaaS API URL:       " + "https://maas." + cluster_domain)
+        print("Free tier sub:      " + sub_free_name)
+        print("Premium tier sub:   " + sub_premium_name)
+        print()
+        print("Create an API key and test inference:")
+        print("  curl -k -X POST https://maas.{0}/maas-api/v1/api-keys \\".format(cluster_domain or "$CLUSTER_DOMAIN"))
+        print("    -H 'Authorization: Bearer $(oc whoami -t)' \\")
+        print("    -H 'Content-Type: application/json' \\")
+        print("    -d '{{\"name\":\"test\",\"subscription\":\"{0}-free\",\"expiresIn\":\"1h\"}}'".format(sub_free_name))
+        PYEOF
+      env:
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODELCAR_IMAGE
+          value: $(params.modelcar-image)
+        - name: MAAS_SERVING_NS
+          value: $(params.maas-serving-ns)
+        - name: MAAS_POLICY_NS
+          value: $(params.maas-policy-ns)
+        - name: GPU_COUNT
+          value: $(params.gpu-count)
+        - name: RUNTIME_IMAGE
+          value: $(params.runtime-image)
+        - name: GPU_MEM_UTIL
+          value: $(params.gpu-memory-utilization)
+        - name: CPU_REQUEST
+          value: $(params.cpu-request)
+        - name: CPU_LIMIT
+          value: $(params.cpu-limit)
+        - name: MEMORY_REQUEST
+          value: $(params.memory-request)
+        - name: MEMORY_LIMIT
+          value: $(params.memory-limit)
+        - name: AUTHORIZED_GROUP
+          value: $(params.authorized-group)

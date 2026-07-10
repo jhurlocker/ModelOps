@@ -128,7 +128,7 @@ oc apply -f storage/minio-backend.yaml -n s3-storage
 oc apply -f storage/s3ui-deployment.yaml -n s3-storage
 ----  
 
-. Login to the S3 UI and create a bucket. We'll use S3 to store GuideLLM results, lm-eval results, custom benchmark files, and images for Quay. 
+. Login to the S3 UI and create a bucket. We'll use S3 to store GuideLLM results, lm-eval results, and custom benchmark files. 
 
 .. Get the S3 UI route
 +
@@ -151,140 +151,10 @@ image::../images/s3ui_create_benchmark_bucket.png["Create benchmark results buck
 NOTE: The UI is configured to connect to the local Minio service running in the same namespace. If you are using another S3 storage provider click on the *Configure* button in the upper right corner to update the connection configuration. +
 This UI is *not supported by Red Hat* or any other company and should be used for demo purposes only. 
 
-=== Deploy Quay
-We'll use Quay as our internal container registry where we'll push our modelcar image.
-// +
-// NOTE: The use of Quay is optional, but if you don't use a local cluster container registry you'll be deploying from external registries.
-
-. Create a new project.
-+
-[source,sh,role=execute]
-----
-oc new-project quay-registry
-----  
-. Update the *quay/quay-config-secret-rados* hostname with the Minio API route.
-.. Get the Minio API route.
-+
-[source,sh,role=execute]
-----
-oc get route -n s3-storage | grep minio-api
-----  
-.. Replace the _<REPLACE_ME_WITH_MINIO_API_ROUTE>_ with the Minio API route from the previous step. No need to add http/https or the port. For example, your hostname should look similar to: _minio-api-s3-storage.apps.cluster-11111.22222.com_
-+
-image::../images/quay_config_secret.png["Quay config secret"]
-
-.. Deploy Quay
-+
-[source,sh,role=execute]
-----
-oc apply -f quay/operator-group.yaml -n quay-registry
-oc apply -f quay/quay-config-secret-rados.yaml -n quay-registry
-oc apply -f quay/subscription.yaml -n quay-registry
-----  
-
-.. Wait until the Quay operator is ready.
-+
-[source,sh,role=execute]
-----
-oc get pods -n quay-registry --watch
----- 
-+
-image::../images/quay_operator_status.png["Quay operator status"]
-
-.. Create a new S3 bucket named *quay-registry-bucket*.
-+
-image::../images/s3_quay_bucket.png["S3 Quay bucket"]
-
-.. Apply the Quay registry.
-+
-[source,sh,role=execute]
-----
-oc apply -f quay/quay-registry.yaml -n quay-registry
-----
-
-.. Open the Quay route in a web browser.
-+
-[source,sh,role=execute]
-----
-oc get route -n quay-registry | grep my-quay-registry-quay-quay
-----
-
-.. Click on *Create Account* 
-+
-image::../images/quay_create_acct.png["Create Quay account", 35%, 35%]
-
-.. Enter in form fields and click *Create Account*
-+
-image::../images/quay_acct_create_form.png["Create Quay account form", 35%, 35%]
-+
-*Username*:
-+
-[source,sh,role=execute]
-----
-admin
-----
-+
-*E-mail address*:
-+
-[source,sh,role=execute]
-----
-admin@admin.com
-----
-+
-*Password*:
-+
-[source,sh,role=execute]
-----
-admin123
-----
-
-. We'll now pull the image from an external Quay registry and push the image into our local Quay registry running on our OpenShift cluster.
-
-.. Pull the image
-+
-[source,sh,role=execute]
-----
-podman pull quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct
-----
-
-.. Login to the local Quay registry.  
-+
-[source,sh,role=execute]
-----
-QUAY_URL=$(oc get route -n quay-registry | grep my-quay-registry-quay-quay | awk '{print $2}')
-----
-+
-[source,sh,role=execute]
-----
-podman login $QUAY_URL -u admin -p admin123
-----
-
-.. Tag the image
-+
-[source,sh,role=execute]
-----
-podman tag quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct $QUAY_URL/admin/granite-3.3-2b-instruct
-----
-
-.. Push the image. This may take two attempts. If there is a failure to push the image initially podman should retry.
-+
-[source,sh,role=execute]
-----
-podman push $QUAY_URL/admin/granite-3.3-2b-instruct
-----
-
-.. Go back to your local Quay repository web console. You should now see the granite-3.3-2b-instruct in the repository.
-+
-[source,sh,role=execute]
-----
-echo $QUAY_URL/repository/admin/granite-3.3-2b-instruct
-----
-+
-image::../images/quay_granite_model.png["Granite model in Quay"]
-
-.. Set the model to *Public* so the pipeline will be able to deploy the model from this repository. 
-+
-image::../images/quay_settings_make_public.png["Make model public"]
+[NOTE]
+====
+The model is sourced directly from Hugging Face (e.g., `ibm-granite/granite-3.3-2b-instruct`). No local container registry (Quay) is required.
+====
 
 === Enable TrustyAI
 We'll need to enable TrustyAI in OpenShift AI so we can run lm-evaluation harness. 
@@ -334,26 +204,18 @@ oc adm policy add-role-to-user view system:serviceaccount:vllm:pipeline -n s3-st
 +
 [source,sh,role=execute]
 ----
-oc apply -f guidellm-pipeline/pipeline/deploy-model-task.yaml -n vllm
+oc apply -f guidellm-pipeline/pipeline/security-scan-task.yaml -n vllm
+oc apply -f guidellm-pipeline/pipeline/gpu-advisor-task.yaml -n vllm
+cp guidellm-pipeline/pipeline/analyze_scan.py /tmp/
 oc apply -f guidellm-pipeline/pipeline/guidellm-benchmark-task.yaml -n vllm
 oc apply -f guidellm-pipeline/pipeline/upload-guidellm-results-task.yaml -n vllm
 oc apply -f guidellm-pipeline/pipeline/lm-eval-task.yaml -n vllm
 oc apply -f guidellm-pipeline/pipeline/model-registry-task.yaml -n vllm
 oc apply -f guidellm-pipeline/pipeline/upload-lm-eval-results-task.yaml -n vllm
-oc apply -f guidellm-pipeline/pipeline/benchmark-eval-pipeline.yaml -n vllm
+oc apply -f guidellm-pipeline/pipeline/model-intake-pipeline.yaml -n vllm
 oc apply -f guidellm-pipeline/pipeline/pvc.yaml -n vllm
 oc apply -f results-ui/deployment.yaml -n vllm
 ----
-
-. Update your *guidellm-pipeline/pipeline/benchmark-eval-pipelinerun.yaml* to use your local Quay endpoint that contains the granite-2b model.
-+
-[source,sh,role=execute]
-----
-oc get route -n quay-registry | grep my-quay-registry-quay-quay | awk '{print $2}'
-----  
-.. Replace the _<REPLACE_ME_WITH_QUAY_ROUTE>_ with the Quay route in your OpenShift cluster. No need to add http/https or the port. For example, your model-url and your uri in valuesContent should look similar to: _my-quay-registry-quay-quay-registry.apps.cluster-11111.22222.com_
-+
-image::../images/pipelinerun_quay_url.png["Update model URL to Quay route"]
 
 . We need to add configmaps to our pipeline run so that lm-eval-harness can load the appropriate evaluation tasks. We'll go into more detail on the LMEvalJob in later sections.
 +
@@ -364,7 +226,7 @@ oc create configmap custom-mmlu --from-file=guidellm-pipeline/custom-lm-eval/cus
 ----
 
 . Time to run the pipeline!
-Before we apply the PipelineRun lets take a look at the parameters we're setting in *guidellm-pipeline/pipeline/benchmark-eval-pipelinerun.yaml*.
+Before we apply the PipelineRun lets take a look at the parameters we're setting in *guidellm-pipeline/pipeline/model-intake-pipelinerun.yaml*.
 
 .. Model parameters
 +
@@ -404,9 +266,35 @@ image::../images/pipeline_params_guidellm.png["GuideLLM specific parameters"]
 +
 image::../images/pipeline_params_s3.png["S3 specific parameters"]
 
-.. Benchmark parameters
+.. Security scan parameters (Gate 1)
 +
-*model-url*: The Quay URL where the model is located. Used in the model registry version for the model.
+*garak-probes*: Comma-separated list of Garak probes to run against the model endpoint.
++
+*garak-detectors*: Comma-separated list of detectors to use (default: all).
++
+*max-seeds*: Maximum number of test seeds per probe.
++
+*severity-threshold*: Minimum severity level to fail the pipeline (block, high, medium, low).
++
+image::../images/pipeline_params_security.png["Security scan parameters"]
+
+.. GPU Advisor parameters (Gate 2)
++
+*target-namespace*: Target OpenShift namespace for model deployment.
++
+*context-length*: Context length for model sizing calculations.
++
+*concurrency*: Number of concurrent sequences for memory estimation.
++
+*allow-time-slicing*: Whether to consider time-slicing when GPUs are insufficient.
++
+*allow-mig*: Whether to consider NVIDIA MIG (Multi-Instance GPU).
++
+*gpu-isolation-policy*: GPU isolation policy (dedicated or shared).
++
+image::../images/pipeline_params_gpu.png["GPU Advisor parameters"]
+
+.. Benchmark parameters
 +
 *lm-eval-job-name*: The name of the LMEvalJob we'll be running.
 +
@@ -416,21 +304,15 @@ image::../images/pipeline_params_s3.png["S3 specific parameters"]
 +
 *custom-filename*: Name of the custom prompt file to use. For the initial run by the ModelOps team we'll run the default dataset.
 +
-*model-reg-author*: The author of who created the version in the model registry.  
+*model-reg-author*: The author of who created the version in the model registry.
 +
 image::../images/pipeline_params_custom.png["custom parameters"]
-
-.. Helm parameters
-+
-*valuesContent*: The YAML we'll set to deploy the model to OpenShift AI. We'll deploy the model from our local Quay repository. 
-+
-image::../images/pipeline_params_helm.png["helm parameters"]
 
 . Create a PipelineRun.
 +
 [source,sh,role=execute]
 ----
-oc create -f guidellm-pipeline/pipeline/benchmark-eval-pipelinerun.yaml -n vllm
+oc create -f guidellm-pipeline/pipeline/model-intake-pipelinerun.yaml -n vllm
 ----
 
 . *View Pipelinerun* - Go to the OpenShift web console and select *Pipelines*. Make sure you have selected the *vllm* project. You should see the pipeline you applied earlier. Click the *PipelineRuns* tab.
@@ -438,12 +320,14 @@ oc create -f guidellm-pipeline/pipeline/benchmark-eval-pipelinerun.yaml -n vllm
 image::../images/ocp-web-console-pipelines.png["ocp pipelines page", 60%, 60%]
 +
 Click on the pipeline run that you just created and select the *Logs* tab.
+
+. *Security Scan* - The first gate runs Garak against the model endpoint, probing for jailbreaks, toxic output, PII leaks, prompt injection, and other vulnerabilities. If any findings exceed the severity threshold, the pipeline halts with logged failure details.
 +
-Your model should be deploying from your local Quay registry. When the InferenceService is ready the model should be deployed.
+image::../images/pipelinerun-security-scan.png["security scan task logs"]
+
+. *GPU Advisor* - The second gate inspects cluster GPU inventory, estimates model memory requirements, and generates a ranked set of deployment options. If a single GPU is available with an existing workload, time-slicing will be proposed. The plan is written to the workspace for review — no deployment occurs automatically. Review the generated plan and approve before proceeding to benchmark.
 +
-image::../images/pipelinerun-deploy-model.png["deploy model task logs"]
-+
-You can also check to see the status of the model deployment in the OpenShift AI web console.
+image::../images/pipelinerun-gpu-advisor.png["gpu advisor task logs"]
 
 . *Benchmark task* - This is the GuideLLM task. Note that we're using the default data because we want to get a baseline of how the model performs on our infrastructure. 
 +
@@ -516,8 +400,9 @@ These UI result pages for GuideLLM and lm-eval are not *supported by Red Hat* an
 NOTE: There is a https://github.com/vllm-project/guidellm?tab=readme-ov-file#guidellm-ui[GuideLLM benchmark UI] that you should consider if you don't want to create or maintain your own solution. 
 
 === Recap
-* You pushed a model into our organization's local Quay repository.
-* Ran a pipeline to get performance and evaluation benchmarks on that model running on our organization's infrastructure. 
-* Uploaded the results to S3 storage and registered a version of the model in the OpenShift AI model registry so other users can easily discover the model and associated benchmark results.
+* Ran a Garak security scan against the model endpoint, halting deployment on any blocked findings.
+* Generated a GPU capacity deployment plan with ranked options (including time-slicing when resources are constrained).
+* Ran a pipeline to get performance and evaluation benchmarks on the model.
+* Uploaded the results to S3 storage and registered a version of the model in the OpenShift AI model registry with associated benchmark results.
 
 *Continue* -> <<ai_engineer_tutorial.adoc#ai-engineer, AI Engineer Tutorial>>

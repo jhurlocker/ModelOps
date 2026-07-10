@@ -1,0 +1,84 @@
+// ModelOps secure model-onboarding pipeline - architecture / flow diagram.
+// Render:  dot -Tpng modelops_pipeline_flow.dot -o modelop_diagram.png
+digraph modelops {
+  rankdir=LR;
+  fontname="Helvetica";
+  labelloc="t";
+  fontsize=20;
+  label="ModelOps: Secure Model Onboarding Pipeline (OpenShift AI)";
+  nodesep=0.4;
+  ranksep=0.7;
+  compound=true;
+  newrank=true;
+
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11,
+        color="#4a4a4a", fillcolor="#eaf2fb", penwidth=1.2];
+  edge [fontname="Helvetica", fontsize=9, color="#4a4a4a"];
+
+  // ---- Actors / external systems -------------------------------------------
+  quay      [label="Quay\nmodelcar catalog\n(OCI model weights)", fillcolor="#fde9d9", shape=cylinder];
+  ui        [label="Model Intake UI\n(submit run +\nhuman approval)", fillcolor="#e9f7e9", shape=note];
+  registry  [label="OpenShift AI\nModel Registry", fillcolor="#e6e0f8", shape=cylinder];
+  s3        [label="S3 / MinIO\n(scan + benchmark\nresult artifacts)", fillcolor="#fdf6d9", shape=cylinder];
+  dashboard [label="OpenShift AI Dashboard\n(per-user model visibility:\nalice sees it, bob does not)", fillcolor="#e9f7e9", shape=note];
+
+  // ---- Phase 1: Sandbox governance (namespace: vllm) -----------------------
+  subgraph cluster_p1 {
+    label="Phase 1 - Sandbox governance  (namespace: vllm, automated)";
+    labelloc="b"; margin=16;
+    style="rounded,filled"; fillcolor="#f4f8fd"; color="#3b73b9"; fontsize=13; fontcolor="#3b73b9";
+
+    compliance [label="Compliance +\nArtifact Scan\n(skopeo + Trivy)\n[GATE 1]", fillcolor="#fADBD8", color="#c0392b", penwidth=2, shape=octagon];
+    adv1       [label="GPU Advisor\n(sandbox)"];
+    share1     [label="Apply GPU Sharing\n(time-slicing / no-op)"];
+    deploy1    [label="Deploy Model\n(KServe/vLLM)"];
+    garak      [label="Security Scan\n(garak red-team)\n[GATE 2]", fillcolor="#fADBD8", color="#c0392b", penwidth=2, shape=octagon];
+    teardown   [label="Teardown\nsandbox model"];
+
+    compliance -> adv1 -> share1 -> deploy1 -> garak -> teardown;
+  }
+
+  // ---- Phase 2: Promote to staging (namespace: vllm-staging) ---------------
+  subgraph cluster_p2 {
+    label="Phase 2 - Promote to staging / models-as-a-service  (namespace: vllm-staging, human-gated)";
+    margin=16;
+    style="rounded,filled"; fillcolor="#f4fbf5"; color="#2e8b57"; fontsize=13; fontcolor="#2e8b57";
+
+    adv2      [label="GPU Advisor\n(staging)"];
+    approval  [label="Wait for Approval\n(human gate)", fillcolor="#fcefc7", color="#b7950b", penwidth=2, shape=octagon];
+    share2    [label="Apply GPU Sharing\n(time-slicing / no-op)"];
+    deploy2   [label="Deploy Model\n(staging)"];
+    grant     [label="Grant Model Access\n(RBAC visibility)"];
+    bench     [label="Benchmark\n(GuideLLM)"];
+    upload    [label="Upload Results\n(S3)"];
+    register  [label="Register Model\n+ Results\n(PRODUCTION-READY)", fillcolor="#d5f5e3", color="#1e8449", penwidth=2];
+
+    adv2 -> approval -> share2 -> deploy2;
+    deploy2 -> grant;
+    deploy2 -> bench -> upload -> register;
+  }
+
+  // ---- Cross-phase / system flows ------------------------------------------
+  quay -> compliance [label="pull artifact", style=dashed, color="#c07a30"];
+  ui   -> compliance [label="submit run", style=dashed, color="#2e8b57"];
+  teardown -> adv2 [label="free GPU,\npromote", color="#3b73b9", penwidth=1.6, ltail=cluster_p1, lhead=cluster_p2];
+
+  approval -> ui [label="plan / decision", dir=both, style=dashed, color="#2e8b57"];
+
+  // Registry writes at each governance stage
+  compliance -> registry [label="register", style=dotted, color="#6f57c0", constraint=false];
+  garak      -> registry [label="update (scan)", style=dotted, color="#6f57c0", constraint=false];
+  register   -> registry [label="finalize", style=dotted, color="#6f57c0", constraint=false];
+
+  // S3 artifact writes
+  compliance -> s3 [label="reports", style=dotted, color="#b7950b", constraint=false];
+  garak      -> s3 [label="reports", style=dotted, color="#b7950b", constraint=false];
+  upload     -> s3 [label="benchmarks", style=dotted, color="#b7950b", constraint=false];
+
+  // Access control surfaces in the dashboard
+  grant -> dashboard [label="grant view\n(staging only)", style=dashed, color="#2e8b57"];
+
+  // Layout hints
+  { rank=same; quay; ui; }
+  { rank=same; registry; s3; dashboard; }
+}

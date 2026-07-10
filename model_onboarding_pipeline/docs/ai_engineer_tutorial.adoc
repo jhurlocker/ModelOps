@@ -91,12 +91,7 @@ image::../images/rhoai_workbench_dsp_node.png["AI pipeline elyra node"]
 +
 Instead of recreating all of the tasks the we created in our OpenShift pipeline we'll reuse them. The way we can do this is by creating a TaskRun for each of our nodes in our OpenShift AI pipeline. This is preferred because we're not duplicating code by recreating the same task logic in our OpenShift AI pipeline. 
 +
-Note the variables we're setting at the top of the cell. Add your local Quay route to the *model_url* variable.
-+
-[source,sh,role=execute]
-----
-oc get route -n quay-registry | grep my-quay-registry-quay-quay
----- 
+Note the variables we're setting at the top of the cell. The *model_url* variable points to the Hugging Face model ID (e.g., `ibm-granite/granite-3.3-2b-instruct:latest`).
 +
 image::../images/rhoai_workbench_deploy_model.png["deploy-model notebook"]
 

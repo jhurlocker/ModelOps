@@ -1,0 +1,141 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: guidellm-benchmark-run-
+spec:
+  params:
+    # Model identification
+    - name: model-id
+      value: 'ibm-granite/granite-3.3-2b-instruct'
+    - name: model-name
+      value: granite-2b
+    - name: requested-by
+      value: 'manual-oc-apply'
+    # Gate 1 - GPU advisor
+    - name: target-namespace
+      value: 'vllm'
+    - name: context-length
+      value: '32768'
+    - name: concurrency
+      value: '4'
+    - name: allow-time-slicing
+      value: 'true'
+    - name: allow-mig
+      value: 'false'
+    - name: gpu-isolation-policy
+      value: 'dedicated'
+    - name: advisor-endpoint
+      value: ''
+    - name: advisor-secret-name
+      value: 'gpu-advisor-credentials'
+    - name: advisor-timeout-seconds
+      value: '180'
+    # Gate 2 - Human approval
+    - name: approval-api-url
+      value: ''
+    - name: approval-poll-interval-seconds
+      value: '15'
+    - name: approval-timeout-seconds
+      value: '3600'
+    # Deploy
+    - name: release-name
+      value: 'granite-2b'
+    - name: chart-url
+      value: 'https://redhat-ai-services.github.io/helm-charts/'
+    - name: chart-version
+      value: '0.7.1'
+    - name: values-content
+      value: ''
+    - name: gpu-count-override
+      value: ''
+    - name: hardware-profile-name
+      value: 'gpu-profile'
+    - name: hardware-profile-namespace
+      value: 'redhat-ods-applications'
+    # Gate 3 - Security scan (garak via EvalHub)
+    - name: severity-threshold
+      value: 'block'
+    # EvalHub
+    - name: evalhub-url
+      value: 'evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com'
+    - name: evalhub-token
+      value: ''
+    - name: tenant-ns
+      value: 'my-first-model'
+    # OpenShift AI console for EvalHub result links
+    - name: openshift-console-domain
+      value: 'rh-ai.apps.ocp.h64s4.sandbox324.opentlc.com'
+    # Benchmark (GuideLLM via EvalHub)
+    - name: guidellm-profile
+      value: 'constant'
+    - name: guidellm-rate
+      value: '1'
+    - name: guidellm-max-seconds
+      value: '30'
+    - name: guidellm-max-requests
+      value: '5'
+    - name: custom-data
+      value: 'False'
+    - name: custom-filename
+      value: 'no-file'
+    # S3
+    - name: s3-api-endpoint
+      value: 'http://minio-service.s3-storage.svc.cluster.local:9000'
+    - name: s3-access-key-id
+      value: 'minio'
+    - name: s3-secret-access-key
+      value: 'minio123'
+    # lm-eval
+    - name: lm-eval-job-name
+      value: 'mmlu-jurisprudence-eval-job'
+    - name: lm-eval-custom
+      value: 'False'
+    # MaaS (Models-as-a-Service) production deployment
+    - name: deploy-maas
+      value: 'false'
+    - name: maas-serving-ns
+      value: 'llm'
+    - name: maas-policy-ns
+      value: 'models-as-a-service'
+    - name: maas-gpu-count
+      value: '1'
+    - name: maas-runtime-image
+      value: 'registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0'
+    - name: maas-authorized-group
+      value: 'system:authenticated'
+    # Model registry
+    - name: model-reg-author
+      value: 'ModelOps Platform Team'
+  pipelineRef:
+    name: guidellm-benchmark-pipeline
+  taskRunSpecs:
+  - pipelineTaskName: gpu-advisor
+    computeResources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  - pipelineTaskName: security-scan
+    computeResources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  timeouts:
+    pipeline: 2h0m0s
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: guidellm-output-pvc
+    - name: manifests
+      configMap:
+        name: mmlu-manifest
+    - name: custom-mmlu
+      configMap:
+        name: custom-mmlu

@@ -1,0 +1,313 @@
+# FILE: model-registry-task.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: model-registry
+  namespace: vllm
+spec:
+  description: |
+    FINAL onboarding step. UPDATES the model's existing OpenShift AI Model
+    Registry entry (created back at the compliance/artifact scan stage and
+    updated again after the garak security scan) with the staging
+    benchmark (GuideLLM) and evaluation (lm-eval) results, and marks the
+    model PRODUCTION-READY.
+
+    Unlike the original version, this task talks to the registry's in-cluster
+    REST service directly (no dependency on an external route file), and it
+    UPSERTS: if the entry somehow doesn't exist yet (e.g. running this task
+    standalone), it is created rather than failing. Registry writes are
+    best-effort so a registry hiccup never fails the pipeline.
+  params:
+    - name: model-name
+      type: string
+      description: "Registered-model name (identity across the whole pipeline)."
+    - name: model-version
+      type: string
+      default: "v1"
+      description: "Model Registry version to update."
+    - name: model-url
+      type: string
+      default: ""
+      description: "Optional artifact/repo URL recorded on the entry."
+    - name: model-reg-author
+      type: string
+      default: "ModelOps Platform Team"
+    - name: mr-server
+      type: string
+      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      description: "OpenShift AI Model Registry REST base URL (in-cluster service)."
+    - name: mr-port
+      type: string
+      default: "8080"
+    - name: staging-namespace
+      type: string
+      default: "vllm-staging"
+      description: "Namespace the model was promoted to (recorded as metadata)."
+    - name: custom-data
+      type: string
+      default: "False"
+      description: "When True, benchmark links are tagged as custom-dataset runs."
+    - name: openshift-console-domain
+      type: string
+      default: ""
+      description: "OpenShift AI console apps domain (e.g. rh-ai.apps.ocp.h64s4.sandbox324.opentlc.com) for EvalHub links."
+    - name: evalhub-garak-job-id
+      type: string
+      default: ""
+      description: "EvalHub job ID from the garak security scan task."
+    - name: evalhub-guidellm-job-id
+      type: string
+      default: ""
+      description: "EvalHub job ID from the guidellm benchmark task."
+    - name: tenant-ns
+      type: string
+      default: ""
+      description: "Tenant namespace used by EvalHub jobs."
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace holding benchmark/eval result timestamps + UI routes.
+  steps:
+    # Resolve the benchmark-viewer + S3 UI routes so the registry entry can carry
+    # human-friendly links to the GuideLLM results. Previously these files were
+    # written by the lm-eval task, but that task is optional/disabled, so the
+    # links were never populated. This step is self-contained and best-effort:
+    # a missing route just yields an empty link (the property is then skipped).
+    - name: resolve-result-routes
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      script: |
+        #!/usr/bin/env bash
+        set -uo pipefail
+        WS="$(workspaces.shared-workspace.path)"
+        BNCMRK_HOST=$(oc get route benchmark-viewer -n vllm -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+        S3_HOST=$(oc get route s3-ui-route -n s3-storage -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+        S3_ROUTE=""
+        [ -n "$S3_HOST" ] && S3_ROUTE="https://$S3_HOST"
+        echo "$BNCMRK_HOST" > "$WS/benchmarkui-route.txt"
+        echo "$S3_ROUTE"    > "$WS/s3ui-route.txt"
+        echo "benchmark-viewer route: ${BNCMRK_HOST:-<none>}"
+        echo "s3 UI route:            ${S3_ROUTE:-<none>}"
+        # Read evalhub job IDs from workspace files written by upstream tasks
+        cat "$WS/garak-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-garak-job-id.txt" || true
+        cat "$WS/guidellm-evalhub-job-id.txt" 2>/dev/null > "$WS/evalhub-guidellm-job-id.txt" || true
+    - name: update-registry
+      image: registry.access.redhat.com/ubi9/python-311
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: WORKSPACE_PATH
+          value: $(workspaces.shared-workspace.path)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_VERSION
+          value: $(params.model-version)
+        - name: MODEL_URL
+          value: $(params.model-url)
+        - name: MR_SERVER
+          value: $(params.mr-server)
+        - name: MR_PORT
+          value: $(params.mr-port)
+        - name: MR_AUTHOR
+          value: $(params.model-reg-author)
+        - name: STAGING_NAMESPACE
+          value: $(params.staging-namespace)
+        - name: CUSTOM_DATA
+          value: $(params.custom-data)
+        - name: OPENSHIFT_CONSOLE_DOMAIN
+          value: $(params.openshift-console-domain)
+        - name: TENANT_NS
+          value: $(params.tenant-ns)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        pip install -q model-registry 2>&1 | grep -v "already satisfied" || true
+
+        # --- Build the benchmark/eval property set from the workspace files. ---
+        cat > /tmp/build_props.py << 'PYEOF'
+        import json
+        import os
+
+        ws = os.environ["WORKSPACE_PATH"]
+        model = os.environ.get("MODEL_NAME", "model")
+        custom = os.environ.get("CUSTOM_DATA", "False").strip().lower() == "true"
+
+        def read(name):
+            try:
+                with open(os.path.join(ws, name)) as f:
+                    return f.read().strip()
+            except Exception:
+                return ""
+
+        bench_ts = read("timestamp.txt")
+        lmeval_ts = read("lmeval-timestamp.txt") or read("lm-eval-timestamp.txt")
+        bench_ui = read("benchmarkui-route.txt")
+        s3_ui = read("s3ui-route.txt")
+        garak_job_id = read("evalhub-garak-job-id.txt")
+        guidellm_job_id = read("evalhub-guidellm-job-id.txt")
+        console_domain = os.environ.get("OPENSHIFT_CONSOLE_DOMAIN", "").strip().rstrip("/")
+        tenant_ns = os.environ.get("TENANT_NS", "").strip()
+
+        pfx = "custom" if custom else "default"
+        props = {
+            "onboarding-stage": "staging-benchmark-eval",
+            "overall-status": "PRODUCTION-READY (staging validated)",
+            "staging-namespace": os.environ.get("STAGING_NAMESPACE", ""),
+            "benchmark-dataset": pfx,
+        }
+        if os.environ.get("MODEL_URL"):
+            props["model-artifact-url"] = os.environ["MODEL_URL"]
+
+        if bench_ts:
+            bench_file = "{}_{}-results.yaml".format(bench_ts, model)
+            if bench_ui:
+                props["guidellm-results-ui"] = "https://{}/?file={}".format(bench_ui, bench_file)
+            if s3_ui:
+                props["guidellm-results-s3"] = "{}/download/benchmark-results/{}".format(s3_ui, bench_file)
+        if lmeval_ts:
+            lm_file = "{}_lm-eval-results.json".format(lmeval_ts)
+            if bench_ui:
+                props["lm-eval-results-ui"] = "https://{}/?file={}".format(bench_ui, lm_file)
+            if s3_ui:
+                props["lm-eval-results-s3"] = "{}/download/benchmark-results/{}".format(s3_ui, lm_file)
+
+        if garak_job_id and console_domain and tenant_ns:
+            props["evalhub-garak-results"] = "https://{}/evaluation/{}/results/{}".format(
+                console_domain, tenant_ns, garak_job_id)
+        if guidellm_job_id and console_domain and tenant_ns:
+            props["evalhub-guidellm-results"] = "https://{}/evaluation/{}/results/{}".format(
+                console_domain, tenant_ns, guidellm_job_id)
+
+        with open("/tmp/mr_props.json", "w") as f:
+            json.dump(props, f)
+        print("--- Registry properties to merge ---")
+        print(json.dumps(props, indent=2))
+        PYEOF
+        python3 /tmp/build_props.py
+
+        export MR_STAGE="staging-benchmark-eval"
+        export MODEL_URI="$(cat /tmp/modeluri 2>/dev/null || echo "")"
+        [ -z "$MODEL_URI" ] && export MODEL_URI="oci://quay.io/${MODEL_NAME}"
+        export MODEL_DESCRIPTION="Production-ready after staging benchmark + evaluation (ModelOps pipeline)."
+        export MR_PROPS_JSON="$(cat /tmp/mr_props.json)"
+
+        cat > /tmp/registry_helper.py << 'REGEOF'
+        #!/usr/bin/env python3
+        # Canonical model-registry upsert helper, embedded (identically) into every
+        # Tekton task that writes to the OpenShift AI Model Registry. Driven entirely
+        # by environment variables so the same code works at every onboarding stage.
+        #
+        #   MR_SERVER          registry REST base, e.g.
+        #                      http://modelops-registry.rhoai-model-registries.svc.cluster.local
+        #   MR_PORT            registry REST port (default 8080)
+        #   MR_AUTHOR          author recorded on the entry
+        #   MODEL_NAME         registered-model name (identity across the whole pipeline)
+        #   MODEL_VERSION      version name (default v1)
+        #   MODEL_URI          artifact URI (used only when first registering)
+        #   MODEL_DESCRIPTION  optional description (set on first registration)
+        #   MODEL_FORMAT       model format name (default vLLM)
+        #   MR_STAGE           furthest onboarding stage reached (e.g. compliance-artifact-scan)
+        #   MR_PROPS_JSON      JSON object of custom properties to MERGE onto the version
+        #
+        # It is intentionally best-effort: a registry hiccup logs a WARNING and exits 0
+        # so it can never, by itself, fail the pipeline. The *gating* is done by the
+        # scan steps, not here.
+        import json
+        import os
+        import subprocess
+        import sys
+        import time
+
+
+        def log(msg):
+            print("[model-registry] {}".format(msg), flush=True)
+
+
+        def main():
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "model-registry"], check=True)
+            from model_registry import ModelRegistry
+
+            server = os.environ["MR_SERVER"].rstrip("/")
+            port = int(os.environ.get("MR_PORT", "8080"))
+            author = os.environ.get("MR_AUTHOR", "ModelOps Platform")
+            name = os.environ["MODEL_NAME"]
+            version = os.environ.get("MODEL_VERSION", "v1")
+            uri = os.environ.get("MODEL_URI", "") or "oci://unknown/{}:{}".format(name, version)
+            description = os.environ.get("MODEL_DESCRIPTION", "")
+            fmt = os.environ.get("MODEL_FORMAT", "vLLM")
+            stage = os.environ.get("MR_STAGE", "")
+
+            try:
+                props = json.loads(os.environ.get("MR_PROPS_JSON", "{}") or "{}")
+            except Exception as e:
+                log("WARNING: MR_PROPS_JSON not valid JSON ({}); ignoring.".format(e))
+                props = {}
+
+            # Registry custom_properties must be scalar; coerce everything to str.
+            merged = {str(k): ("" if v is None else str(v)) for k, v in props.items()}
+            if stage:
+                merged["onboarding-stage"] = stage
+            merged["last-updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+
+            is_secure = server.lower().startswith("https")
+            try:
+                client = ModelRegistry(server_address=server, port=port, author=author, is_secure=is_secure)
+            except Exception as e:
+                log("WARNING: could not connect to model registry at {}:{} ({}). "
+                    "Skipping registry update.".format(server, port, e))
+                return
+
+            try:
+                existing = {m.name for m in client.get_registered_models()}
+            except Exception as e:
+                log("WARNING: could not list registered models ({}). Skipping.".format(e))
+                return
+
+            if name in existing:
+                log("Model '{}' already registered - updating version '{}'.".format(name, version))
+                try:
+                    v = client.get_model_version(name, version)
+                except Exception:
+                    v = None
+                if v is None:
+                    # Model exists but this version doesn't yet; create it.
+                    try:
+                        client.register_model(
+                            name=name, uri=uri, version=version,
+                            model_format_name=fmt, model_format_version="1",
+                            description=description or "Registered by ModelOps pipeline",
+                            metadata=merged,
+                        )
+                        log("Created new version '{}' with {} properties.".format(version, len(merged)))
+                        return
+                    except Exception as e:
+                        log("WARNING: could not create version '{}' ({}).".format(version, e))
+                        return
+                current = dict(v.custom_properties) if v.custom_properties else {}
+                current.update(merged)
+                v.custom_properties = current
+                try:
+                    client.update(v)
+                    log("Updated version '{}' - merged {} properties.".format(version, len(merged)))
+                except Exception as e:
+                    log("WARNING: could not update version '{}' ({}).".format(version, e))
+            else:
+                log("Model '{}' not found - registering new entry (version '{}').".format(name, version))
+                try:
+                    client.register_model(
+                        name=name, uri=uri, version=version,
+                        model_format_name=fmt, model_format_version="1",
+                        description=description or "Onboarding via ModelOps pipeline",
+                        metadata=merged,
+                    )
+                    log("Registered '{}' with {} properties.".format(name, len(merged)))
+                except Exception as e:
+                    log("WARNING: could not register model '{}' ({}).".format(name, e))
+
+
+        if __name__ == "__main__":
+            try:
+                main()
+            except Exception as e:
+                log("WARNING: unexpected registry error ({}); continuing (non-fatal).".format(e))
+        REGEOF
+        python3 /tmp/registry_helper.py
+        echo "--- Model Registry update complete. ---"

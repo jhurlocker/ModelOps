@@ -1,0 +1,137 @@
+# FILE: grant-model-access-task.yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: grant-model-access
+  namespace: vllm
+spec:
+  description: |
+    Grants a set of users and/or groups permission to SEE (and read) the
+    freshly-promoted model in the OpenShift AI dashboard, by creating namespaced
+    RoleBindings in the staging namespace that bind a read ClusterRole (default
+    `view`) to each subject.
+
+    This demonstrates namespace-RBAC-based visibility control WITHOUT introducing
+    inference authorization tokens: a non-admin user who is NOT in the list will
+    not see the model / its serving endpoint in the RHOAI "Models" view for the
+    project, while a user who IS in the list will. (Real production setups would
+    additionally protect the inference endpoint itself with auth tokens - this
+    task is purely about dashboard/project visibility for the demo.)
+
+    Behaviour:
+      * `authorized-viewers` empty  -> no-op (only cluster-admins / existing
+        project members can see the model, i.e. the default).
+      * each entry is a subject. Prefix with `group:` for an OpenShift Group,
+        otherwise it is treated as a User. e.g.
+        "alice, group:ml-reviewers, bob".
+    RoleBindings created by this task are labelled so they can be identified /
+    cleaned up per model.
+  params:
+    - name: model-name
+      type: string
+      description: "Registered-model / release name (used to name + label the RoleBindings)."
+    - name: namespace
+      type: string
+      default: "vllm-staging"
+      description: "Namespace the model was promoted to (where visibility is granted)."
+    - name: authorized-viewers
+      type: string
+      default: ""
+      description: >-
+        Comma-separated users and/or groups allowed to see the model. Prefix an
+        entry with 'group:' for an OpenShift Group; otherwise it is a User.
+        Empty = grant to nobody extra (default project/cluster-admin only).
+    - name: access-role
+      type: string
+      default: "view"
+      description: "ClusterRole to bind for each viewer (view = read-only visibility)."
+  steps:
+    - name: grant-access
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      env:
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: NAMESPACE
+          value: $(params.namespace)
+        - name: AUTHORIZED_VIEWERS
+          value: $(params.authorized-viewers)
+        - name: ACCESS_ROLE
+          value: $(params.access-role)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        echo "=================================================================="
+        echo " Model access control (namespace visibility) for '${MODEL_NAME}'"
+        echo " Namespace: ${NAMESPACE}    Read role: ${ACCESS_ROLE}"
+        echo "=================================================================="
+
+        # Sanitise a subject name into a DNS-1123-safe RoleBinding name fragment.
+        sanitize() {
+          echo "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+            | sed 's/^-*//; s/-*$//' | cut -c1-40
+        }
+
+        # First, remove any stale viewer RoleBindings this task previously created
+        # for THIS model, so the grant list is authoritative each run.
+        echo "--- Removing previously-granted viewers for '${MODEL_NAME}' (if any) ---"
+        oc delete rolebinding -n "${NAMESPACE}" \
+          -l "modelops.access-for=${MODEL_NAME}" --ignore-not-found=true || true
+
+        if [ -z "${AUTHORIZED_VIEWERS// /}" ]; then
+          echo ""
+          echo "No authorized-viewers supplied - leaving default visibility in place."
+          echo "Only cluster-admins and existing project members can see this model."
+          echo "DONE (no-op)."
+          exit 0
+        fi
+
+        # Split on commas.
+        IFS=',' read -ra ENTRIES <<< "${AUTHORIZED_VIEWERS}"
+        GRANTED=0
+        for raw in "${ENTRIES[@]}"; do
+          entry="$(echo "$raw" | xargs)"          # trim whitespace
+          [ -z "$entry" ] && continue
+
+          if [[ "$entry" == group:* ]]; then
+            KIND="Group"
+            SUBJECT="${entry#group:}"
+          else
+            KIND="User"
+            SUBJECT="$entry"
+          fi
+          SUBJECT="$(echo "$SUBJECT" | xargs)"
+          [ -z "$SUBJECT" ] && continue
+
+          RB_NAME="$(sanitize "${MODEL_NAME}")-viewer-$(sanitize "${SUBJECT}")"
+          echo ""
+          echo "--- Granting ${KIND} '${SUBJECT}' '${ACCESS_ROLE}' on ${NAMESPACE} (RoleBinding ${RB_NAME}) ---"
+
+          cat <<RBEOF | oc apply -f -
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: ${RB_NAME}
+          namespace: ${NAMESPACE}
+          labels:
+            modelops.access-for: ${MODEL_NAME}
+            app.kubernetes.io/managed-by: modelops-pipeline
+        subjects:
+          - kind: ${KIND}
+            apiGroup: rbac.authorization.k8s.io
+            name: ${SUBJECT}
+        roleRef:
+          kind: ClusterRole
+          name: ${ACCESS_ROLE}
+          apiGroup: rbac.authorization.k8s.io
+        RBEOF
+          GRANTED=$((GRANTED+1))
+        done
+
+        echo ""
+        echo "=================================================================="
+        echo " Granted visibility to ${GRANTED} subject(s)."
+        echo " Current viewer RoleBindings for '${MODEL_NAME}':"
+        oc get rolebinding -n "${NAMESPACE}" -l "modelops.access-for=${MODEL_NAME}" \
+          -o custom-columns=NAME:.metadata.name,ROLE:.roleRef.name,SUBJECTS:.subjects[*].name || true
+        echo "=================================================================="
