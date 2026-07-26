@@ -1,0 +1,9 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+# MaaS deploy needs the OpenShift CLI for `oc` commands
+RUN pip install --no-cache-dir requests && \
+    curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/openshift-client-linux.tar.gz | tar -C /usr/local/bin -xzf - oc
+
+COPY deploy.py /usr/local/bin/maas-deploy
+
+ENTRYPOINT ["python3", "/usr/local/bin/maas-deploy"]

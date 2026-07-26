@@ -76,9 +76,17 @@ metadata:
   name: model-intake-tekton
   namespace: vllm
 rules:
+  # ModelRequests - the primary CRD for onboarding
+  - apiGroups: ["modelops.example.io"]
+    resources: ["modelrequests"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["modelops.example.io"]
+    resources: ["modelrequests/status"]
+    verbs: ["get"]
+  # Tekton PipelineRuns (for viewing status)
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns", "taskruns"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["tekton.dev"]
     resources: ["pipelines"]
     verbs: ["get", "list"]

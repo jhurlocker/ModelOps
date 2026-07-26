@@ -1,0 +1,7 @@
+# Kubebuilder PROJECT file
+domain: example.io
+layout:
+- go.kubebuilder.io/v4
+projectName: modelops-operator
+repo: github.com/jhurlocker/modelops-operator
+version: "3"

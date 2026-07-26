@@ -1,0 +1,7 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+RUN pip install --no-cache-dir boto3
+
+COPY upload.py /usr/local/bin/s3-upload
+
+ENTRYPOINT ["python3", "/usr/local/bin/s3-upload"]

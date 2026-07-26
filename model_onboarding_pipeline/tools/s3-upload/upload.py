@@ -1,0 +1,61 @@
+"""
+S3 upload helper - used by multiple tasks to upload benchmark/evaluation results.
+
+Environment variables:
+  S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+  S3_BUCKET         target bucket
+  TIMESTAMP          prefix for the key
+  PATTERN            glob pattern for files to upload (default: *)
+  PREFIX_OVERRIDE    optional override for the S3 key prefix
+"""
+
+import glob
+import os
+import sys
+
+import boto3
+from botocore.client import Config
+
+
+def main():
+    endpoint = os.environ.get("S3_ENDPOINT_URL")
+    access_key = os.environ.get("S3_ACCESS_KEY_ID")
+    secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
+    bucket = os.environ.get("S3_BUCKET", "benchmark-results")
+    timestamp = os.environ.get("TIMESTAMP", "unknown")
+    pattern = os.environ.get("PATTERN", "*")
+    prefix_override = os.environ.get("PREFIX_OVERRIDE", "")
+
+    s3 = boto3.client(
+        "s3", endpoint_url=endpoint,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=Config(s3={"addressing_style": "path"}),
+    )
+
+    existing = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
+    if bucket not in existing:
+        s3.create_bucket(Bucket=bucket)
+        print(f"Created bucket '{bucket}'.")
+
+    pattern_parts = []
+    if pattern == "*":
+        pattern_parts = ["*"]
+    else:
+        pattern_parts = pattern.split(",")
+
+    for p in pattern_parts:
+        for path in glob.glob(p.strip()):
+            if not os.path.isfile(path):
+                continue
+            prefix = prefix_override or timestamp
+            key = f"{prefix}/{os.path.basename(path)}"
+            try:
+                s3.upload_file(path, bucket, key)
+                print(f"Uploaded {path} -> s3://{bucket}/{key}")
+            except Exception as e:
+                print(f"WARN: failed to upload {path}: {e}")
+
+
+if __name__ == "__main__":
+    main()

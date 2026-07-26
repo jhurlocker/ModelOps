@@ -1,0 +1,7 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+RUN pip install --no-cache-dir requests boto3 model-registry==0.3.0
+
+COPY scanner.py /usr/local/bin/security-scanner
+
+ENTRYPOINT ["python3", "/usr/local/bin/security-scanner"]

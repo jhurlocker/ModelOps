@@ -1,0 +1,55 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: modelops-operator-controller
+  labels:
+    app.kubernetes.io/name: modelops-operator
+rules:
+  # ModelRequest CRD
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - modelrequests
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - modelrequests/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - modelrequests/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Tekton PipelineRuns (create + watch for status)
+  - apiGroups:
+      - tekton.dev
+    resources:
+      - pipelineruns
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  # Events
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch

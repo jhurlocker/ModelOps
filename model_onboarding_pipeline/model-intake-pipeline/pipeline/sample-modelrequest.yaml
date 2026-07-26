@@ -1,0 +1,42 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: ModelRequest
+metadata:
+  name: granite-2b-onboarding
+  namespace: vllm
+  labels:
+    app.kubernetes.io/created-by: model-intake-ui
+spec:
+  modelSource: huggingface
+  modelURI: ibm-granite/granite-3.3-2b-instruct
+  modelName: granite-2b
+  targetEnvironment: sandbox
+  pipelineRef: model-intake-pipeline
+
+  compliance:
+    cveThreshold: critical
+
+  gpuAdvisor:
+    contextLength: 32768
+    concurrency: 4
+    allowTimeSlicing: true
+    allowMIG: false
+    gpuIsolationPolicy: dedicated
+
+  securityScan:
+    severityThreshold: block
+    evalhubUrl: evalhub-redhat-ods-applications.apps.example.com
+
+  benchmark:
+    profile: constant
+    rate: 4.0
+    maxSeconds: 15
+    maxRequests: 2
+
+  approval:
+    apiUrl: http://model-intake.vllm.svc.cluster.local:8080
+    pollIntervalSeconds: 15
+    timeoutSeconds: 3600
+
+  modelAccess:
+    authorizedViewers: alice, bob, group:ml-team
+    accessRole: view

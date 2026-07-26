@@ -1,0 +1,7 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+RUN pip install --no-cache-dir requests
+
+COPY approve.py /usr/local/bin/approval-gate
+
+ENTRYPOINT ["python3", "/usr/local/bin/approval-gate"]

@@ -1,0 +1,7 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+RUN pip install --no-cache-dir model-registry==0.3.0
+
+COPY register.py /usr/local/bin/model-registry-helper
+
+ENTRYPOINT ["python3", "/usr/local/bin/model-registry-helper"]

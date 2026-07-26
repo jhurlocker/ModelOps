@@ -1,22 +1,15 @@
 import json
 import os
 import sqlite3
-import time
 import uuid
 from datetime import datetime, timezone
 
 from flask import Flask, g, jsonify, redirect, render_template_string, request, url_for
 
-# --- Configuration (all overridable via environment variables / Secret) ---
+# --- Configuration -------------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", "/data/model-intake.db")
 PIPELINE_NAMESPACE = os.environ.get("PIPELINE_NAMESPACE", "vllm")
 PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "model-intake-pipeline")
-PIPELINE_SERVICE_ACCOUNT = os.environ.get("PIPELINE_SERVICE_ACCOUNT", "pipeline")
-SHARED_WORKSPACE_PVC = os.environ.get("SHARED_WORKSPACE_PVC", "guidellm-output-pvc")
-MANIFESTS_CONFIGMAP = os.environ.get("MANIFESTS_CONFIGMAP", "mmlu-manifest")
-CUSTOM_MMLU_CONFIGMAP = os.environ.get("CUSTOM_MMLU_CONFIGMAP", "custom-mmlu")
-# In-cluster URL of THIS app, used as the default approval-api-url param so
-# the wait-for-approval Task (running as a pod inside the cluster) can reach us.
 SELF_INTERNAL_URL = os.environ.get(
     "SELF_INTERNAL_URL", "http://model-intake.vllm.svc.cluster.local:8080"
 )
@@ -26,6 +19,10 @@ DEFAULT_S3_ENDPOINT = os.environ.get(
 DEFAULT_S3_ACCESS_KEY = os.environ.get("DEFAULT_S3_ACCESS_KEY", "minio")
 DEFAULT_S3_SECRET_KEY = os.environ.get("DEFAULT_S3_SECRET_KEY", "minio123")
 DEFAULT_ADVISOR_ENDPOINT = os.environ.get("DEFAULT_ADVISOR_ENDPOINT", "")
+
+MODELOPS_GROUP = "modelops.example.io"
+MODELOPS_VERSION = "v1alpha1"
+MODELOPS_PLURAL = "modelrequests"
 
 app = Flask(__name__)
 
@@ -74,12 +71,14 @@ def init_db():
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS runs (
-            run_name TEXT PRIMARY KEY,
-            model_id TEXT,
+        CREATE TABLE IF NOT EXISTS model_requests (
+            request_name TEXT PRIMARY KEY,
+            model_source TEXT,
+            model_uri TEXT,
             model_name TEXT,
+            target_environment TEXT,
             requested_by TEXT,
-            params_json TEXT,
+            spec_json TEXT,
             created_at TEXT
         )
         """
@@ -95,71 +94,67 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# --- Kubernetes / Tekton integration -----------------------------------------
+# --- Kubernetes integration (ModelRequest CRD) ------------------------------
 
-_k8s_api = None
+
+_k8s_custom_api = None
+_k8s_core_api = None
 
 
 def k8s_custom_api():
-    """Lazily initialise the Kubernetes CustomObjectsApi (in-cluster config)."""
-    global _k8s_api
-    if _k8s_api is None:
+    global _k8s_custom_api
+    if _k8s_custom_api is None:
         from kubernetes import client, config
 
         try:
             config.load_incluster_config()
         except Exception:
-            # Allow `oc port-forward` / local kubeconfig testing outside the cluster.
             config.load_kube_config()
-        _k8s_api = client.CustomObjectsApi()
-    return _k8s_api
+        _k8s_custom_api = client.CustomObjectsApi()
+    return _k8s_custom_api
 
 
-TEKTON_GROUP = "tekton.dev"
-TEKTON_VERSION = "v1"
+def k8s_core_api():
+    global _k8s_core_api
+    if _k8s_core_api is None:
+        from kubernetes import client, config
+
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        _k8s_core_api = client.CoreV1Api()
+    return _k8s_core_api
 
 
-def create_pipelinerun(run_name, params):
+def create_model_request(request_name, spec):
     api = k8s_custom_api()
     body = {
-        "apiVersion": "tekton.dev/v1",
-        "kind": "PipelineRun",
+        "apiVersion": "{}/{}".format(MODELOPS_GROUP, MODELOPS_VERSION),
+        "kind": "ModelRequest",
         "metadata": {
-            "name": run_name,
+            "name": request_name,
             "labels": {"app.kubernetes.io/created-by": "model-intake-ui"},
         },
-        "spec": {
-            "pipelineRef": {"name": PIPELINE_NAME},
-            "params": [{"name": k, "value": v} for k, v in params.items()],
-            "taskRunTemplate": {"serviceAccountName": PIPELINE_SERVICE_ACCOUNT},
-            "timeouts": {"pipeline": "2h0m0s"},
-            "workspaces": [
-                {
-                    "name": "shared-workspace",
-                    "persistentVolumeClaim": {"claimName": SHARED_WORKSPACE_PVC},
-                },
-                {"name": "manifests", "configMap": {"name": MANIFESTS_CONFIGMAP}},
-                {"name": "custom-mmlu", "configMap": {"name": CUSTOM_MMLU_CONFIGMAP}},
-            ],
-        },
+        "spec": spec,
     }
     return api.create_namespaced_custom_object(
-        group=TEKTON_GROUP,
-        version=TEKTON_VERSION,
+        group=MODELOPS_GROUP,
+        version=MODELOPS_VERSION,
         namespace=PIPELINE_NAMESPACE,
-        plural="pipelineruns",
+        plural=MODELOPS_PLURAL,
         body=body,
     )
 
 
-def list_pipelineruns(limit=25):
+def list_model_requests(limit=25):
     api = k8s_custom_api()
     try:
         resp = api.list_namespaced_custom_object(
-            group=TEKTON_GROUP,
-            version=TEKTON_VERSION,
+            group=MODELOPS_GROUP,
+            version=MODELOPS_VERSION,
             namespace=PIPELINE_NAMESPACE,
-            plural="pipelineruns",
+            plural=MODELOPS_PLURAL,
             label_selector="app.kubernetes.io/created-by=model-intake-ui",
         )
         items = resp.get("items", [])
@@ -169,37 +164,166 @@ def list_pipelineruns(limit=25):
         )
         return items[:limit]
     except Exception as e:
-        app.logger.warning("Could not list PipelineRuns: %s", e)
+        app.logger.warning("Could not list ModelRequests: %s", e)
         return []
 
 
-def get_pipelinerun(name):
+def get_model_request(name):
     api = k8s_custom_api()
     try:
         return api.get_namespaced_custom_object(
-            group=TEKTON_GROUP,
-            version=TEKTON_VERSION,
+            group=MODELOPS_GROUP,
+            version=MODELOPS_VERSION,
             namespace=PIPELINE_NAMESPACE,
-            plural="pipelineruns",
+            plural=MODELOPS_PLURAL,
             name=name,
         )
     except Exception as e:
-        app.logger.warning("Could not get PipelineRun %s: %s", name, e)
+        app.logger.warning("Could not get ModelRequest %s: %s", name, e)
         return None
 
 
-def pipelinerun_status(pr):
-    if not pr:
+def modelrequest_status(mr):
+    if not mr:
         return "Unknown"
-    conditions = pr.get("status", {}).get("conditions", [])
+    status_block = mr.get("status", {})
+    phase = status_block.get("phase", "")
+    if phase:
+        return phase
+    conditions = status_block.get("conditions", [])
     for c in conditions:
-        if c.get("type") == "Succeeded":
+        if c.get("type") == "Ready":
             if c.get("status") == "True":
                 return "Succeeded"
-            if c.get("status") == "False":
-                return "Failed: {}".format(c.get("reason", ""))
-            return "Running: {}".format(c.get("reason", ""))
+            return "Failed: {}".format(c.get("reason", ""))
     return "Pending"
+
+
+# --- Build ModelRequest spec from form params --------------------------------
+
+
+def build_modelrequest_spec(params):
+    spec = {
+        "modelSource": params.get("model-source", "huggingface"),
+        "modelURI": params.get("model-id"),
+        "targetEnvironment": params.get("target-environment", "sandbox"),
+        "pipelineRef": params.get("pipeline-ref", PIPELINE_NAME),
+        "modelName": params.get("model-name"),
+        "modelVersion": params.get("model-version", "v1"),
+        "requestedBy": params.get("requested-by", ""),
+    }
+
+    if params.get("modelcar-repo") or params.get("modelcar-image"):
+        spec["modelCar"] = {
+            "repo": params.get("modelcar-repo", "redhat-ai-services/modelcar-catalog"),
+            "image": params.get("modelcar-image", ""),
+        }
+
+    spec["namespaces"] = {
+        "sandbox": params.get("target-namespace", "vllm"),
+        "staging": params.get("staging-namespace", "vllm-staging"),
+    }
+
+    if params.get("artifact-cve-threshold") or params.get("artifact-scan-image"):
+        spec["compliance"] = {
+            "artifactScanImage": params.get("artifact-scan-image", "registry.access.redhat.com/ubi9/python-311:latest"),
+            "cveThreshold": params.get("artifact-cve-threshold", "critical"),
+            "ignoreUnfixed": params.get("ignore-unfixed", "true"),
+            "allowedArchitectures": [
+                a.strip() for a in params.get("allowed-architectures", "amd64,x86_64").split(",") if a.strip()
+            ],
+        }
+
+    spec["gpuAdvisor"] = {
+        "contextLength": int(params.get("context-length", 32768)),
+        "concurrency": int(params.get("concurrency", 4)),
+        "allowTimeSlicing": params.get("allow-time-slicing", "true") == "true",
+        "allowMIG": params.get("allow-mig", "false") == "true",
+        "gpuIsolationPolicy": params.get("gpu-isolation-policy", "dedicated"),
+        "gpuOperatorNamespace": params.get("gpu-operator-namespace", "nvidia-gpu-operator"),
+        "clusterPolicyName": params.get("clusterpolicy-name", "gpu-cluster-policy"),
+        "timeSlicingConfigMap": params.get("time-slicing-configmap", "modelops-time-slicing"),
+        "maxTimeSlices": int(params.get("max-time-slices", 8)),
+        "advisorEndpoint": params.get("advisor-endpoint", ""),
+        "advisorSecretName": params.get("advisor-secret-name", "gpu-advisor-credentials"),
+        "advisorTimeoutSeconds": int(params.get("advisor-timeout-seconds", 300)),
+    }
+
+    spec["deploy"] = {
+        "chartUrl": params.get("chart-url", "https://redhat-ai-services.github.io/helm-charts/"),
+        "chartVersion": params.get("chart-version", "0.7.1"),
+        "gpuCountOverride": params.get("gpu-count-override", ""),
+        "hardwareProfileName": params.get("hardware-profile-name", "gpu-profile"),
+        "hardwareProfileNamespace": params.get("hardware-profile-namespace", "redhat-ods-applications"),
+        "valuesContent": params.get("values-content", ""),
+        "releaseName": params.get("model-name", ""),
+    }
+
+    spec["securityScan"] = {
+        "severityThreshold": params.get("severity-threshold", "block"),
+        "evalhubUrl": params.get("evalhub-url", ""),
+        "evalhubToken": params.get("evalhub-token", ""),
+        "tenantNamespace": params.get("target-namespace", "vllm"),
+        "openshiftConsoleDomain": params.get("openshift-console-domain", ""),
+    }
+
+    spec["approval"] = {
+        "apiUrl": params.get("approval-api-url", SELF_INTERNAL_URL),
+        "pollIntervalSeconds": int(params.get("approval-poll-interval-seconds", 15)),
+        "timeoutSeconds": int(params.get("approval-timeout-seconds", 3600)),
+    }
+
+    spec["benchmark"] = {
+        "profile": params.get("guidellm-profile", "constant"),
+        "rate": float(params.get("guidellm-rate", 4.0)),
+        "maxSeconds": int(params.get("guidellm-max-seconds", 15)),
+        "maxRequests": int(params.get("guidellm-max-requests", 2)),
+        "customData": params.get("custom-data", "False") == "True",
+        "customFilename": params.get("custom-filename", "no-file"),
+        "huggingfaceToken": params.get("huggingface-token", ""),
+    }
+
+    spec["s3Storage"] = {
+        "endpoint": params.get("s3-api-endpoint", DEFAULT_S3_ENDPOINT),
+        "accessKeyId": params.get("s3-access-key-id", DEFAULT_S3_ACCESS_KEY),
+        "secretAccessKey": params.get("s3-secret-access-key", DEFAULT_S3_SECRET_KEY),
+    }
+
+    spec["scanS3Storage"] = {
+        "endpoint": params.get("scan-s3-endpoint", DEFAULT_S3_ENDPOINT),
+        "accessKeyId": params.get("scan-s3-access-key-id", DEFAULT_S3_ACCESS_KEY),
+        "secretAccessKey": params.get("scan-s3-secret-access-key", DEFAULT_S3_SECRET_KEY),
+        "bucket": "compliance-artifact-results",
+        "uiRoute": params.get("s3-ui-route", ""),
+    }
+
+    spec["modelRegistry"] = {
+        "server": params.get("mr-server", "http://modelops-registry.rhoai-model-registries.svc.cluster.local"),
+        "port": params.get("mr-port", "8080"),
+        "author": params.get("model-reg-author", "ModelOps Platform Team"),
+    }
+
+    spec["modelAccess"] = {
+        "authorizedViewers": params.get("authorized-viewers", ""),
+        "accessRole": params.get("access-role", "view"),
+    }
+
+    spec["maas"] = {
+        "enabled": False,
+        "servingNamespace": "llm",
+        "policyNamespace": "models-as-a-service",
+        "gpuCount": "1",
+        "runtimeImage": "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0",
+        "authorizedGroup": params.get("maas-authorized-group", "system:authenticated"),
+    }
+
+    spec["lmEval"] = {
+        "enabled": False,
+        "jobName": params.get("lm-eval-job-name", "mmlu-jurisprudence-eval-job"),
+        "useCustom": params.get("lm-eval-custom", "False") == "True",
+    }
+
+    return spec
 
 
 # --- Pipeline parameter defaults (mirrors model-intake-pipeline.yaml) ------
@@ -208,10 +332,12 @@ FORM_DEFAULTS = {
     "model-id": "ibm-granite/granite-3.3-2b-instruct",
     "model-name": "granite-2b",
     "model-version": "v1",
+    "model-source": "huggingface",
+    "target-environment": "sandbox",
+    "pipeline-ref": PIPELINE_NAME,
     "modelcar-image": "",
     "target-namespace": "vllm",
     "staging-namespace": "vllm-staging",
-    # Gate 1 - Compliance & Artifact scan
     "modelcar-repo": "redhat-ai-services/modelcar-catalog",
     "artifact-scan-image": "registry.access.redhat.com/ubi9/python-311:latest",
     "artifact-cve-threshold": "critical",
@@ -239,8 +365,6 @@ FORM_DEFAULTS = {
     "gpu-count-override": "",
     "hardware-profile-name": "gpu-profile",
     "hardware-profile-namespace": "redhat-ods-applications",
-    "target": "http://granite-2b-predictor.vllm.svc.cluster.local:8080/v1",
-    "staging-target": "http://granite-2b-predictor.vllm-staging.svc.cluster.local:8080/v1",
     "api-key": "",
     "garak-probes": "malwaregen.TopLevel",
     "garak-detectors": "",
@@ -259,7 +383,6 @@ FORM_DEFAULTS = {
     "s3-api-endpoint": DEFAULT_S3_ENDPOINT,
     "s3-access-key-id": DEFAULT_S3_ACCESS_KEY,
     "s3-secret-access-key": DEFAULT_S3_SECRET_KEY,
-    # Scan-result S3 (compliance/artifact + garak reports) - MinIO by default.
     "scan-s3-endpoint": DEFAULT_S3_ENDPOINT,
     "scan-s3-access-key-id": DEFAULT_S3_ACCESS_KEY,
     "scan-s3-secret-access-key": DEFAULT_S3_SECRET_KEY,
@@ -271,16 +394,15 @@ FORM_DEFAULTS = {
     "model-reg-author": "ModelOps Platform Team",
     "mr-server": "http://modelops-registry.rhoai-model-registries.svc.cluster.local",
     "mr-port": "8080",
-    # Model access (RHOAI dashboard visibility via namespace RBAC).
     "authorized-viewers": "",
     "access-role": "view",
-    # MaaS production deployment
     "maas-authorized-group": "system:authenticated",
+    "openshift-console-domain": "",
 }
 
-# Grouping purely for form layout. Ordered to mirror the two-phase pipeline.
 FORM_SECTIONS = [
-    ("Model", ["model-id", "modelcar-image", "model-name", "model-version", "requested-by"]),
+    ("Model Identity", ["model-source", "model-id", "modelcar-image", "model-name", "model-version",
+                         "target-environment", "pipeline-ref", "requested-by"]),
     ("Namespaces", ["target-namespace", "staging-namespace"]),
     (
         "Phase 1 Gate 1 - Compliance & Artifact Security Scan",
@@ -293,15 +415,11 @@ FORM_SECTIONS = [
         ],
     ),
     (
-        "Phase 1 Gate 2 - Security Scan (Garak)",
-        ["api-key", "garak-probes", "garak-detectors", "max-seeds", "parallel-attempts", "severity-threshold"],
+        "EvalHub & Security Scan",
+        ["evalhub-url", "evalhub-token", "severity-threshold", "openshift-console-domain"],
     ),
     (
-        "EvalHub",
-        ["evalhub-url", "evalhub-token"],
-    ),
-    (
-        "GPU Advisor + Time-Slicing (runs up-front)",
+        "GPU Advisor + Time-Slicing",
         [
             "context-length",
             "concurrency",
@@ -344,7 +462,7 @@ FORM_SECTIONS = [
             "custom-filename",
         ],
     ),
-    ("Benchmark/Eval S3 Storage", ["s3-api-endpoint", "s3-access-key-id", "s3-secret-access-key"]),
+    ("S3 Storage", ["s3-api-endpoint", "s3-access-key-id", "s3-secret-access-key"]),
     (
         "Scan-Result S3 Storage",
         [
@@ -356,7 +474,6 @@ FORM_SECTIONS = [
             "s3-ui-route",
         ],
     ),
-    ("lm-eval", ["lm-eval-job-name", "lm-eval-custom"]),
     ("Model Registry", ["model-reg-author", "mr-server", "mr-port"]),
     (
         "Model Access (RHOAI dashboard visibility)",
@@ -368,187 +485,66 @@ FORM_SECTIONS = [
     ),
 ]
 
-ALL_FORM_FIELDS = [f for _, fields in FORM_SECTIONS for f in fields] + ["requested-by"]
+ALL_FORM_FIELDS = [f for _, fields in FORM_SECTIONS for f in fields]
 
 REQUIRED_FIELDS = {"model-id", "model-name", "evalhub-token"}
 
-
-# --- Per-field help text (shown in a hover tooltip next to each field) --------
-# Values may contain simple HTML (<b>, <code>, <br>) and are rendered with |safe.
 FIELD_HELP = {
-    # Model
-    "model-id": "Hugging Face model ID to onboard. Used by the GPU advisor to "
-    "size the model and as the served model name.<br><b>Example:</b> "
-    "<code>ibm-granite/granite-3.3-2b-instruct</code>",
-    "modelcar-image": "Optional. Full OCI/ModelCar image that holds the model "
-    "weights. If set, it overrides the image derived from "
-    "<code>modelcar-repo</code> + <code>model-id</code>. "
-    "<code>oci://</code>/<code>docker://</code> prefixes are stripped."
-    "<br><b>Example:</b> "
-    "<code>quay.io/redhat-ai-services/modelcar-catalog:llama-3.2-1b-instruct</code>"
-    "<br>Leave blank to auto-derive.",
-    "model-name": "Deployment identity - single source of truth. Becomes the "
-    "InferenceService / predictor name and the endpoint URLs "
-    "(<code>&lt;model-name&gt;-predictor.&lt;ns&gt;.svc</code>).<br>"
-    "<b>Must be a valid Kubernetes name:</b> lowercase, digits and "
-    "<code>-</code> only, no dots. Auto-suggested from the model ID.",
-    "model-version": "Version label recorded in the model registry for this "
-    "onboarding run.<br><b>Example:</b> <code>v1</code>",
-    "requested-by": "Your name / username. Recorded on the run and deployment "
-    "plan for audit and shown in the approval queue.",
-    # Namespaces
-    "target-namespace": "Sandbox namespace where the model is deployed for the "
-    "Phase 1 security scan, then torn down.<br><b>Default:</b> <code>vllm</code>",
-    "staging-namespace": "Staging namespace where the model is deployed in "
-    "Phase 2 (after approval) for benchmarking and registration."
-    "<br><b>Default:</b> <code>vllm-staging</code>",
-    # Phase 1 Gate 1 - Compliance & Artifact scan
-    "modelcar-repo": "Quay repo (without tag) that holds ModelCar images. The "
-    "image tag is derived from <code>model-id</code> unless "
-    "<code>modelcar-image</code> is set.<br><b>Default:</b> "
-    "<code>redhat-ai-services/modelcar-catalog</code>",
-    "artifact-scan-image": "Container image used to run the Trivy-based "
-    "compliance/artifact scan step.",
-    "artifact-cve-threshold": "Highest CVE severity allowed before the scan gate "
-    "fails.<br><b>Values:</b> <code>critical</code>, <code>high</code>, "
-    "<code>medium</code>, <code>low</code>",
-    "ignore-unfixed": "Ignore vulnerabilities that have no fix available yet."
-    "<br><b>Values:</b> <code>true</code> / <code>false</code>",
-    "allowed-architectures": "Comma-separated CPU architectures the model image "
-    "is allowed to target.<br><b>Example:</b> <code>amd64,x86_64</code>",
-    # Phase 1 Gate 2 - Security scan (Garak)
-    "api-key": "Optional API key/token for the model endpoint being scanned by "
-    "Garak. Leave blank if the in-cluster endpoint needs no auth.",
-    "garak-probes": "Comma-separated Garak probes (attack modules) to run against "
-    "the model.<br><b>Example:</b> <code>malwaregen.TopLevel</code>, "
-    "<code>promptinject</code>, <code>dan.Dan_11_0</code>",
-    "garak-detectors": "Optional explicit Garak detectors. Leave blank to use each "
-    "probe's default detectors.",
-    "max-seeds": "Number of prompt seeds per probe. Higher = more thorough but "
-    "slower.<br><b>Example:</b> <code>1</code>",
-    "parallel-attempts": "How many probe attempts Garak runs in parallel.<br>"
-    "<b>Example:</b> <code>8</code>",
-    "severity-threshold": "Garak result severity that halts the pipeline."
-    "<br><b>Values:</b> <code>block</code>, <code>warn</code>, <code>off</code>",
-    "evalhub-url": "Base URL of the EvalHub instance (FQDN only, no scheme)."
-    "<br><b>Example:</b> <code>evalhub-redhat-ods-applications.apps.&lt;cluster&gt;</code>",
-    "evalhub-token": "OpenShift OAuth token used to authenticate with the EvalHub "
-    "API. Obtain with <code>oc whoami -t</code>."
-    "<br><b>Required</b> for EvalHub requests.",
-    # GPU advisor + time-slicing
-    "context-length": "Max context (tokens) the advisor sizes the KV cache for and "
-    "that vLLM serves with (<code>--max-model-len</code>).<br><b>Example:</b> "
-    "<code>32768</code>",
-    "concurrency": "Expected concurrent requests. Used by the advisor to size the "
-    "KV cache.<br><b>Example:</b> <code>4</code>",
-    "allow-time-slicing": "Allow the advisor to recommend sharing one physical GPU "
-    "across models via NVIDIA time-slicing when no whole GPU is free."
-    "<br><b>Values:</b> <code>true</code> / <code>false</code>",
-    "allow-mig": "Allow the advisor to recommend MIG (hardware GPU partitioning)."
-    "<br><b>Values:</b> <code>true</code> / <code>false</code>",
-    "gpu-isolation-policy": "Preferred GPU isolation. <code>dedicated</code> avoids "
-    "sharing unless <code>allow-time-slicing</code>/<code>allow-mig</code> is set "
-    "and nothing else fits.<br><b>Values:</b> <code>dedicated</code>, "
-    "<code>shared</code>",
-    "gpu-operator-namespace": "Namespace of the NVIDIA GPU Operator, where the "
-    "time-slicing ConfigMap is created.<br><b>Default:</b> "
-    "<code>nvidia-gpu-operator</code>",
-    "clusterpolicy-name": "Name of the NVIDIA ClusterPolicy CR patched to enable "
-    "time-slicing.<br><b>Default:</b> <code>gpu-cluster-policy</code>",
-    "time-slicing-configmap": "Name of the device-plugin time-slicing ConfigMap the "
-    "advisor generates and the apply-gpu-sharing task applies.<br><b>Default:</b> "
-    "<code>modelops-time-slicing</code>",
-    "max-time-slices": "Upper bound on time-slice replicas the advisor will "
-    "recommend for a single physical GPU.<br><b>Example:</b> <code>8</code>",
-    "advisor-endpoint": "Optional URL of an external agentic GPU-advisor "
-    "(OpenAI-compatible) endpoint. Leave blank to use the built-in local "
-    "heuristic sizing.",
-    "advisor-secret-name": "Name of a Secret in this namespace with an "
-    "<code>api-key</code> key, used as a Bearer token for "
-    "<code>advisor-endpoint</code>. Ignored if it does not exist.",
-    "advisor-timeout-seconds": "HTTP timeout (seconds) when calling "
-    "<code>advisor-endpoint</code>. Needs headroom for reasoning models."
-    "<br><b>Example:</b> <code>180</code>",
-    # Human approval
-    "approval-api-url": "In-cluster URL of this intake app that the "
-    "wait-for-approval task polls for the approve/reject decision. Usually leave "
-    "as the default.",
-    "approval-poll-interval-seconds": "How often (seconds) the pipeline polls for an "
-    "approval decision.<br><b>Example:</b> <code>15</code>",
-    "approval-timeout-seconds": "How long (seconds) the pipeline waits at the "
-    "approval gate before timing out.<br><b>Example:</b> <code>3600</code> (1h)",
-    # Deploy
-    "chart-url": "Helm chart repository URL used to deploy the vLLM model server.",
-    "chart-version": "Version of the vLLM Helm chart to deploy.<br><b>Example:</b> "
-    "<code>0.7.1</code>",
-    "gpu-count-override": "Force a specific GPU count for the deployment instead of "
-    "the advisor's recommendation. Leave blank to use the plan.",
-    "hardware-profile-name": "RHOAI hardware profile applied to the serving "
-    "deployment.<br><b>Default:</b> <code>gpu-profile</code>",
-    "hardware-profile-namespace": "Namespace of the hardware profile.<br>"
-    "<b>Default:</b> <code>redhat-ods-applications</code>",
-    "values-content": "Optional extra Helm <code>values.yaml</code> content "
-    "(YAML) merged into the deployment. Leave blank for defaults.",
-    # Benchmark (GuideLLM)
-    "guidellm-profile": "GuideLLM load profile.<br><b>Values:</b> <code>constant</code>, "
-    "<code>sweep</code>, <code>throughput</code>"
-    "<br><b>Default:</b> <code>constant</code>",
-    "guidellm-rate": "GuideLLM request rate (requests per second)."
-    "<br><b>Example:</b> <code>4.0</code>",
-    "guidellm-max-seconds": "Max benchmark duration (seconds) per rate step."
-    "<br><b>Default:</b> <code>15</code>",
-    "guidellm-max-requests": "Max benchmark requests per rate step."
-    "<br><b>Default:</b> <code>2</code>",
-    "huggingface-token": "Optional Hugging Face token, needed only if the "
-    "target model endpoint requires auth. Leave blank otherwise.",
-    "custom-data": "Use a custom benchmark dataset file instead of synthetic data."
-    "<br><b>Values:</b> <code>True</code> / <code>False</code>",
-    "custom-filename": "Filename of the custom benchmark dataset on the shared "
-    "workspace. Used only when <code>custom-data</code> is <code>True</code>.",
-    # Benchmark/Eval S3
-    "s3-api-endpoint": "S3/MinIO endpoint where GuideLLM benchmark results are "
-    "uploaded.",
-    "s3-access-key-id": "Access key ID for the benchmark-results S3/MinIO bucket.",
-    "s3-secret-access-key": "Secret access key for the benchmark-results S3/MinIO "
-    "bucket.",
-    # Scan-result S3
-    "scan-s3-endpoint": "S3/MinIO endpoint where compliance and Garak security scan "
-    "reports are uploaded.",
-    "scan-s3-access-key-id": "Access key ID for the scan-results S3/MinIO bucket.",
-    "scan-s3-secret-access-key": "Secret access key for the scan-results S3/MinIO "
-    "bucket.",
-    "compliance-s3-bucket": "Bucket for compliance/artifact scan reports.<br>"
-    "<b>Default:</b> <code>compliance-artifact-results</code>",
-    "security-s3-bucket": "Bucket for Garak security scan reports.<br>"
-    "<b>Default:</b> <code>security-scan-results</code>",
-    "s3-ui-route": "Optional override for the S3 browser UI route link recorded in "
-    "the model registry. Leave blank to auto-resolve.",
-    # lm-eval
-    "lm-eval-job-name": "Name of the lm-eval (LM Evaluation Harness) Job. Only used "
-    "if the lm-eval task is enabled.",
-    "lm-eval-custom": "Use a custom MMLU task ConfigMap for lm-eval.<br>"
-    "<b>Values:</b> <code>True</code> / <code>False</code>",
-    # Model registry
-    "model-reg-author": "Author/owner recorded on the model version in the RHOAI "
-    "model registry.",
-    "mr-server": "RHOAI model registry server URL (without port).<br><b>Example:</b> "
-    "<code>http://modelops-registry.rhoai-model-registries.svc.cluster.local</code>",
-    "mr-port": "Model registry server port.<br><b>Default:</b> <code>8080</code>",
-    # Model access
-    "authorized-viewers": "Comma-separated users/groups granted visibility of the "
-    "deployed model in the RHOAI dashboard (via namespace RBAC). Prefix a group "
-    "with <code>group:</code>.<br><b>Example:</b> "
-    "<code>alice, bob, group:ml-team</code><br>Leave blank for no extra access.",
-    "access-role": "Kubernetes role granted to the authorized viewers in the "
-    "staging namespace.<br><b>Values:</b> <code>view</code> (read-only, no "
-    "secrets), <code>edit</code>, <code>admin</code>",
-    "maas-authorized-group": "OpenShift Group authorized to access the production "
-    "MaaS deployment. Used in the MaaSAuthPolicy and MaaSSubscription owners. "
-    "Leave as <code>system:authenticated</code> for all users, or specify a "
-    "specific group to restrict access.<br><b>Example:</b> "
-    "<code>ml-team</code>, <code>data-scientists</code>",
+    "model-source": "Source of the model (e.g., huggingface, s3, oci).<br><b>Default:</b> huggingface",
+    "model-id": "Hugging Face model ID to onboard.<br><b>Example:</b> <code>ibm-granite/granite-3.3-2b-instruct</code>",
+    "target-environment": "Target environment label.<br><b>Default:</b> sandbox",
+    "pipeline-ref": "Name of the Tekton pipeline to execute.<br><b>Default:</b> model-intake-pipeline",
+    "model-name": "Kubernetes-safe deployment name. Lowercase, digits, <code>-</code> only.",
+    "model-version": "Version label recorded in the model registry.<br><b>Example:</b> <code>v1</code>",
+    "requested-by": "Your name / username for audit trail.",
+    "modelcar-image": "Optional full OCI/ModelCar image reference.",
+    "target-namespace": "Sandbox namespace.<br><b>Default:</b> <code>vllm</code>",
+    "staging-namespace": "Staging namespace.<br><b>Default:</b> <code>vllm-staging</code>",
+    "modelcar-repo": "Quay repo for ModelCar images.<br><b>Default:</b> <code>redhat-ai-services/modelcar-catalog</code>",
+    "artifact-scan-image": "Container image for Trivy CVE scan.",
+    "artifact-cve-threshold": "CVE severity gate: <code>critical</code>, <code>high</code>, <code>none</code>",
+    "ignore-unfixed": "Ignore CVEs without available fixes.",
+    "allowed-architectures": "Comma-separated permitted archs.<br><b>Example:</b> <code>amd64,x86_64</code>",
+    "evalhub-url": "EvalHub base URL (FQDN only, no scheme).",
+    "evalhub-token": "OpenShift OAuth token for EvalHub API (<code>oc whoami -t</code>).<br><b>Required</b>",
+    "severity-threshold": "Garak gate strictness: <code>block</code>, <code>warn</code>, <code>off</code>",
+    "openshift-console-domain": "OpenShift AI console domain for dashboard links.",
+    "context-length": "Max context length for vLLM (<code>--max-model-len</code>).",
+    "concurrency": "Expected concurrent requests.",
+    "allow-time-slicing": "Allow NVIDIA time-slicing when no free GPU.<br><b>Values:</b> <code>true</code>/<code>false</code>",
+    "gpu-isolation-policy": "GPU isolation policy.<br><b>Default:</b> <code>dedicated</code>",
+    "advisor-endpoint": "Optional LLM endpoint for remote GPU advisor.",
+    "advisor-secret-name": "Secret with API key for advisor endpoint.",
+    "approval-api-url": "In-cluster URL of this UI that the approval task polls.",
+    "approval-poll-interval-seconds": "Seconds between approval polls.",
+    "approval-timeout-seconds": "Max seconds to wait for approval.",
+    "chart-url": "Helm chart repo URL for vLLM deployment.",
+    "chart-version": "vllm-kserve Helm chart version.<br><b>Default:</b> <code>0.7.1</code>",
+    "gpu-count-override": "Force GPU count (leave blank for advisor plan).",
+    "hardware-profile-name": "RHOAI hardware profile for deployment.",
+    "values-content": "Optional extra Helm values (YAML).",
+    "guidellm-profile": "Benchmark profile (<code>constant</code>, <code>sweep</code>, <code>throughput</code>).",
+    "guidellm-rate": "Request rate for benchmark.",
+    "guidellm-max-seconds": "Max benchmark duration per rate step.",
+    "guidellm-max-requests": "Max benchmark requests per rate step.",
+    "huggingface-token": "Hugging Face token for gated models.",
+    "custom-data": "Use custom benchmark dataset.",
+    "s3-api-endpoint": "S3/MinIO endpoint for benchmark results.",
+    "s3-access-key-id": "S3 access key ID.",
+    "s3-secret-access-key": "S3 secret access key.",
+    "scan-s3-endpoint": "S3 endpoint for scan reports.",
+    "scan-s3-access-key-id": "S3 access key for scan results.",
+    "scan-s3-secret-access-key": "S3 secret key for scan results.",
+    "compliance-s3-bucket": "Bucket for compliance scan reports.",
+    "security-s3-bucket": "Bucket for security scan reports.",
+    "s3-ui-route": "Optional S3 browser UI route.",
+    "model-reg-author": "Author recorded in Model Registry.",
+    "mr-server": "Model Registry REST base URL.",
+    "mr-port": "Model Registry REST port.<br><b>Default:</b> <code>8080</code>",
+    "authorized-viewers": "Comma-separated users/groups for RHOAI dashboard visibility.",
+    "access-role": "Kubernetes role for authorized viewers.<br><b>Default:</b> <code>view</code>",
+    "maas-authorized-group": "OpenShift group for MaaS access.<br><b>Default:</b> <code>system:authenticated</code>",
 }
-
 
 # --- Shared page chrome -------------------------------------------------------
 
@@ -594,21 +590,19 @@ BASE_STYLE = """
 NAV = """
 <nav>
   <a href="{{ url_for('index') }}">Submit Model</a>
-  <a href="{{ url_for('list_runs') }}">Pipeline Runs</a>
+  <a href="{{ url_for('list_requests') }}">Model Requests</a>
   <a href="{{ url_for('list_plans') }}">Deployment Plans</a>
 </nav>
 """
 
 PAGE_HEAD = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>ModelOps Intake</title>" + BASE_STYLE + "</head><body><div class='container'>" + NAV
 
-
 FORM_TEMPLATE = (
     PAGE_HEAD
     + """
 <h1>Model Intake</h1>
-<p>Submit a new model onboarding run. It will run the GPU advisor first, pause for human
-approval of the deployment plan, then deploy, security-scan, benchmark, evaluate, and
-register the model.</p>
+<p>Submit a new model onboarding request. The ModelOps controller will create a
+Tekton PipelineRun, monitor execution, and report status back here.</p>
 <form method="post" action="{{ url_for('submit') }}">
   {% for section, fields in sections %}
   <fieldset>
@@ -626,14 +620,6 @@ register the model.</p>
   <button type="submit">Submit Model for Onboarding</button>
 </form>
 <script>
-/* Suggest a k8s-safe model-name and the GuideLLM tokenizer (processor) from the
- * "Model" section. The deployment name, and the garak/benchmark endpoint URLs
- * are derived from model-name by the PIPELINE itself (Tekton param interpolation
- * as http://<model-name>-predictor.<namespace>.svc.cluster.local:8080/v1), so
- * they can never drift from model-name and are no longer form fields.
- * Note: model-name must be a valid Kubernetes name (lowercase, no dots) since it
- * becomes the InferenceService/predictor name - dots are stripped here. A field
- * stops auto-updating once the user edits it by hand. */
 (function () {
   function byId(id) { return document.getElementById(id); }
   ["model-name"].forEach(function (id) {
@@ -648,22 +634,14 @@ register the model.</p>
     return (s.split("/").pop() || "").toLowerCase()
       .replace(/[._]/g, "-").replace(/[^a-z0-9-]/g, "").replace(/^-+|-+$/g, "");
   }
-  function tagFromImage(img) {
-    img = img.replace(/^(oci|docker):\/\//, "");
-    var i = img.lastIndexOf(":");
-    return i >= 0 ? img.substring(i + 1) : "";
-  }
   function recompute() {
     var mid = (byId("model-id") || {}).value || "";
-    var img = (byId("modelcar-image") || {}).value || "";
-    setIfClean("model-name", k8sName(tagFromImage(img) || mid));
+    setIfClean("model-name", k8sName(mid));
   }
-  ["model-id", "modelcar-image"].forEach(function (id) {
+  ["model-id"].forEach(function (id) {
     var el = byId(id);
     if (el) { el.addEventListener("input", recompute); }
   });
-
-  /* Validate required fields on submit and highlight empty ones. */
   var form = document.querySelector("form");
   var requiredFields = {{ required_fields_json|safe }};
   form.addEventListener("submit", function (e) {
@@ -692,24 +670,24 @@ register the model.</p>
     + "</div></body></html>"
 )
 
-
-RUNS_TEMPLATE = (
+REQUESTS_TEMPLATE = (
     PAGE_HEAD
     + """
-<h1>Pipeline Runs</h1>
+<h1>Model Requests</h1>
 <table>
-  <thead><tr><th>Run</th><th>Model</th><th>Requested By</th><th>Status</th><th>Created</th></tr></thead>
+  <thead><tr><th>Request</th><th>Model</th><th>Source</th><th>Phase</th><th>Pipeline Run</th><th>Created</th></tr></thead>
   <tbody>
-  {% for r in runs %}
+  {% for r in requests %}
     <tr>
-      <td><a href="{{ url_for('run_detail', name=r.name) }}">{{ r.name }}</a></td>
-      <td>{{ r.model_id }}</td>
-      <td>{{ r.requested_by }}</td>
-      <td>{{ r.status }}</td>
+      <td><a href="{{ url_for('request_detail', name=r.name) }}">{{ r.name }}</a></td>
+      <td>{{ r.model_uri }}</td>
+      <td>{{ r.model_source }}</td>
+      <td><span class="badge {{ r.phase|lower }}">{{ r.phase }}</span></td>
+      <td>{{ r.pipeline_run_name }}</td>
       <td>{{ r.created }}</td>
     </tr>
   {% else %}
-    <tr><td colspan="5">No pipeline runs submitted yet.</td></tr>
+    <tr><td colspan="6">No model requests submitted yet.</td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -717,24 +695,29 @@ RUNS_TEMPLATE = (
     + "</div></body></html>"
 )
 
-
-RUN_DETAIL_TEMPLATE = (
+REQUEST_DETAIL_TEMPLATE = (
     PAGE_HEAD
     + """
-<h1>Pipeline Run: {{ name }}</h1>
-<p><strong>Status:</strong> {{ status }}</p>
+<h1>Model Request: {{ name }}</h1>
+<p><strong>Model:</strong> {{ spec.get('modelURI', '') }} ({{ spec.get('modelSource', '') }})</p>
+<p><strong>Phase:</strong> <span class="badge {{ phase|lower }}">{{ phase }}</span></p>
+{% if pipeline_run_name %}
+<p><strong>Pipeline Run:</strong> {{ pipeline_run_name }}</p>
+{% endif %}
+{% if message %}
+<p><strong>Message:</strong> {{ message }}</p>
+{% endif %}
 {% if plan %}
 <p><strong>Deployment plan:</strong> <a href="{{ url_for('plan_detail', plan_id=plan.plan_id) }}">{{ plan.plan_id }}</a>
    (<span class="badge {{ plan.status }}">{{ plan.status }}</span>)</p>
 {% else %}
-<p>No deployment plan submitted yet for this run (gpu-advisor / wait-for-approval may still be running).</p>
+<p>No deployment plan submitted yet for this request (gpu-advisor / wait-for-approval may still be running).</p>
 {% endif %}
-<h3>Raw PipelineRun params</h3>
-<pre>{{ params_json }}</pre>
+<h3>ModelRequest Spec</h3>
+<pre>{{ spec_json }}</pre>
 """
     + "</div></body></html>"
 )
-
 
 PLANS_TEMPLATE = (
     PAGE_HEAD
@@ -761,7 +744,6 @@ PLANS_TEMPLATE = (
     + "</div></body></html>"
 )
 
-
 PLAN_DETAIL_TEMPLATE = (
     PAGE_HEAD
     + """
@@ -774,19 +756,14 @@ PLAN_DETAIL_TEMPLATE = (
   <strong>Approval status:</strong> <span class="badge {{ plan.status }}">{{ plan.status }}</span>
   {% if plan.decided_by %} by {{ plan.decided_by }}{% endif %}
 </p>
-
 <h3>Recommendation</h3>
 <pre>{{ plan.recommendation_md }}</pre>
-
 <h3>Recommended vLLM command</h3>
 <pre>{{ plan.recommended_vllm_command }}</pre>
-
 <h3>Deployment options (raw JSON)</h3>
 <pre>{{ plan.deployment_options }}</pre>
-
 <h3>GPU inventory (raw JSON)</h3>
 <pre>{{ plan.gpu_inventory }}</pre>
-
 {% if plan.status == 'pending' %}
 <h3>Decision</h3>
 <form method="post" action="{{ url_for('approve_plan_ui', plan_id=plan.plan_id) }}" style="display:inline-block; margin-right: 10px;">
@@ -826,71 +803,83 @@ def submit():
     for field in ALL_FORM_FIELDS:
         params[field] = request.form.get(field, FORM_DEFAULTS.get(field, ""))
 
-    run_name = "model-intake-{}".format(uuid.uuid4().hex[:10])
+    spec = build_modelrequest_spec(params)
+    request_name = "model-intake-{}".format(uuid.uuid4().hex[:10])
+
     try:
-        create_pipelinerun(run_name, params)
+        create_model_request(request_name, spec)
     except Exception as e:
         return (
-            "Failed to create PipelineRun: {}".format(e),
+            "Failed to create ModelRequest: {}".format(e),
             500,
         )
 
     db = get_db()
     db.execute(
-        "INSERT INTO runs (run_name, model_id, model_name, requested_by, params_json, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO model_requests (request_name, model_source, model_uri, model_name, target_environment, requested_by, spec_json, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            run_name,
-            params.get("model-id"),
-            params.get("model-name"),
-            params.get("requested-by"),
-            json.dumps(params),
+            request_name,
+            spec.get("modelSource"),
+            spec.get("modelURI"),
+            spec.get("modelName"),
+            spec.get("targetEnvironment"),
+            spec.get("requestedBy"),
+            json.dumps(spec),
             now_iso(),
         ),
     )
     db.commit()
 
-    return redirect(url_for("run_detail", name=run_name))
+    return redirect(url_for("request_detail", name=request_name))
 
 
-@app.route("/runs")
-def list_runs():
+@app.route("/requests")
+def list_requests():
     db = get_db()
-    local_runs = {r["run_name"]: r for r in db.execute("SELECT * FROM runs").fetchall()}
+    local_requests = {r["request_name"]: r for r in db.execute("SELECT * FROM model_requests").fetchall()}
 
     rows = []
-    live = {i["metadata"]["name"]: i for i in list_pipelineruns()}
-    for name, r in local_runs.items():
-        pr = live.get(name)
+    live = {i["metadata"]["name"]: i for i in list_model_requests()}
+    for name, r in local_requests.items():
+        mr = live.get(name)
         rows.append(
             {
                 "name": name,
-                "model_id": r["model_id"],
-                "requested_by": r["requested_by"],
-                "status": pipelinerun_status(pr) if pr else "Unknown (not found in cluster)",
+                "model_source": r.get("model_source", ""),
+                "model_uri": r.get("model_uri", ""),
+                "phase": modelrequest_status(mr) if mr else "Unknown",
+                "pipeline_run_name": (mr.get("status", {}).get("pipelineRunName", "") if mr else ""),
                 "created": r["created_at"],
             }
         )
     rows.sort(key=lambda r: r["created"], reverse=True)
-    return render_template_string(RUNS_TEMPLATE, runs=rows)
+    return render_template_string(REQUESTS_TEMPLATE, requests=rows)
 
 
-@app.route("/runs/<name>")
-def run_detail(name):
+@app.route("/requests/<name>")
+def request_detail(name):
+    mr = get_model_request(name)
+    spec = mr.get("spec", {}) if mr else {}
+    status_block = mr.get("status", {}) if mr else {}
+    phase = status_block.get("phase", "Pending")
+    pipeline_run_name = status_block.get("pipelineRunName", "")
+    message = status_block.get("message", "")
+
     db = get_db()
-    row = db.execute("SELECT * FROM runs WHERE run_name = ?", (name,)).fetchone()
-    pr = get_pipelinerun(name)
-    status = pipelinerun_status(pr) if pr else "Unknown"
     plan = db.execute(
-        "SELECT * FROM plans WHERE pipelinerun_name = ?", (name,)
+        "SELECT * FROM plans WHERE pipelinerun_name = ?", (pipeline_run_name or name,)
     ).fetchone()
-    params_json = row["params_json"] if row else "{}"
+
     return render_template_string(
-        RUN_DETAIL_TEMPLATE,
+        REQUEST_DETAIL_TEMPLATE,
         name=name,
-        status=status,
+        spec=spec,
+        phase=phase,
+        pipeline_run_name=pipeline_run_name,
+        message=message,
         plan=plan,
-        params_json=json.dumps(json.loads(params_json), indent=2),
+        spec_json=json.dumps(spec, indent=2),
     )
 
 
