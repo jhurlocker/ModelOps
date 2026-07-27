@@ -5,7 +5,7 @@ metadata:
 spec:
   description: Upload lm-eval results to s3 bucket
   params:
-    - default: 'http://s3.openshift-storage.svc.cluster.local:80'
+    - default: 'http://minio-service.s3-storage.svc.cluster.local:9000'
       description: s3 API endpoint
       name: s3-api-endpoint
       type: string
@@ -19,7 +19,7 @@ spec:
       type: string
   steps:
     - name: upload-benchmark
-      image: quay.io/jhurlocker/s3-upload:latest
+      image: quay.io/jhurlocker/s3-upload:v0.1.0
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: S3_ENDPOINT_URL

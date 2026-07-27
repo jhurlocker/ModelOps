@@ -25,227 +25,111 @@ spec:
             spec:
               type: object
               required:
-                - modelSource
-                - modelURI
+                - model
+                - lifecycleProfile
               properties:
-                modelSource:
+                model:
+                  type: object
+                  required:
+                    - sourceType
+                    - uri
+                  properties:
+                    sourceType:
+                      type: string
+                      description: Source type (huggingface, oci, s3)
+                    uri:
+                      type: string
+                      description: Model URI (e.g. ibm-granite/granite-3.3-2b-instruct)
+                    name:
+                      type: string
+                      description: Kubernetes-safe model name identifier
+                    version:
+                      type: string
+                      description: Version label for this onboarding run
+                lifecycleProfile:
                   type: string
-                  description: Source of the model (e.g. huggingface, s3, oci)
-                modelURI:
-                  type: string
-                  description: URI of the model (e.g. Qwen/Qwen3.6-27B-FP8)
-                targetEnvironment:
-                  type: string
-                  default: sandbox
-                  description: Target environment for the model
+                  description: Name of the ModelLifecycleProfile defining workflow, policy, and platform config
                 pipelineRef:
                   type: string
-                  default: model-intake-pipeline
-                  description: Name of the Tekton pipeline to execute
-                modelName:
-                  type: string
-                  description: Kubernetes-safe model name identifier
-                modelVersion:
-                  type: string
-                  default: v1
-                  description: Version label for this onboarding run
-                requestedBy:
-                  type: string
-                  description: Who requested this model onboarding
-                modelCar:
-                  type: object
-                  properties:
-                    repo:
-                      type: string
-                      default: redhat-ai-services/modelcar-catalog
-                    image:
-                      type: string
-                namespaces:
-                  type: object
-                  properties:
-                    sandbox:
-                      type: string
-                      default: vllm
-                    staging:
-                      type: string
-                      default: vllm-staging
-                compliance:
-                  type: object
-                  properties:
-                    artifactScanImage:
-                      type: string
-                    cveThreshold:
-                      type: string
-                      enum: [none, critical, high]
-                    ignoreUnfixed:
-                      type: string
-                      enum: ["true", "false"]
-                    allowedArchitectures:
-                      type: array
-                      items:
-                        type: string
-                gpuAdvisor:
+                  description: Override the pipeline defined in the lifecycle profile
+                requirements:
                   type: object
                   properties:
                     contextLength:
                       type: integer
-                    concurrency:
+                    expectedConcurrency:
                       type: integer
+                    gpuIsolationPolicy:
+                      type: string
+                      enum: [dedicated, shared]
                     allowTimeSlicing:
                       type: boolean
                     allowMIG:
                       type: boolean
-                    gpuIsolationPolicy:
+                    cveThreshold:
                       type: string
-                      enum: [dedicated, shared]
-                    gpuOperatorNamespace:
+                      enum: [none, critical, high]
+                    securityThreshold:
                       type: string
-                    clusterPolicyName:
+                    targetEnvironment:
                       type: string
-                    timeSlicingConfigMap:
+                    sandboxNamespace:
                       type: string
-                    maxTimeSlices:
-                      type: integer
+                    stagingNamespace:
+                      type: string
                     advisorEndpoint:
-                      type: string
-                    advisorSecretName:
-                      type: string
-                    advisorTimeoutSeconds:
-                      type: integer
-                deploy:
-                  type: object
-                  properties:
-                    releaseName:
-                      type: string
-                    chartUrl:
-                      type: string
-                    chartVersion:
-                      type: string
-                    valuesContent:
                       type: string
                     gpuCountOverride:
                       type: string
-                    hardwareProfileName:
+                    valuesContent:
                       type: string
-                    hardwareProfileNamespace:
-                      type: string
-                securityScan:
-                  type: object
-                  properties:
-                    severityThreshold:
-                      type: string
-                    evalhubUrl:
-                      type: string
-                    evalhubToken:
-                      type: string
-                    tenantNamespace:
+                    customBenchmarkData:
+                      type: boolean
+                    customBenchmarkFile:
                       type: string
                     openshiftConsoleDomain:
                       type: string
-                approval:
-                  type: object
-                  properties:
-                    apiUrl:
-                      type: string
-                    pollIntervalSeconds:
-                      type: integer
-                    timeoutSeconds:
-                      type: integer
-                benchmark:
-                  type: object
-                  properties:
-                    profile:
-                      type: string
-                    rate:
-                      type: number
-                    maxSeconds:
-                      type: integer
-                    maxRequests:
-                      type: integer
-                    customData:
-                      type: boolean
-                    customFilename:
-                      type: string
-                    huggingfaceToken:
-                      type: string
-                s3Storage:
-                  type: object
-                  properties:
-                    endpoint:
-                      type: string
-                    accessKeyId:
-                      type: string
-                    secretAccessKey:
-                      type: string
-                    bucket:
-                      type: string
-                    uiRoute:
-                      type: string
-                scanS3Storage:
-                  type: object
-                  properties:
-                    endpoint:
-                      type: string
-                    accessKeyId:
-                      type: string
-                    secretAccessKey:
-                      type: string
-                    bucket:
-                      type: string
-                    uiRoute:
-                      type: string
-                modelRegistry:
-                  type: object
-                  properties:
-                    server:
-                      type: string
-                    port:
-                      type: string
-                    author:
-                      type: string
-                modelAccess:
+                access:
                   type: object
                   properties:
                     authorizedViewers:
                       type: string
                     accessRole:
                       type: string
+                requestedBy:
+                  type: string
+                evalhubSecretName:
+                  type: string
+                  description: "K8s Secret name containing EvalHub credentials (keys: token, url)"
+                huggingfaceSecretName:
+                  type: string
+                  description: "K8s Secret name containing HuggingFace token (key: token)"
+                scanS3SecretName:
+                  type: string
+                  description: "K8s Secret name containing scan-result S3 credentials"
+                resultS3SecretName:
+                  type: string
+                  description: "K8s Secret name containing benchmark/eval S3 credentials"
                 maas:
                   type: object
                   properties:
                     enabled:
                       type: boolean
-                    servingNamespace:
-                      type: string
-                    policyNamespace:
-                      type: string
                     gpuCount:
                       type: string
                     runtimeImage:
                       type: string
                     authorizedGroup:
                       type: string
-                lmEval:
-                  type: object
-                  properties:
-                    enabled:
-                      type: boolean
-                    jobName:
-                      type: string
-                    useCustom:
-                      type: boolean
             status:
               type: object
               properties:
                 phase:
                   type: string
-                  description: Current phase of the model onboarding
                 pipelineRunName:
                   type: string
-                  description: Name of the Tekton PipelineRun executing the onboarding
                 message:
                   type: string
-                  description: Human-readable status message
                 conditions:
                   type: array
                   items:
@@ -271,4 +155,7 @@ spec:
           jsonPath: .status.pipelineRunName
         - name: Model
           type: string
-          jsonPath: .spec.modelURI
+          jsonPath: .spec.model.uri
+        - name: Profile
+          type: string
+          jsonPath: .spec.lifecycleProfile

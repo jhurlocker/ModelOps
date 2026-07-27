@@ -49,7 +49,7 @@ def discover_gpu_inventory(nodes_json_file, pods_json_file):
 
     node_gpus = {}
     occupants = []
-    total_alloc = total_used = total_free = 0
+    total_alloc = total_used = total_free = total_physical = 0
 
     for node in nodes_json.get("items", []):
         name = node["metadata"]["name"]
@@ -117,12 +117,14 @@ def discover_gpu_inventory(nodes_json_file, pods_json_file):
         total_alloc += gpu_count
         total_used += alloc
         total_free += free
+        total_physical += physical_gpus
 
     largest_free = max((n["free"] for n in node_gpus.values()), default=0)
     min_mem = min((n["memory_gb"] for n in node_gpus.values()), default=0)
 
     return {
         "total": total_alloc, "allocated": total_used, "free": total_free,
+        "physical": total_physical,
         "largest_single_node": largest_free, "nodes": node_gpus,
         "occupants": occupants,
     }, node_gpus, largest_free, min_mem
@@ -178,7 +180,7 @@ def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, tot
 
     if not options:
         tp = math.ceil(total_gb / min_mem) if min_mem > 0 else 0
-        if tp <= largest_free and tp >= 2:
+        if tp <= total_free and tp >= 2:
             options.append({
                 "name": f"Tensor Parallel (TP={tp})", "status": "recommended",
                 "gpu_per_replica": tp, "replicas": 1, "total_gpus": tp,
@@ -418,6 +420,11 @@ def main():
     gpu_inventory, node_gpus, largest_free, min_mem = discover_gpu_inventory(
         "gpu_nodes.json", "all_pods.json"
     )
+    total_free = gpu_inventory.get("free", 0)
+    print(f"DEBUG: node_gpus={bool(node_gpus)} total_alloc={gpu_inventory.get('total')} free_nodes={largest_free} min_mem={min_mem} total_free={total_free}")
+    if node_gpus:
+        for nn, nd in node_gpus.items():
+            print(f"DEBUG: node={nn} product={nd['product']} alloc={nd['allocatable']} used={nd['allocated']} free={nd['free']} mem={nd['memory_gb']} ts={nd['time_sliced']}")
 
     # Local or remote recommendation
     if advisor_endpoint:
@@ -475,6 +482,8 @@ def main():
         }]
 
     blocked = (not options) or (options[0].get("status") == "blocked")
+    if blocked:
+        print(f"DEBUG: blocked=True options={options} sharing_plan={json.dumps({k: v for k, v in sharing_plan.items() if k != 'coresident_models'})}")
 
     # Write outputs
     with open("gpu-inventory.json", "w") as f:
@@ -525,7 +534,11 @@ def main():
         summary.append(f"**Estimated parameters**: {param_count / 1e9:.1f}B")
     if total_gb:
         summary.append(f"**Estimated memory**: {total_gb:.2f} GB")
-    summary.append(f"**Cluster**: {gpu_inventory['total']} total GPUs, {gpu_inventory['free']} free")
+    physical = gpu_inventory.get("physical", gpu_inventory["total"])
+    if physical != gpu_inventory["total"]:
+        summary.append(f"**Cluster**: {gpu_inventory['total']} time-slices ({physical} physical GPU{'s' if physical > 1 else ''}), {gpu_inventory['free']} free")
+    else:
+        summary.append(f"**Cluster**: {gpu_inventory['total']} total GPUs, {gpu_inventory['free']} free")
     summary.extend(["", "## Recommendation"])
     rec = options[0]
     summary.extend([

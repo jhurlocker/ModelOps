@@ -1,6 +1,6 @@
 FROM registry.access.redhat.com/ubi9/python-311:latest
 
-RUN pip install --no-cache-dir requests
+RUN pip install --no-cache-dir requests pyyaml
 
 COPY benchmark.py /usr/local/bin/guidellm-benchmark
 

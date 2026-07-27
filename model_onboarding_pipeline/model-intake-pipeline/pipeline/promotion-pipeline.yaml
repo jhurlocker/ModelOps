@@ -1,0 +1,433 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: model-intake-promotion
+  namespace: sandbox
+spec:
+  description: |
+    Per-namespace promotion pipeline. The controller creates one PipelineRun
+    per namespace in promotionNamespaces. Standard Tekton tasks are reused.
+
+    GPU advisor runs for every namespace. Approval gate only runs for the
+    first namespace (others auto-approve by omitting approval-api-url).
+    Register-model-and-results and deploy-maas only run for the last namespace.
+
+  params:
+    - name: model-id
+      type: string
+    - name: model-name
+      type: string
+      default: "granite-2b"
+    - name: model-version
+      type: string
+      default: "v1"
+    - name: requested-by
+      type: string
+      default: ""
+    - name: target-namespace
+      type: string
+      default: "staging"
+      description: "The namespace to deploy into for this PipelineRun"
+    - name: plan-id
+      type: string
+      default: ""
+      description: "Shared plan-id across all promotion PipelineRuns. Only the first run posts plans and waits for approval."
+    - name: modelcar-repo
+      type: string
+      default: "redhat-ai-services/modelcar-catalog"
+    - name: modelcar-image
+      type: string
+      default: ""
+    - name: context-length
+      type: string
+      default: "32768"
+    - name: concurrency
+      type: string
+      default: "4"
+    - name: allow-time-slicing
+      type: string
+      default: "true"
+    - name: allow-mig
+      type: string
+      default: "false"
+    - name: gpu-isolation-policy
+      type: string
+      default: "dedicated"
+    - name: gpu-operator-namespace
+      type: string
+      default: "nvidia-gpu-operator"
+    - name: clusterpolicy-name
+      type: string
+      default: "gpu-cluster-policy"
+    - name: time-slicing-configmap
+      type: string
+      default: "modelops-time-slicing"
+    - name: max-time-slices
+      type: string
+      default: "8"
+    - name: advisor-endpoint
+      type: string
+      default: ""
+    - name: advisor-secret-name
+      type: string
+      default: "gpu-advisor-credentials"
+    - name: advisor-timeout-seconds
+      type: string
+      default: "300"
+    - name: approval-api-url
+      type: string
+      default: ""
+    - name: approval-poll-interval-seconds
+      type: string
+      default: "15"
+    - name: approval-timeout-seconds
+      type: string
+      default: "3600"
+    - name: release-name
+      type: string
+      default: "granite-2b"
+    - name: chart-url
+      type: string
+      default: "https://redhat-ai-services.github.io/helm-charts/"
+    - name: chart-version
+      type: string
+      default: "0.7.1"
+    - name: values-content
+      type: string
+      default: ""
+    - name: gpu-count-override
+      type: string
+      default: ""
+    - name: hardware-profile-name
+      type: string
+      default: "gpu-profile"
+    - name: hardware-profile-namespace
+      type: string
+      default: "redhat-ods-applications"
+    - name: authorized-viewers
+      type: string
+      default: ""
+    - name: access-role
+      type: string
+      default: "view"
+    - name: evalhub-url
+      type: string
+      default: ""
+    - name: evalhub-token
+      type: string
+      default: ""
+    - name: guidellm-profile
+      type: string
+      default: "constant"
+    - name: guidellm-rate
+      type: string
+      default: "4.0"
+    - name: guidellm-max-seconds
+      type: string
+      default: "15"
+    - name: guidellm-max-requests
+      type: string
+      default: "2"
+    - name: custom-data
+      type: string
+      default: "False"
+    - name: custom-filename
+      type: string
+      default: "no-file"
+    - name: s3-api-endpoint
+      type: string
+      default: ""
+    - name: s3-access-key-id
+      type: string
+      default: ""
+    - name: s3-secret-access-key
+      type: string
+      default: ""
+    - name: huggingface-token
+      type: string
+      default: ""
+    - name: openshift-console-domain
+      type: string
+      default: ""
+    - name: mr-server
+      type: string
+      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+    - name: mr-port
+      type: string
+      default: "8080"
+    - name: model-reg-author
+      type: string
+      default: "ModelOps Platform Team"
+    - name: deploy-maas
+      type: string
+      default: "false"
+    - name: maas-serving-ns
+      type: string
+      default: "llm"
+    - name: maas-policy-ns
+      type: string
+      default: "models-as-a-service"
+    - name: maas-gpu-count
+      type: string
+      default: "1"
+    - name: maas-runtime-image
+      type: string
+      default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+    - name: maas-authorized-group
+      type: string
+      default: "system:authenticated"
+    - name: run-register
+      type: string
+      default: "false"
+      description: "Set to 'true' for the last namespace only - runs register-model and deploy-maas"
+
+  tasks:
+    - name: gpu-advisor
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: plan-id
+          value: $(params.plan-id)
+        - name: environment
+          value: "promotion ($(params.target-namespace))"
+        - name: target-namespace
+          value: $(params.target-namespace)
+        - name: context-length
+          value: $(params.context-length)
+        - name: concurrency
+          value: $(params.concurrency)
+        - name: allow-time-slicing
+          value: $(params.allow-time-slicing)
+        - name: allow-mig
+          value: $(params.allow-mig)
+        - name: gpu-isolation-policy
+          value: $(params.gpu-isolation-policy)
+        - name: gpu-operator-namespace
+          value: $(params.gpu-operator-namespace)
+        - name: clusterpolicy-name
+          value: $(params.clusterpolicy-name)
+        - name: time-slicing-configmap
+          value: $(params.time-slicing-configmap)
+        - name: max-time-slices
+          value: $(params.max-time-slices)
+        - name: advisor-endpoint
+          value: $(params.advisor-endpoint)
+        - name: advisor-secret-name
+          value: $(params.advisor-secret-name)
+        - name: advisor-timeout-seconds
+          value: $(params.advisor-timeout-seconds)
+      taskRef:
+        kind: Task
+        name: gpu-advisor
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: wait-for-approval
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: model-name
+          value: $(params.model-name)
+        - name: target-namespace
+          value: $(params.target-namespace)
+        - name: plan-id
+          value: $(params.plan-id)
+        - name: requested-by
+          value: $(params.requested-by)
+        - name: approval-api-url
+          value: $(params.approval-api-url)
+        - name: poll-interval-seconds
+          value: $(params.approval-poll-interval-seconds)
+        - name: timeout-seconds
+          value: $(params.approval-timeout-seconds)
+      runAfter:
+        - gpu-advisor
+      taskRef:
+        kind: Task
+        name: wait-for-approval
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: apply-gpu-sharing
+      runAfter:
+        - wait-for-approval
+      taskRef:
+        kind: Task
+        name: apply-gpu-sharing
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: deploy-model
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+        - name: chartUrl
+          value: $(params.chart-url)
+        - name: chartVersion
+          value: $(params.chart-version)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: valuesContent
+          value: $(params.values-content)
+        - name: gpu-count-override
+          value: $(params.gpu-count-override)
+        - name: hardwareProfileName
+          value: $(params.hardware-profile-name)
+        - name: hardwareProfileNamespace
+          value: $(params.hardware-profile-namespace)
+      runAfter:
+        - apply-gpu-sharing
+      taskRef:
+        kind: Task
+        name: deploy-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: grant-model-access
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+        - name: authorized-viewers
+          value: $(params.authorized-viewers)
+        - name: access-role
+          value: $(params.access-role)
+      runAfter:
+        - deploy-model
+      taskRef:
+        kind: Task
+        name: grant-model-access
+
+    - name: benchmark
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: evalhub-url
+          value: $(params.evalhub-url)
+        - name: evalhub-token
+          value: $(params.evalhub-token)
+        - name: tenant-ns
+          value: $(params.target-namespace)
+        - name: guidellm-profile
+          value: $(params.guidellm-profile)
+        - name: guidellm-rate
+          value: $(params.guidellm-rate)
+        - name: guidellm-max-seconds
+          value: $(params.guidellm-max-seconds)
+        - name: guidellm-max-requests
+          value: $(params.guidellm-max-requests)
+      runAfter:
+        - deploy-model
+      taskRef:
+        kind: Task
+        name: guidellm-benchmark
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: upload-guide-llm-results
+      params:
+        - name: s3-api-endpoint
+          value: $(params.s3-api-endpoint)
+        - name: s3-access-key-id
+          value: $(params.s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.s3-secret-access-key)
+      runAfter:
+        - benchmark
+      taskRef:
+        kind: Task
+        name: upload-guidellm-benchmark-results
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: register-model-and-results
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: model-url
+          value: $(params.model-id)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: staging-namespace
+          value: $(params.target-namespace)
+        - name: custom-data
+          value: $(params.custom-data)
+        - name: openshift-console-domain
+          value: $(params.openshift-console-domain)
+        - name: evalhub-garak-job-id
+          value: ""
+        - name: evalhub-guidellm-job-id
+          value: ""
+        - name: tenant-ns
+          value: $(params.target-namespace)
+      runAfter:
+        - upload-guide-llm-results
+      when:
+        - input: $(params.run-register)
+          operator: in
+          values: ["true"]
+      taskRef:
+        kind: Task
+        name: model-registry
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: deploy-maas
+      params:
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: maas-serving-ns
+          value: $(params.maas-serving-ns)
+        - name: maas-policy-ns
+          value: $(params.maas-policy-ns)
+        - name: gpu-count
+          value: $(params.maas-gpu-count)
+        - name: runtime-image
+          value: $(params.maas-runtime-image)
+        - name: authorized-group
+          value: $(params.maas-authorized-group)
+      runAfter:
+        - register-model-and-results
+      when:
+        - input: $(params.run-register)
+          operator: in
+          values: ["true"]
+        - input: $(params.deploy-maas)
+          operator: in
+          values: ["true"]
+      taskRef:
+        kind: Task
+        name: deploy-maas
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for benchmark results and deployment plans

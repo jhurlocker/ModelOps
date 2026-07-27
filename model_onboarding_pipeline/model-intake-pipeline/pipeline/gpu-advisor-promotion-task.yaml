@@ -1,0 +1,319 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: gpu-advisor-promotion
+  namespace: vllm
+spec:
+  description: |
+    Batched GPU advisor for the promotion pipeline. Discovers cluster GPU
+    inventory once, then for each namespace in promotion-namespaces runs
+    sizing and posts a consolidated deployment plan to the approval UI.
+
+    A single plan_id (the PipelineRun name) is used for all namespaces.
+    The approval UI shows a combined plan; approving it gates all namespaces.
+  params:
+    - name: model-id
+      type: string
+    - name: model-name
+      type: string
+    - name: promotion-namespaces
+      type: string
+      description: "Comma-separated list of target namespaces"
+    - name: plan-id
+      type: string
+      default: "$(context.taskRun.name)"
+    - name: requested-by
+      type: string
+      default: ""
+    - name: context-length
+      type: string
+      default: "32768"
+    - name: concurrency
+      type: string
+      default: "4"
+    - name: allow-time-slicing
+      type: string
+      default: "true"
+    - name: allow-mig
+      type: string
+      default: "false"
+    - name: gpu-isolation-policy
+      type: string
+      default: "dedicated"
+    - name: gpu-operator-namespace
+      type: string
+      default: "nvidia-gpu-operator"
+    - name: clusterpolicy-name
+      type: string
+      default: "gpu-cluster-policy"
+    - name: time-slicing-configmap
+      type: string
+      default: "modelops-time-slicing"
+    - name: max-time-slices
+      type: string
+      default: "8"
+    - name: advisor-endpoint
+      type: string
+      default: ""
+    - name: advisor-secret-name
+      type: string
+      default: "gpu-advisor-credentials"
+    - name: advisor-timeout-seconds
+      type: string
+      default: "300"
+    - name: approval-api-url
+      type: string
+      default: ""
+    - name: release-name
+      type: string
+      default: "granite-2b"
+  steps:
+    - name: discover-gpu-inventory
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        echo "--- Discovering cluster GPU inventory ---"
+        oc get nodes -o json -l nvidia.com/gpu.present=true > gpu_nodes.json 2>/dev/null || echo '{"items": []}' > gpu_nodes.json
+        oc get pods -A -o json > all_pods.json 2>/dev/null || echo '{"items": []}' > all_pods.json
+        echo "Inventory captured."
+
+    - name: size-and-post-all-plans
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: PROMOTION_NAMESPACES
+          value: $(params.promotion-namespaces)
+        - name: PLAN_ID
+          value: $(params.plan-id)
+        - name: REQUESTED_BY
+          value: $(params.requested-by)
+        - name: CTX_LEN
+          value: $(params.context-length)
+        - name: CONCURRENCY
+          value: $(params.concurrency)
+        - name: ALLOW_TS
+          value: $(params.allow-time-slicing)
+        - name: ALLOW_MIG
+          value: $(params.allow-mig)
+        - name: ISOLATION
+          value: $(params.gpu-isolation-policy)
+        - name: GPU_OPERATOR_NS
+          value: $(params.gpu-operator-namespace)
+        - name: CLUSTERPOLICY_NAME
+          value: $(params.clusterpolicy-name)
+        - name: TIME_SLICING_CM
+          value: $(params.time-slicing-configmap)
+        - name: MAX_TIME_SLICES
+          value: $(params.max-time-slices)
+        - name: ADVISOR_ENDPOINT
+          value: $(params.advisor-endpoint)
+        - name: ADVISOR_TIMEOUT
+          value: $(params.advisor-timeout-seconds)
+        - name: APPROVAL_API_URL
+          value: $(params.approval-api-url)
+        - name: RELEASE_NAME
+          value: $(params.release-name)
+        - name: ADVISOR_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisor-secret-name)
+              key: api-key
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        pip3 install -q pyyaml 2>&1 | grep -v "already satisfied" || true
+        python3 <<'PYEOF'
+        import json, os, sys, subprocess, urllib.request, urllib.error
+
+        def oc_json(args):
+            try:
+                r = subprocess.run(["oc"] + args + ["-o", "json"],
+                                   capture_output=True, text=True, timeout=30)
+                if r.returncode == 0:
+                    return json.loads(r.stdout) if r.stdout.strip() else {}
+            except Exception:
+                pass
+            return {}
+
+        def gpu_total(nodes):
+            t = 0
+            for n in nodes.get("items", []):
+                cap = n.get("status", {}).get("capacity", {}).get("nvidia.com/gpu", "0")
+                t += int(cap)
+            return t
+
+        def gpu_allocated_in_ns(pods_json, namespace):
+            allocated = 0
+            for p in pods_json.get("items", []):
+                if p.get("metadata", {}).get("namespace") != namespace:
+                    continue
+                for c in p.get("spec", {}).get("containers", []):
+                    reqs = c.get("resources", {}).get("requests", {})
+                    alloc = reqs.get("nvidia.com/gpu", "0")
+                    try:
+                        allocated += int(alloc)
+                    except ValueError:
+                        allocated += 1 if alloc else 0
+                for c in p.get("spec", {}).get("initContainers", []):
+                    reqs = c.get("resources", {}).get("requests", {})
+                    alloc = reqs.get("nvidia.com/gpu", "0")
+                    try:
+                        allocated += int(alloc)
+                    except ValueError:
+                        allocated += 1 if alloc else 0
+            return allocated
+
+        def size_for_namespace(total_gpus, allocated, model_params):
+            ctx_len = int(model_params.get("context_length", 32768))
+            concurrency = int(model_params.get("concurrency", 4))
+            allow_ts = model_params.get("allow_time_slicing", "true").lower() == "true"
+            max_slices = int(model_params.get("max_time_slices", 8))
+
+            free = total_gpus - allocated
+            gpus_needed = 1
+            if ctx_len > 32768:
+                gpus_needed = 2
+            if concurrency > 32:
+                gpus_needed = max(gpus_needed, 2)
+
+            plan = {
+                "status": "PLAN_READY",
+                "gpus_needed": gpus_needed,
+                "free_gpus": free,
+                "total_gpus": total_gpus,
+                "allocated_gpus": allocated,
+                "time_slicing_enabled": False,
+                "slices": 0,
+            }
+
+            if free >= gpus_needed:
+                plan["recommendation"] = "Dedicated GPU(s) available"
+                plan["gpu_memory_utilization"] = "0.90"
+            elif gpus_needed == 1 and allow_ts and (allocated + 1) <= total_gpus * max_slices:
+                plan["time_slicing_enabled"] = True
+                plan["slices"] = min(max_slices, max(2, max_slices - allocated))
+                plan["recommendation"] = "Time-slicing required (sharing GPU)"
+                plan["gpu_memory_utilization"] = "0.45"
+            elif allow_ts:
+                plan["time_slicing_enabled"] = True
+                plan["slices"] = max_slices
+                plan["recommendation"] = "Shared GPU with time-slicing"
+                plan["gpu_memory_utilization"] = "0.40"
+            else:
+                plan["status"] = "BLOCKED"
+                plan["recommendation"] = "No feasible GPU allocation"
+
+            return plan
+
+        def post_to_approval_ui(api_url, plan_data):
+            if not api_url:
+                print("WARNING: No approval API URL set; plans not posted.")
+                return
+            url = api_url.rstrip("/") + "/api/plans"
+            data = json.dumps(plan_data).encode("utf-8")
+            req = urllib.request.Request(url, data=data,
+                headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=30)
+                print("Plans posted to approval UI")
+            except Exception as e:
+                print("ERROR posting plans to approval UI:", e)
+
+        PROMOTION_NAMESPACES = os.environ.get("PROMOTION_NAMESPACES", "").strip()
+        PLAN_ID = os.environ.get("PLAN_ID", "")
+        MODEL_ID = os.environ.get("MODEL_ID", "")
+        MODEL_NAME = os.environ.get("MODEL_NAME", "")
+        REQUESTED_BY = os.environ.get("REQUESTED_BY", "")
+        APPROVAL_API_URL = os.environ.get("APPROVAL_API_URL", "")
+        WORKSPACE = os.environ.get("WORKING_DIR", "/workspace")
+        CTX_LEN = os.environ.get("CTX_LEN", "32768")
+        CONCURRENCY = os.environ.get("CONCURRENCY", "4")
+        ALLOW_TS = os.environ.get("ALLOW_TS", "true")
+        ALLOW_MIG = os.environ.get("ALLOW_MIG", "false")
+        ISOLATION = os.environ.get("ISOLATION", "dedicated")
+        MAX_TIME_SLICES = os.environ.get("MAX_TIME_SLICES", "8")
+        GPU_OPERATOR_NS = os.environ.get("GPU_OPERATOR_NS", "nvidia-gpu-operator")
+        TIME_SLICING_CM = os.environ.get("TIME_SLICING_CM", "modelops-time-slicing")
+
+        if not PROMOTION_NAMESPACES:
+            print("ERROR: promotion-namespaces is empty")
+            sys.exit(1)
+
+        nodes = json.load(open(os.path.join(WORKSPACE, "gpu_nodes.json")))
+        all_pods = json.load(open(os.path.join(WORKSPACE, "all_pods.json")))
+
+        total = gpu_total(nodes)
+
+        allowed = [p.strip() for p in PROMOTION_NAMESPACES.split(",") if p.strip()]
+        plans = []
+        per_namespace_options = {}
+
+        for target_ns in allowed:
+            print(f"\n=== Sizing for namespace: {target_ns} ===")
+            allocated = gpu_allocated_in_ns(all_pods, target_ns)
+            plan = size_for_namespace(total, allocated, {
+                "context_length": CTX_LEN,
+                "concurrency": CONCURRENCY,
+                "allow_time_slicing": ALLOW_TS,
+                "max_time_slices": MAX_TIME_SLICES,
+            })
+            plan["namespace"] = target_ns
+            plans.append(plan)
+            per_namespace_options[target_ns] = plan
+            print(f"  Status: {plan['status']}, Free: {plan['free_gpus']}/{plan['total_gpus']} GPU, Needs: {plan['gpus_needed']}")
+            print(f"  Recommendation: {plan['recommendation']}")
+
+        recommendations = [f"{p['namespace']}: {p['recommendation']}" for p in plans]
+        summary = "\n".join(recommendations)
+
+        gpu_inv = {"total": total, "namespaces": per_namespace_options}
+
+        deployment_opts = {"per_namespace": per_namespace_options,
+                           "summary": summary,
+                           "all_plan_ready": all(p["status"] == "PLAN_READY" for p in plans)}
+
+        with open(os.path.join(WORKSPACE, "deployment-options.json"), "w") as f:
+            json.dump(deployment_opts, f, indent=2)
+
+        sharing = {"enabled": any(p.get("time_slicing_enabled") for p in plans),
+                   "per_namespace": {ns: {"enabled": p.get("time_slicing_enabled", False),
+                                          "slices": p.get("slices", 0)}
+                                     for ns, p in per_namespace_options.items()}}
+        with open(os.path.join(WORKSPACE, "gpu-sharing-plan.json"), "w") as f:
+            json.dump(sharing, f, indent=2)
+
+        approval_payload = {
+            "plan_id": PLAN_ID,
+            "pipelinerun_name": PLAN_ID,
+            "model_id": MODEL_ID,
+            "model_name": MODEL_NAME,
+            "target_namespace": PROMOTION_NAMESPACES,
+            "requested_by": REQUESTED_BY,
+            "plan_status": "PLAN_READY" if deployment_opts["all_plan_ready"] else "BLOCKED",
+            "recommendation_md": summary,
+            "deployment_options": deployment_opts,
+            "gpu_inventory": gpu_inv,
+            "recommended_vllm_command": json.dumps(deployment_opts),
+        }
+
+        if APPROVAL_API_URL:
+            post_to_approval_ui(APPROVAL_API_URL, approval_payload)
+        else:
+            print("WARNING: approval-api-url not set; plans written to workspace only.")
+
+        if not deployment_opts["all_plan_ready"]:
+            print("ERROR: One or more namespaces are BLOCKED - insufficient GPU capacity")
+            sys.exit(1)
+
+        print(f"\nAll {len(plans)} promotion namespaces sized successfully.")
+        PYEOF
+  workspaces:
+    - name: shared-workspace
+      description: Workspace for GPU inventory and deployment plans

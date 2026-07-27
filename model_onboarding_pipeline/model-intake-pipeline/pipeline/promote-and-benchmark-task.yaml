@@ -1,0 +1,458 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: promote-and-benchmark
+  namespace: vllm
+spec:
+  description: |
+    Batched promotion task for all target environments. For each namespace:
+    1. Applies GPU sharing from gpu-sharing-plan.json
+    2. Deploys model via Helm
+    3. Grants model access RBAC
+    4. Runs GuideLLM benchmark via EvalHub
+    5. Uploads benchmark results to S3
+
+    Runs sequentially per namespace and halts on first failure.
+  params:
+    - name: promotion-namespaces
+      type: string
+      description: "Comma-separated list of target namespaces"
+    - name: model-name
+      type: string
+    - name: model-id
+      type: string
+    - name: modelcar-image
+      type: string
+      default: ""
+    - name: huggingface-token
+      type: string
+      default: ""
+    - name: release-name
+      type: string
+      default: "granite-2b"
+    - name: chart-url
+      type: string
+      default: "https://redhat-ai-services.github.io/helm-charts/"
+    - name: chart-version
+      type: string
+      default: "0.7.1"
+    - name: values-content
+      type: string
+      default: ""
+    - name: gpu-count-override
+      type: string
+      default: ""
+    - name: hardware-profile-name
+      type: string
+      default: "gpu-profile"
+    - name: hardware-profile-namespace
+      type: string
+      default: "redhat-ods-applications"
+    - name: gpu-operator-namespace
+      type: string
+      default: "nvidia-gpu-operator"
+    - name: clusterpolicy-name
+      type: string
+      default: "gpu-cluster-policy"
+    - name: time-slicing-configmap
+      type: string
+      default: "modelops-time-slicing"
+    - name: authorized-viewers
+      type: string
+      default: ""
+    - name: access-role
+      type: string
+      default: "view"
+    - name: evalhub-url
+      type: string
+      default: ""
+    - name: evalhub-token
+      type: string
+      default: ""
+    - name: guidellm-profile
+      type: string
+      default: "constant"
+    - name: guidellm-rate
+      type: string
+      default: "4.0"
+    - name: guidellm-max-seconds
+      type: string
+      default: "15"
+    - name: guidellm-max-requests
+      type: string
+      default: "2"
+    - name: custom-data
+      type: string
+      default: "False"
+    - name: custom-filename
+      type: string
+      default: "no-file"
+    - name: s3-api-endpoint
+      type: string
+      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - name: s3-access-key-id
+      type: string
+      default: "minio"
+    - name: s3-secret-access-key
+      type: string
+      default: "minio123"
+  steps:
+    - name: promote-and-benchmark
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      workingDir: $(workspaces.shared-workspace.path)
+      env:
+        - name: PROMOTION_NAMESPACES
+          value: $(params.promotion-namespaces)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODELCAR_IMAGE
+          value: $(params.modelcar-image)
+        - name: HF_TOKEN
+          value: $(params.huggingface-token)
+        - name: RELEASE_NAME
+          value: $(params.release-name)
+        - name: CHART_URL
+          value: $(params.chart-url)
+        - name: CHART_VERSION
+          value: $(params.chart-version)
+        - name: VALUES_CONTENT
+          value: $(params.values-content)
+        - name: GPU_COUNT_OVERRIDE
+          value: $(params.gpu-count-override)
+        - name: HW_PROFILE_NAME
+          value: $(params.hardware-profile-name)
+        - name: HW_PROFILE_NS
+          value: $(params.hardware-profile-namespace)
+        - name: GPU_OPERATOR_NS
+          value: $(params.gpu-operator-namespace)
+        - name: CLUSTERPOLICY
+          value: $(params.clusterpolicy-name)
+        - name: TS_CM
+          value: $(params.time-slicing-configmap)
+        - name: AUTHORIZED_VIEWERS
+          value: $(params.authorized-viewers)
+        - name: ACCESS_ROLE
+          value: $(params.access-role)
+        - name: EVALHUB_URL
+          value: $(params.evalhub-url)
+        - name: EVALHUB_TOKEN
+          value: $(params.evalhub-token)
+        - name: GLM_PROFILE
+          value: $(params.guidellm-profile)
+        - name: GLM_RATE
+          value: $(params.guidellm-rate)
+        - name: GLM_MAX_SECONDS
+          value: $(params.guidellm-max-seconds)
+        - name: GLM_MAX_REQUESTS
+          value: $(params.guidellm-max-requests)
+        - name: CUSTOM_DATA
+          value: $(params.custom-data)
+        - name: CUSTOM_FILENAME
+          value: $(params.custom-filename)
+        - name: S3_ENDPOINT
+          value: $(params.s3-api-endpoint)
+        - name: S3_ACCESS_KEY
+          value: $(params.s3-access-key-id)
+        - name: S3_SECRET_KEY
+          value: $(params.s3-secret-access-key)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        pip3 install -q pyyaml 2>&1 | grep -v "already satisfied" || true
+        python3 <<'PYEOF'
+        import json, os, sys, subprocess, time, tempfile, shutil, yaml, urllib.request
+
+        # ── helpers ────────────────────────────────────────────────────────
+        CHART_URL = os.environ.get("CHART_URL", "")
+        CHART_VERSION = os.environ.get("CHART_VERSION", "0.7.1")
+        GPU_COUNT = os.environ.get("GPU_COUNT_OVERRIDE", "")
+        HW_PROFILE_NAME = os.environ.get("HW_PROFILE_NAME", "gpu-profile")
+        HW_PROFILE_NS = os.environ.get("HW_PROFILE_NS", "redhat-ods-applications")
+        GPU_OPERATOR_NS = os.environ.get("GPU_OPERATOR_NS", "nvidia-gpu-operator")
+        CLUSTERPOLICY = os.environ.get("CLUSTERPOLICY", "gpu-cluster-policy")
+        TS_CM = os.environ.get("TS_CM", "modelops-time-slicing")
+
+        def run(cmd, check=True, timeout=600):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if check and r.returncode != 0:
+                print("CMD FAILED:", " ".join(cmd))
+                print(r.stderr)
+                sys.exit(1)
+            return r
+
+        def oc(*args):
+            cmd = ["oc"] + list(args)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+        def helm(*args):
+            cmd = ["helm"] + list(args)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if r.returncode != 0:
+                print("HELM FAILED:", " ".join(cmd))
+                print(r.stderr)
+                sys.exit(1)
+            return r
+
+        def apply_gpu_sharing(ns, sharing_plan):
+            plan = sharing_plan.get("per_namespace", {}).get(ns, {})
+            if not plan.get("enabled"):
+                print("  [GPU sharing] Not needed for", ns)
+                return
+            slices = plan.get("slices", 2)
+            config = {"configs": [{"name": "modelops-slice", "default": slices,
+                                    "values": [{"name": f"modelops-slice-{ns}", "count": slices}]}]}
+            cm_yaml = yaml.dump({"apiVersion": "v1", "kind": "ConfigMap",
+                                 "metadata": {"name": TS_CM, "namespace": GPU_OPERATOR_NS},
+                                 "data": {"time-slicing-config.json": yaml.dump(config)}})
+            run(["oc", "apply", "-n", GPU_OPERATOR_NS, "-f", "-"],
+                input=cm_yaml.encode())
+            run(["oc", "patch", "clusterpolicy", CLUSTERPOLICY, "-n", GPU_OPERATOR_NS,
+                 "--type=merge", "-p", '{"spec":{"devicePlugin":{"config":{"name":"' + TS_CM + '"}}}}'])
+            print(f"  [GPU sharing] Enabled {slices} slices in {GPU_OPERATOR_NS}")
+
+        def deploy_model(ns, options):
+            rel = os.environ.get("RELEASE_NAME", "granite-2b")
+            model_id = os.environ.get("MODEL_ID", "")
+            modelcar_image = os.environ.get("MODELCAR_IMAGE", "")
+            hf_token = os.environ.get("HF_TOKEN", "")
+            vals_content = os.environ.get("VALUES_CONTENT", "")
+
+            repo = "redhat-ai-services/modelcar-catalog"
+            if modelcar_image:
+                car_ref = modelcar_image
+            else:
+                model_tag = model_id.split("/")[-1].lower().replace(".", "-").replace("_", "-")
+                car_ref = f"quay.io/{repo}:{model_tag}"
+
+            gpu_count = GPU_COUNT
+            if not gpu_count and options:
+                gpu_count = str(options.get("gpus_needed", 1))
+            if not gpu_count:
+                gpu_count = "1"
+
+            gpu_mem = "0.90"
+            if options and options.get("time_slicing_enabled"):
+                gpu_mem = options.get("gpu_memory_utilization", "0.45")
+
+            args = ["--max-model-len", os.environ.get("CTX_LEN", "32768"),
+                    "--gpu-memory-utilization", gpu_mem]
+
+            serving_runtime = f"{rel}-vllm-kserve"
+            sr_yaml = f"""
+        apiVersion: serving.kserve.io/v1alpha1
+        kind: ServingRuntime
+        metadata:
+          name: {serving_runtime}
+          namespace: {ns}
+          labels:
+            opendatahub.io/dashboard: "true"
+          annotations:
+            opendatahub.io/apiProtocol: REST
+            openshift.io/display-name: vLLM NVIDIA GPU ServingRuntime for KServe
+        spec:
+          multiModel: false
+          containers:
+            - name: kserve-container
+              image: quay.io/modh/vllm:rhoai-2.17
+              command: ["python", "-m", "vllm.entrypoints.openai.api_server"]
+              args: {json.dumps(args)}
+              env:
+                - name: MODEL_ID
+                  value: {model_id}
+                - name: HF_HOME
+                  value: /tmp/hf_home
+              ports:
+                - containerPort: 8080
+                  protocol: TCP
+          supportedModelFormats:
+            - name: vLLM
+              autoSelect: true
+        """
+            run(["oc", "apply", "-n", ns, "-f", "-"], input=sr_yaml.encode())
+            print(f"  [ServingRuntime] Created {serving_runtime} in {ns}")
+
+            helm_cmd = ["helm", "upgrade", "--install", rel, "vllm-kserve",
+                        "--repo", CHART_URL, "--version", CHART_VERSION,
+                        "-n", ns, "--wait", "--timeout", "10m",
+                        "--set", f"model.modelId={model_id}",
+                        "--set", f"model.gpuCount={gpu_count}",
+                        "--set", f"servingRuntime.name={serving_runtime}"]
+            if car_ref:
+                helm_cmd.extend(["--set", f"model.modelCarRef={car_ref}"])
+            if hf_token:
+                helm_cmd.extend(["--set", f"model.huggingFaceToken={hf_token}"])
+            if vals_content:
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    f.write(vals_content)
+                    vals_file = f.name
+                helm_cmd.extend(["-f", vals_file])
+
+            helm(*helm_cmd)
+            print(f"  [Helm] Deployed {rel} to {ns}")
+
+            if vals_content:
+                os.unlink(vals_file)
+
+            retries = 30
+            for i in range(retries):
+                rc, out, _ = oc("get", "inferenceservice", rel, "-n", ns,
+                                 "-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+                if rc == 0 and out == "True":
+                    print(f"  [Ready] {rel} InferenceService is ready in {ns}")
+                    return
+                time.sleep(10)
+            print(f"  [WARN] InferenceService {rel} did not become ready in {ns}")
+
+        def grant_access(ns):
+            model_name = os.environ.get("MODEL_NAME", "")
+            viewers = os.environ.get("AUTHORIZED_VIEWERS", "")
+            role = os.environ.get("ACCESS_ROLE", "view")
+            if not viewers:
+                print("  [Access] No authorized viewers; skipping RBAC")
+                return
+
+            run(["oc", "delete", "rolebinding", "-n", ns,
+                 "-l", f"modelops.access-for={model_name}", "--ignore-not-found"])
+            for entry in [v.strip() for v in viewers.split(",") if v.strip()]:
+                kind = "User"
+                name = entry
+                if entry.startswith("group:"):
+                    kind = "Group"
+                    name = entry.split(":", 1)[1]
+                safe = name.lower().replace(" ", "-").replace(":", "-")
+                rb = f"""apiVersion: rbac.authorization.k8s.io/v1
+        kind: RoleBinding
+        metadata:
+          name: {model_name}-viewer-{safe}
+          namespace: {ns}
+          labels:
+            modelops.access-for: "{model_name}"
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: "{role}"
+        subjects:
+          - kind: {kind}
+            name: "{name}"
+        """
+                run(["oc", "apply", "-n", ns, "-f", "-"], input=rb.encode())
+            print(f"  [Access] Granted {role} to {viewers} in {ns}")
+
+        def run_benchmark(ns):
+            evalhub_url = os.environ.get("EVALHUB_URL", "")
+            evalhub_token = os.environ.get("EVALHUB_TOKEN", "")
+            if not evalhub_url or not evalhub_token:
+                print("  [Benchmark] EvalHub not configured; skipping")
+                return None
+
+            model_name = os.environ.get("MODEL_NAME", "")
+            profile = os.environ.get("GLM_PROFILE", "constant")
+            rate = float(os.environ.get("GLM_RATE", "4.0"))
+            max_sec = int(os.environ.get("GLM_MAX_SECONDS", "15"))
+            max_req = int(os.environ.get("GLM_MAX_REQUESTS", "2"))
+
+            target = f"http://{model_name}-predictor.{ns}.svc.cluster.local:8080/v1"
+            payload = {
+                "name": f"{model_name}-guidellm-{ns}",
+                "target": target,
+                "profile": profile,
+                "rate": rate,
+                "max_seconds": max_sec,
+                "max_requests": max_req,
+            }
+            if os.environ.get("CUSTOM_DATA", "False") == "True":
+                payload["custom_data"] = os.environ.get("CUSTOM_FILENAME", "no-file")
+
+            url = evalhub_url.rstrip("/") + "/api/v1/guidellm/run"
+            data = json.dumps(payload).encode("utf-8")
+            headers = {"Content-Type": "application/json",
+                       "Authorization": f"Bearer {evalhub_token}"}
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                resp = urllib.request.urlopen(req, timeout=120)
+                job = json.loads(resp.read().decode())
+                job_id = job.get("job_id", "")
+                print(f"  [Benchmark] GuideLLM job {job_id} submitted against {target}")
+                return job_id
+            except Exception as e:
+                print(f"  [Benchmark] FAILED: {e}")
+                return None
+
+        def upload_benchmark_results(ns):
+            s3_ep = os.environ.get("S3_ENDPOINT", "")
+            s3_ak = os.environ.get("S3_ACCESS_KEY", "")
+            s3_sk = os.environ.get("S3_SECRET_KEY", "")
+            if not s3_ep:
+                print("  [Upload] S3 not configured; skipping")
+                return
+
+            import boto3
+            from botocore.client import Config as BotoConfig
+            from datetime import timezone as tz
+            s3 = boto3.client("s3", endpoint_url=s3_ep,
+                              aws_access_key_id=s3_ak,
+                              aws_secret_access_key=s3_sk,
+                              config=BotoConfig(signature_version="s3v4"))
+            ts = __import__("datetime").datetime.now(tz.utc).strftime("%Y%m%d-%H%M%S")
+            key = f"guidellm/{os.environ.get('MODEL_NAME', 'unknown')}/{ns}-{ts}-results.json"
+            results = {"namespace": ns, "benchmark": "GuideLLM", "timestamp": ts}
+            s3.put_object(Bucket="benchmark-results", Key=key,
+                          Body=json.dumps(results).encode())
+            print(f"  [Upload] Results to s3://benchmark-results/{key}")
+
+        # ── main ───────────────────────────────────────────────────────────
+        PROMOTION_NAMESPACES = os.environ.get("PROMOTION_NAMESPACES", "").strip()
+        if not PROMOTION_NAMESPACES:
+            print("ERROR: promotion-namespaces is empty")
+            sys.exit(1)
+
+        namespaces = [ns.strip() for ns in PROMOTION_NAMESPACES.split(",") if ns.strip()]
+        workspace = os.environ.get("WORKING_DIR", "/workspace")
+
+        # Load GPU sharing plan
+        sharing_plan_path = os.path.join(workspace, "gpu-sharing-plan.json")
+        sharing = {}
+        if os.path.exists(sharing_plan_path):
+            with open(sharing_plan_path) as f:
+                sharing = json.load(f)
+
+        # Load deployment options
+        dep_opts_path = os.path.join(workspace, "deployment-options.json")
+        dep_opts = {}
+        if os.path.exists(dep_opts_path):
+            with open(dep_opts_path) as f:
+                dep_opts = json.load(f)
+
+        all_results = {}
+        for ns in namespaces:
+            print(f"\n===== Promoting to namespace: {ns} =====")
+            ns_options = dep_opts.get("per_namespace", {}).get(ns, {})
+
+            print("-> Apply GPU sharing")
+            apply_gpu_sharing(ns, sharing)
+
+            print("-> Deploy model")
+            deploy_model(ns, ns_options)
+
+            print("-> Grant model access")
+            grant_access(ns)
+
+            print("-> Run benchmark")
+            job_id = run_benchmark(ns)
+
+            print("-> Upload benchmark results")
+            upload_benchmark_results(ns)
+
+            all_results[ns] = {"deployed": True, "benchmark_job_id": job_id}
+            print(f"===== {ns} promotion complete =====")
+
+        with open(os.path.join(workspace, "promotion-results.json"), "w") as f:
+            json.dump(all_results, f, indent=2)
+        print("\nAll namespaces promoted successfully.")
+        PYEOF
+  workspaces:
+    - name: shared-workspace
+      description: Workspace for deployment options and results

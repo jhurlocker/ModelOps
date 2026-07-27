@@ -1,0 +1,13 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: ModelLifecycleProfile
+metadata:
+  name: standard-generative-onboarding
+  namespace: sandbox
+spec:
+  workflow:
+    engine: tekton
+    pipelineRef: model-intake-pipeline
+  platformConfigRef: default-modelops-platform
+  defaultAccess:
+    authorizedViewers: ""
+    accessRole: view

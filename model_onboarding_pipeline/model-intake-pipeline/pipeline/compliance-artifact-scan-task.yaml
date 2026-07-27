@@ -223,7 +223,7 @@ spec:
     # Containerized compliance scanner - versioned, tested, auditable.
     # ----------------------------------------------------------------------
     - name: evaluate-and-upload
-      image: quay.io/jhurlocker/compliance-scanner:latest
+      image: quay.io/jhurlocker/compliance-scanner:v0.1.1
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_ID
@@ -300,7 +300,7 @@ spec:
 
     # --- Upload reports to S3 via containerized tool ---
     - name: s3-upload
-      image: quay.io/jhurlocker/s3-upload:latest
+      image: quay.io/jhurlocker/s3-upload:v0.1.1
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: S3_ENDPOINT_URL
@@ -320,7 +320,7 @@ spec:
 
     # --- Register model in Model Registry (best-effort, even on failure) ---
     - name: register-model
-      image: quay.io/jhurlocker/model-registry-helper:latest
+      image: quay.io/jhurlocker/model-registry-helper:v0.1.0
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_NAME

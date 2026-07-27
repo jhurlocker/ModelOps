@@ -29,39 +29,37 @@ def submit_garak():
     evalhub_url = os.environ["EVALHUB_URL"]
     token = os.environ["EVALHUB_TOKEN"]
     tenant_ns = os.environ["TENANT_NS"]
+    model_name = os.environ["MODEL_NAME"]
 
     base = f"https://{evalhub_url}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Tenant": tenant_ns}
 
-    job_id = f"garak-{uuid.uuid4().hex[:8]}"
+    job_name = f"garak-{uuid.uuid4().hex[:8]}"
+
+    garak_benchmark_id = os.environ.get("GARAK_BENCHMARK", "quick")
 
     payload = {
-        "apiVersion": "trustyai.opendatahub.io/v1alpha1",
-        "kind": "EvalJob",
-        "metadata": {
-            "name": job_id,
-            "namespace": tenant_ns,
-            "labels": {"job-type": "garak", "model-name": os.environ["MODEL_NAME"]},
+        "name": job_name,
+        "model": {
+            "url": target,
+            "name": model_name,
         },
-        "spec": {
-            "provider": "garak",
-            "model": target,
-            "arguments": {
-                "generator": "openai",
-                "model_name": target,
-                "probes": os.environ.get("GARAK_PROBES", "malwaregen.TopLevel"),
-                "max_seeds": os.environ.get("MAX_SEEDS", "1"),
-                "parallel_attempts": os.environ.get("PARALLEL_ATTEMPTS", "8"),
-            },
-        },
+        "benchmarks": [
+            {
+                "provider_id": "garak",
+                "id": garak_benchmark_id,
+            }
+        ],
     }
 
-    print(f"Submitting garak job {job_id} to EvalHub...")
+    print(f"Submitting garak job {job_name} to EvalHub...")
     resp = requests.post(
         f"{base}/api/v1/evaluations/jobs",
         json=payload, headers=headers,
     )
     resp.raise_for_status()
+    result = resp.json()
+    job_id = result.get("resource", {}).get("id", job_name)
     print(f"Garak job submitted: {job_id}")
     return job_id
 
@@ -72,23 +70,27 @@ def poll_completion(job_id, max_attempts=60, poll_interval=15):
     tenant_ns = os.environ["TENANT_NS"]
 
     base = f"https://{evalhub_url}"
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {"Authorization": f"Bearer {token}", "X-Tenant": tenant_ns}
 
     for attempt in range(1, max_attempts + 1):
         print(f"Polling garak job {job_id} (attempt {attempt}/{max_attempts})...")
         try:
             resp = requests.get(
-                f"{base}/api/v1/evaluations/jobs/{tenant_ns}/{job_id}",
+                f"{base}/api/v1/evaluations/jobs/{job_id}",
                 headers=headers,
             )
             resp.raise_for_status()
-            status = resp.json()
-            job_status = (status.get("status", {}) or {}).get("conditions", [{}])[0].get("type", "Running")
-            if job_status == "Complete":
+            job_data = resp.json()
+            status_obj = job_data.get("status", {})
+            job_state = status_obj.get("state", "unknown") if isinstance(status_obj, dict) else str(status_obj)
+            state_lower = job_state.lower()
+            if state_lower in ("completed", "finished", "succeeded"):
                 print("Garak job completed.")
-                return status
-            elif job_status == "Failed":
-                raise RuntimeError(f"Garak job failed: {json.dumps(status, indent=2)}")
+                return job_data
+            elif state_lower in ("failed", "error"):
+                raise RuntimeError(f"Garak job failed: {json.dumps(job_data, indent=2)}")
+            else:
+                print(f"  Status: {job_state}")
         except Exception as e:
             print(f"Poll error: {e}")
 
@@ -140,12 +142,19 @@ def gate_on_results(report_data):
             sys.exit(1)
         analysis = json.loads(result.stdout) if result.stdout.strip() else {}
     else:
-        # Simple heuristic: count attacks with high success rate
+        results_obj = report_data.get("results", {})
+        benchmarks = results_obj.get("benchmarks", []) if isinstance(results_obj, dict) else []
+        benchmark_results = report_data.get("benchmarks", []) or benchmarks
         attacks_total = 0
         attacks_successful = 0
-        for entry in report_data.get("results", []) or report_data.get("entries", []) or []:
+        for entry in benchmark_results:
+            if not isinstance(entry, dict):
+                continue
             attacks_total += 1
-            if entry.get("attempt_success_rate", entry.get("success_rate", 0)) > 0.5:
+            metrics = entry.get("metrics", {})
+            test = entry.get("test", {})
+            passed = test.get("pass")
+            if passed is False:
                 attacks_successful += 1
 
         success_rate = attacks_successful / max(attacks_total, 1)

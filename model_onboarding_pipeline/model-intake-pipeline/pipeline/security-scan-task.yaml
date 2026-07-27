@@ -76,7 +76,7 @@ spec:
   steps:
     # Containerized garak security scan via EvalHub
     - name: security-scan
-      image: quay.io/jhurlocker/security-scanner:latest
+      image: quay.io/jhurlocker/security-scanner:v0.1.8
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: EVALHUB_URL
@@ -114,7 +114,7 @@ spec:
 
     # Update Model Registry with garak results
     - name: update-registry
-      image: quay.io/jhurlocker/model-registry-helper:latest
+      image: quay.io/jhurlocker/model-registry-helper:v0.1.0
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_NAME

@@ -49,7 +49,7 @@ spec:
       description: Shared workspace for storing benchmark results
   steps:
     - name: run-evalhub-guidellm
-      image: quay.io/jhurlocker/guidellm-benchmark:latest
+      image: quay.io/jhurlocker/guidellm-benchmark:v0.1.5
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: EVALHUB_URL

@@ -8,13 +8,13 @@ COPY main.go main.go
 COPY api/ api/
 COPY internal/ internal/
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o manager main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o /tmp/manager main.go
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 RUN microdnf install -y ca-certificates && microdnf clean all
 
-COPY --from=builder /workspace/manager /usr/local/bin/manager
+COPY --from=builder /tmp/manager /usr/local/bin/manager
 
 USER 65532:65532
 

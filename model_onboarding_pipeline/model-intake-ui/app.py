@@ -8,16 +8,7 @@ from flask import Flask, g, jsonify, redirect, render_template_string, request, 
 
 # --- Configuration -------------------------------------------------------------
 DB_PATH = os.environ.get("DB_PATH", "/data/model-intake.db")
-PIPELINE_NAMESPACE = os.environ.get("PIPELINE_NAMESPACE", "vllm")
-PIPELINE_NAME = os.environ.get("PIPELINE_NAME", "model-intake-pipeline")
-SELF_INTERNAL_URL = os.environ.get(
-    "SELF_INTERNAL_URL", "http://model-intake.vllm.svc.cluster.local:8080"
-)
-DEFAULT_S3_ENDPOINT = os.environ.get(
-    "DEFAULT_S3_ENDPOINT", "http://minio-service.s3-storage.svc.cluster.local:9000"
-)
-DEFAULT_S3_ACCESS_KEY = os.environ.get("DEFAULT_S3_ACCESS_KEY", "minio")
-DEFAULT_S3_SECRET_KEY = os.environ.get("DEFAULT_S3_SECRET_KEY", "minio123")
+PIPELINE_NAMESPACE = os.environ.get("PIPELINE_NAMESPACE", "sandbox")
 DEFAULT_ADVISOR_ENDPOINT = os.environ.get("DEFAULT_ADVISOR_ENDPOINT", "")
 
 MODELOPS_GROUP = "modelops.example.io"
@@ -202,126 +193,142 @@ def modelrequest_status(mr):
 # --- Build ModelRequest spec from form params --------------------------------
 
 
+LIFECYCLE_PROFILE = os.environ.get(
+    "LIFECYCLE_PROFILE", "standard-generative-onboarding"
+)
+
+
 def build_modelrequest_spec(params):
     spec = {
-        "modelSource": params.get("model-source", "huggingface"),
-        "modelURI": params.get("model-id"),
-        "targetEnvironment": params.get("target-environment", "sandbox"),
-        "pipelineRef": params.get("pipeline-ref", PIPELINE_NAME),
-        "modelName": params.get("model-name"),
-        "modelVersion": params.get("model-version", "v1"),
+        "model": {
+            "sourceType": params.get("model-source", "huggingface"),
+            "uri": params.get("model-id"),
+            "name": params.get("model-name"),
+            "version": params.get("model-version", "v1"),
+        },
+        "lifecycleProfile": params.get("lifecycle-profile", LIFECYCLE_PROFILE),
         "requestedBy": params.get("requested-by", ""),
     }
 
-    if params.get("modelcar-repo") or params.get("modelcar-image"):
-        spec["modelCar"] = {
-            "repo": params.get("modelcar-repo", "redhat-ai-services/modelcar-catalog"),
-            "image": params.get("modelcar-image", ""),
+    pipeline_override = params.get("pipeline-ref", "")
+    if pipeline_override:
+        spec["pipelineRef"] = pipeline_override
+
+    requirements = {}
+
+    ctx_len = params.get("context-length", "")
+    if ctx_len:
+        requirements["contextLength"] = int(ctx_len)
+
+    conc = params.get("concurrency", "")
+    if conc:
+        requirements["expectedConcurrency"] = int(conc)
+
+    allow_ts = params.get("allow-time-slicing", "")
+    if allow_ts:
+        requirements["allowTimeSlicing"] = allow_ts == "true"
+
+    allow_mig = params.get("allow-mig", "")
+    if allow_mig:
+        requirements["allowMIG"] = allow_mig == "true"
+
+    iso = params.get("gpu-isolation-policy", "")
+    if iso:
+        requirements["gpuIsolationPolicy"] = iso
+
+    cve = params.get("artifact-cve-threshold", "")
+    if cve:
+        requirements["cveThreshold"] = cve
+
+    sev = params.get("severity-threshold", "")
+    if sev:
+        requirements["securityThreshold"] = sev
+
+    sandbox_ns = params.get("target-namespace", "")
+    if sandbox_ns:
+        requirements["sandboxNamespace"] = sandbox_ns
+
+    staging_ns = params.get("staging-namespace", "")
+    if staging_ns:
+        requirements["stagingNamespace"] = staging_ns
+
+    promo_namespace = params.get("promotion-namespace-0", "")
+    if promo_namespace:
+        namespaces = []
+        i = 0
+        while True:
+            ns = params.get(f"promotion-namespace-{i}", "")
+            if not ns:
+                break
+            namespaces.append(ns)
+            i += 1
+        if namespaces:
+            requirements["promotionNamespaces"] = namespaces
+
+    advisor = params.get("advisor-endpoint", "")
+    if advisor:
+        requirements["advisorEndpoint"] = advisor
+
+    gpu_override = params.get("gpu-count-override", "")
+    if gpu_override:
+        requirements["gpuCountOverride"] = gpu_override
+
+    values = params.get("values-content", "")
+    if values:
+        requirements["valuesContent"] = values
+
+    console_domain = params.get("openshift-console-domain", "")
+    if console_domain:
+        requirements["openshiftConsoleDomain"] = console_domain
+
+    custom_data = params.get("custom-data", "")
+    if custom_data:
+        requirements["customBenchmarkData"] = custom_data == "True"
+
+    custom_file = params.get("custom-filename", "")
+    if custom_file and custom_file != "no-file":
+        requirements["customBenchmarkFile"] = custom_file
+
+    if requirements:
+        spec["requirements"] = requirements
+
+    viewers = params.get("authorized-viewers", "")
+    access_role = params.get("access-role", "")
+    if viewers or access_role:
+        spec["access"] = {
+            "authorizedViewers": viewers,
+            "accessRole": access_role,
         }
 
-    spec["namespaces"] = {
-        "sandbox": params.get("target-namespace", "vllm"),
-        "staging": params.get("staging-namespace", "vllm-staging"),
-    }
+    evalhub_secret = params.get("evalhub-secret-name", "")
+    if evalhub_secret:
+        spec["evalhubSecretName"] = evalhub_secret
 
-    if params.get("artifact-cve-threshold") or params.get("artifact-scan-image"):
-        spec["compliance"] = {
-            "artifactScanImage": params.get("artifact-scan-image", "registry.access.redhat.com/ubi9/python-311:latest"),
-            "cveThreshold": params.get("artifact-cve-threshold", "critical"),
-            "ignoreUnfixed": params.get("ignore-unfixed", "true"),
-            "allowedArchitectures": [
-                a.strip() for a in params.get("allowed-architectures", "amd64,x86_64").split(",") if a.strip()
-            ],
-        }
+    hf_secret = params.get("huggingface-secret-name", "")
+    if hf_secret:
+        spec["huggingfaceSecretName"] = hf_secret
 
-    spec["gpuAdvisor"] = {
-        "contextLength": int(params.get("context-length", 32768)),
-        "concurrency": int(params.get("concurrency", 4)),
-        "allowTimeSlicing": params.get("allow-time-slicing", "true") == "true",
-        "allowMIG": params.get("allow-mig", "false") == "true",
-        "gpuIsolationPolicy": params.get("gpu-isolation-policy", "dedicated"),
-        "gpuOperatorNamespace": params.get("gpu-operator-namespace", "nvidia-gpu-operator"),
-        "clusterPolicyName": params.get("clusterpolicy-name", "gpu-cluster-policy"),
-        "timeSlicingConfigMap": params.get("time-slicing-configmap", "modelops-time-slicing"),
-        "maxTimeSlices": int(params.get("max-time-slices", 8)),
-        "advisorEndpoint": params.get("advisor-endpoint", ""),
-        "advisorSecretName": params.get("advisor-secret-name", "gpu-advisor-credentials"),
-        "advisorTimeoutSeconds": int(params.get("advisor-timeout-seconds", 300)),
-    }
+    scan_s3_secret = params.get("scan-s3-secret-name", "")
+    if scan_s3_secret:
+        spec["scanS3SecretName"] = scan_s3_secret
 
-    spec["deploy"] = {
-        "chartUrl": params.get("chart-url", "https://redhat-ai-services.github.io/helm-charts/"),
-        "chartVersion": params.get("chart-version", "0.7.1"),
-        "gpuCountOverride": params.get("gpu-count-override", ""),
-        "hardwareProfileName": params.get("hardware-profile-name", "gpu-profile"),
-        "hardwareProfileNamespace": params.get("hardware-profile-namespace", "redhat-ods-applications"),
-        "valuesContent": params.get("values-content", ""),
-        "releaseName": params.get("model-name", ""),
-    }
+    result_s3_secret = params.get("result-s3-secret-name", "")
+    if result_s3_secret:
+        spec["resultS3SecretName"] = result_s3_secret
 
-    spec["securityScan"] = {
-        "severityThreshold": params.get("severity-threshold", "block"),
-        "evalhubUrl": params.get("evalhub-url", ""),
-        "evalhubToken": params.get("evalhub-token", ""),
-        "tenantNamespace": params.get("target-namespace", "vllm"),
-        "openshiftConsoleDomain": params.get("openshift-console-domain", ""),
-    }
-
-    spec["approval"] = {
-        "apiUrl": params.get("approval-api-url", SELF_INTERNAL_URL),
-        "pollIntervalSeconds": int(params.get("approval-poll-interval-seconds", 15)),
-        "timeoutSeconds": int(params.get("approval-timeout-seconds", 3600)),
-    }
-
-    spec["benchmark"] = {
-        "profile": params.get("guidellm-profile", "constant"),
-        "rate": float(params.get("guidellm-rate", 4.0)),
-        "maxSeconds": int(params.get("guidellm-max-seconds", 15)),
-        "maxRequests": int(params.get("guidellm-max-requests", 2)),
-        "customData": params.get("custom-data", "False") == "True",
-        "customFilename": params.get("custom-filename", "no-file"),
-        "huggingfaceToken": params.get("huggingface-token", ""),
-    }
-
-    spec["s3Storage"] = {
-        "endpoint": params.get("s3-api-endpoint", DEFAULT_S3_ENDPOINT),
-        "accessKeyId": params.get("s3-access-key-id", DEFAULT_S3_ACCESS_KEY),
-        "secretAccessKey": params.get("s3-secret-access-key", DEFAULT_S3_SECRET_KEY),
-    }
-
-    spec["scanS3Storage"] = {
-        "endpoint": params.get("scan-s3-endpoint", DEFAULT_S3_ENDPOINT),
-        "accessKeyId": params.get("scan-s3-access-key-id", DEFAULT_S3_ACCESS_KEY),
-        "secretAccessKey": params.get("scan-s3-secret-access-key", DEFAULT_S3_SECRET_KEY),
-        "bucket": "compliance-artifact-results",
-        "uiRoute": params.get("s3-ui-route", ""),
-    }
-
-    spec["modelRegistry"] = {
-        "server": params.get("mr-server", "http://modelops-registry.rhoai-model-registries.svc.cluster.local"),
-        "port": params.get("mr-port", "8080"),
-        "author": params.get("model-reg-author", "ModelOps Platform Team"),
-    }
-
-    spec["modelAccess"] = {
-        "authorizedViewers": params.get("authorized-viewers", ""),
-        "accessRole": params.get("access-role", "view"),
-    }
-
-    spec["maas"] = {
-        "enabled": False,
-        "servingNamespace": "llm",
-        "policyNamespace": "models-as-a-service",
-        "gpuCount": "1",
-        "runtimeImage": "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0",
-        "authorizedGroup": params.get("maas-authorized-group", "system:authenticated"),
-    }
-
-    spec["lmEval"] = {
-        "enabled": False,
-        "jobName": params.get("lm-eval-job-name", "mmlu-jurisprudence-eval-job"),
-        "useCustom": params.get("lm-eval-custom", "False") == "True",
-    }
+    deploy_maas = params.get("deploy-maas", "")
+    if deploy_maas == "true":
+        maas = {"enabled": True}
+        maas_gpu = params.get("maas-gpu-count", "")
+        if maas_gpu:
+            maas["gpuCount"] = maas_gpu
+        maas_img = params.get("maas-runtime-image", "")
+        if maas_img:
+            maas["runtimeImage"] = maas_img
+        maas_group = params.get("maas-authorized-group", "")
+        if maas_group:
+            maas["authorizedGroup"] = maas_group
+        spec["maas"] = maas
 
     return spec
 
@@ -333,217 +340,114 @@ FORM_DEFAULTS = {
     "model-name": "granite-2b",
     "model-version": "v1",
     "model-source": "huggingface",
-    "target-environment": "sandbox",
-    "pipeline-ref": PIPELINE_NAME,
-    "modelcar-image": "",
-    "target-namespace": "vllm",
-    "staging-namespace": "vllm-staging",
-    "modelcar-repo": "redhat-ai-services/modelcar-catalog",
-    "artifact-scan-image": "registry.access.redhat.com/ubi9/python-311:latest",
-    "artifact-cve-threshold": "critical",
-    "ignore-unfixed": "true",
-    "allowed-architectures": "amd64,x86_64",
+    "lifecycle-profile": LIFECYCLE_PROFILE,
+    "pipeline-ref": "",
+    "requested-by": "",
+    "target-namespace": "sandbox",
+    "promotion-namespace-0": "staging",
+    "promotion-namespace-1": "",
+    "promotion-namespace-2": "",
+    "promotion-namespace-3": "",
+    "promotion-namespace-4": "",
     "context-length": "32768",
     "concurrency": "4",
     "allow-time-slicing": "true",
     "allow-mig": "false",
     "gpu-isolation-policy": "dedicated",
-    "gpu-operator-namespace": "nvidia-gpu-operator",
-    "clusterpolicy-name": "gpu-cluster-policy",
-    "time-slicing-configmap": "modelops-time-slicing",
-    "max-time-slices": "8",
-    "advisor-endpoint": DEFAULT_ADVISOR_ENDPOINT,
-    "advisor-secret-name": "gpu-advisor-credentials",
-    "advisor-timeout-seconds": "180",
-    "approval-api-url": SELF_INTERNAL_URL,
-    "approval-poll-interval-seconds": "15",
-    "approval-timeout-seconds": "3600",
-    "release-name": "granite-2b",
-    "chart-url": "https://redhat-ai-services.github.io/helm-charts/",
-    "chart-version": "0.7.1",
-    "values-content": "",
-    "gpu-count-override": "",
-    "hardware-profile-name": "gpu-profile",
-    "hardware-profile-namespace": "redhat-ods-applications",
-    "api-key": "",
-    "garak-probes": "malwaregen.TopLevel",
-    "garak-detectors": "",
-    "max-seeds": "1",
-    "parallel-attempts": "8",
+    "artifact-cve-threshold": "critical",
     "severity-threshold": "block",
-    "evalhub-url": "evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com",
-    "evalhub-token": "",
-    "guidellm-profile": "constant",
-    "guidellm-rate": "4.0",
-    "guidellm-max-seconds": "15",
-    "guidellm-max-requests": "2",
-    "huggingface-token": "",
-    "custom-data": "False",
-    "custom-filename": "no-file",
-    "s3-api-endpoint": DEFAULT_S3_ENDPOINT,
-    "s3-access-key-id": DEFAULT_S3_ACCESS_KEY,
-    "s3-secret-access-key": DEFAULT_S3_SECRET_KEY,
-    "scan-s3-endpoint": DEFAULT_S3_ENDPOINT,
-    "scan-s3-access-key-id": DEFAULT_S3_ACCESS_KEY,
-    "scan-s3-secret-access-key": DEFAULT_S3_SECRET_KEY,
-    "compliance-s3-bucket": "compliance-artifact-results",
-    "security-s3-bucket": "security-scan-results",
-    "s3-ui-route": "",
-    "lm-eval-job-name": "mmlu-jurisprudence-eval-job",
-    "lm-eval-custom": "False",
-    "model-reg-author": "ModelOps Platform Team",
-    "mr-server": "http://modelops-registry.rhoai-model-registries.svc.cluster.local",
-    "mr-port": "8080",
+    "gpu-count-override": "",
+    "advisor-endpoint": DEFAULT_ADVISOR_ENDPOINT,
+    "values-content": "",
     "authorized-viewers": "",
     "access-role": "view",
-    "maas-authorized-group": "system:authenticated",
+    "evalhub-secret-name": "evalhub-credentials",
+    "huggingface-secret-name": "",
+    "scan-s3-secret-name": "scan-s3-credentials",
+    "result-s3-secret-name": "result-s3-credentials",
+    "custom-data": "False",
+    "custom-filename": "no-file",
+    "deploy-maas": "false",
+    "maas-gpu-count": "",
+    "maas-runtime-image": "",
+    "maas-authorized-group": "",
     "openshift-console-domain": "",
 }
 
 FORM_SECTIONS = [
-    ("Model Identity", ["model-source", "model-id", "modelcar-image", "model-name", "model-version",
-                         "target-environment", "pipeline-ref", "requested-by"]),
-    ("Namespaces", ["target-namespace", "staging-namespace"]),
-    (
-        "Phase 1 Gate 1 - Compliance & Artifact Security Scan",
-        [
-            "modelcar-repo",
-            "artifact-scan-image",
-            "artifact-cve-threshold",
-            "ignore-unfixed",
-            "allowed-architectures",
-        ],
-    ),
-    (
-        "EvalHub & Security Scan",
-        ["evalhub-url", "evalhub-token", "severity-threshold", "openshift-console-domain"],
-    ),
-    (
-        "GPU Advisor + Time-Slicing",
-        [
-            "context-length",
-            "concurrency",
-            "allow-time-slicing",
-            "allow-mig",
-            "gpu-isolation-policy",
-            "gpu-operator-namespace",
-            "clusterpolicy-name",
-            "time-slicing-configmap",
-            "max-time-slices",
-            "advisor-endpoint",
-            "advisor-secret-name",
-            "advisor-timeout-seconds",
-        ],
-    ),
-    (
-        "Human Approval",
-        ["approval-api-url", "approval-poll-interval-seconds", "approval-timeout-seconds"],
-    ),
-    (
-        "Deploy",
-        [
-            "chart-url",
-            "chart-version",
-            "gpu-count-override",
-            "hardware-profile-name",
-            "hardware-profile-namespace",
-            "values-content",
-        ],
-    ),
-    (
-        "Benchmark (GuideLLM, staging)",
-        [
-            "guidellm-profile",
-            "guidellm-rate",
-            "guidellm-max-seconds",
-            "guidellm-max-requests",
-            "huggingface-token",
-            "custom-data",
-            "custom-filename",
-        ],
-    ),
-    ("S3 Storage", ["s3-api-endpoint", "s3-access-key-id", "s3-secret-access-key"]),
-    (
-        "Scan-Result S3 Storage",
-        [
-            "scan-s3-endpoint",
-            "scan-s3-access-key-id",
-            "scan-s3-secret-access-key",
-            "compliance-s3-bucket",
-            "security-s3-bucket",
-            "s3-ui-route",
-        ],
-    ),
-    ("Model Registry", ["model-reg-author", "mr-server", "mr-port"]),
-    (
-        "Model Access (RHOAI dashboard visibility)",
-        ["authorized-viewers", "access-role"],
-    ),
-    (
-        "MaaS Production Deployment",
-        ["maas-authorized-group"],
-    ),
+    ("Model Identity", [
+        "model-source", "model-id", "model-name", "model-version",
+        "lifecycle-profile", "pipeline-ref", "requested-by",
+    ]),
+    ("Namespaces - Sandbox", ["target-namespace"]),
+    ("Namespaces - Promotion Environments", [
+        "promotion-namespace-0", "promotion-namespace-1",
+        "promotion-namespace-2", "promotion-namespace-3",
+        "promotion-namespace-4",
+    ]),
+    ("GPU Requirements", [
+        "context-length", "concurrency", "allow-time-slicing", "allow-mig",
+        "gpu-isolation-policy", "gpu-count-override", "advisor-endpoint",
+    ]),
+    ("Governance Thresholds", [
+        "artifact-cve-threshold", "severity-threshold",
+    ]),
+    ("Deploy Override", ["values-content"]),
+    ("Model Access", ["authorized-viewers", "access-role"]),
+    ("Credential Secret References", [
+        "evalhub-secret-name", "huggingface-secret-name",
+        "scan-s3-secret-name", "result-s3-secret-name",
+    ]),
+    ("Benchmark Custom Data", ["custom-data", "custom-filename"]),
+    ("MaaS (optional production deploy)", [
+        "deploy-maas", "maas-gpu-count", "maas-runtime-image",
+        "maas-authorized-group",
+    ]),
+    ("OpenShift Console", ["openshift-console-domain"]),
 ]
 
 ALL_FORM_FIELDS = [f for _, fields in FORM_SECTIONS for f in fields]
+PROMOTION_NS_FIELDS = [f for f in ALL_FORM_FIELDS if f.startswith("promotion-namespace-")]
 
-REQUIRED_FIELDS = {"model-id", "model-name", "evalhub-token"}
+REQUIRED_FIELDS = {"model-id", "model-name"}
 
 FIELD_HELP = {
     "model-source": "Source of the model (e.g., huggingface, s3, oci).<br><b>Default:</b> huggingface",
     "model-id": "Hugging Face model ID to onboard.<br><b>Example:</b> <code>ibm-granite/granite-3.3-2b-instruct</code>",
-    "target-environment": "Target environment label.<br><b>Default:</b> sandbox",
-    "pipeline-ref": "Name of the Tekton pipeline to execute.<br><b>Default:</b> model-intake-pipeline",
     "model-name": "Kubernetes-safe deployment name. Lowercase, digits, <code>-</code> only.",
     "model-version": "Version label recorded in the model registry.<br><b>Example:</b> <code>v1</code>",
+    "lifecycle-profile": "ModelLifecycleProfile that defines workflow, policy, and platform config.<br><b>Default:</b> standard-generative-onboarding",
+    "pipeline-ref": "Optional override for the pipeline defined in the lifecycle profile.",
     "requested-by": "Your name / username for audit trail.",
-    "modelcar-image": "Optional full OCI/ModelCar image reference.",
-    "target-namespace": "Sandbox namespace.<br><b>Default:</b> <code>vllm</code>",
-    "staging-namespace": "Staging namespace.<br><b>Default:</b> <code>vllm-staging</code>",
-    "modelcar-repo": "Quay repo for ModelCar images.<br><b>Default:</b> <code>redhat-ai-services/modelcar-catalog</code>",
-    "artifact-scan-image": "Container image for Trivy CVE scan.",
-    "artifact-cve-threshold": "CVE severity gate: <code>critical</code>, <code>high</code>, <code>none</code>",
-    "ignore-unfixed": "Ignore CVEs without available fixes.",
-    "allowed-architectures": "Comma-separated permitted archs.<br><b>Example:</b> <code>amd64,x86_64</code>",
-    "evalhub-url": "EvalHub base URL (FQDN only, no scheme).",
-    "evalhub-token": "OpenShift OAuth token for EvalHub API (<code>oc whoami -t</code>).<br><b>Required</b>",
-    "severity-threshold": "Garak gate strictness: <code>block</code>, <code>warn</code>, <code>off</code>",
-    "openshift-console-domain": "OpenShift AI console domain for dashboard links.",
+    "target-namespace": "Sandbox namespace for compliance and security scans.<br><b>Default:</b> <code>sandbox</code>",
+    "promotion-namespace-0": "Primary promotion namespace (e.g., <code>staging</code>).",
+    "promotion-namespace-1": "Optional second promotion namespace (e.g., <code>test</code>).",
+    "promotion-namespace-2": "Optional third promotion namespace (e.g., <code>production</code>).",
+    "promotion-namespace-3": "Optional fourth promotion namespace.",
+    "promotion-namespace-4": "Optional fifth promotion namespace.",
     "context-length": "Max context length for vLLM (<code>--max-model-len</code>).",
     "concurrency": "Expected concurrent requests.",
     "allow-time-slicing": "Allow NVIDIA time-slicing when no free GPU.<br><b>Values:</b> <code>true</code>/<code>false</code>",
+    "allow-mig": "Allow Multi-Instance GPU partitioning.<br><b>Values:</b> <code>true</code>/<code>false</code>",
     "gpu-isolation-policy": "GPU isolation policy.<br><b>Default:</b> <code>dedicated</code>",
+    "gpu-count-override": "Force GPU count (leave blank for capacity plan).",
     "advisor-endpoint": "Optional LLM endpoint for remote GPU advisor.",
-    "advisor-secret-name": "Secret with API key for advisor endpoint.",
-    "approval-api-url": "In-cluster URL of this UI that the approval task polls.",
-    "approval-poll-interval-seconds": "Seconds between approval polls.",
-    "approval-timeout-seconds": "Max seconds to wait for approval.",
-    "chart-url": "Helm chart repo URL for vLLM deployment.",
-    "chart-version": "vllm-kserve Helm chart version.<br><b>Default:</b> <code>0.7.1</code>",
-    "gpu-count-override": "Force GPU count (leave blank for advisor plan).",
-    "hardware-profile-name": "RHOAI hardware profile for deployment.",
+    "artifact-cve-threshold": "CVE severity gate: <code>critical</code>, <code>high</code>, <code>none</code>",
+    "severity-threshold": "Garak gate strictness: <code>block</code>, <code>warn</code>, <code>off</code>",
     "values-content": "Optional extra Helm values (YAML).",
-    "guidellm-profile": "Benchmark profile (<code>constant</code>, <code>sweep</code>, <code>throughput</code>).",
-    "guidellm-rate": "Request rate for benchmark.",
-    "guidellm-max-seconds": "Max benchmark duration per rate step.",
-    "guidellm-max-requests": "Max benchmark requests per rate step.",
-    "huggingface-token": "Hugging Face token for gated models.",
-    "custom-data": "Use custom benchmark dataset.",
-    "s3-api-endpoint": "S3/MinIO endpoint for benchmark results.",
-    "s3-access-key-id": "S3 access key ID.",
-    "s3-secret-access-key": "S3 secret access key.",
-    "scan-s3-endpoint": "S3 endpoint for scan reports.",
-    "scan-s3-access-key-id": "S3 access key for scan results.",
-    "scan-s3-secret-access-key": "S3 secret key for scan results.",
-    "compliance-s3-bucket": "Bucket for compliance scan reports.",
-    "security-s3-bucket": "Bucket for security scan reports.",
-    "s3-ui-route": "Optional S3 browser UI route.",
-    "model-reg-author": "Author recorded in Model Registry.",
-    "mr-server": "Model Registry REST base URL.",
-    "mr-port": "Model Registry REST port.<br><b>Default:</b> <code>8080</code>",
     "authorized-viewers": "Comma-separated users/groups for RHOAI dashboard visibility.",
     "access-role": "Kubernetes role for authorized viewers.<br><b>Default:</b> <code>view</code>",
-    "maas-authorized-group": "OpenShift group for MaaS access.<br><b>Default:</b> <code>system:authenticated</code>",
+    "evalhub-secret-name": "K8s Secret name with EvalHub credentials (keys: <code>token</code>, <code>url</code>).",
+    "huggingface-secret-name": "K8s Secret name with HuggingFace token (key: <code>token</code>).",
+    "scan-s3-secret-name": "K8s Secret name for scan-result S3 (keys: <code>endpoint</code>, <code>accessKeyId</code>, <code>secretAccessKey</code>).",
+    "result-s3-secret-name": "K8s Secret name for benchmark/eval S3 (keys: <code>endpoint</code>, <code>accessKeyId</code>, <code>secretAccessKey</code>).",
+    "custom-data": "Use custom benchmark dataset (<code>True</code>/<code>False</code>).",
+    "custom-filename": "Name of custom prompt file if custom-data is <code>True</code>.",
+    "deploy-maas": "Deploy model via MaaS as final production step (<code>true</code>/<code>false</code>).",
+    "maas-gpu-count": "Number of GPUs for MaaS deployment (override platform default).",
+    "maas-runtime-image": "Runtime container image for MaaS deployment (override platform default).",
+    "maas-authorized-group": "OpenShift group for MaaS access (override platform default).",
+    "openshift-console-domain": "OpenShift AI console domain for EvalHub result links.",
 }
 
 # --- Shared page chrome -------------------------------------------------------
@@ -605,16 +509,21 @@ FORM_TEMPLATE = (
 Tekton PipelineRun, monitor execution, and report status back here.</p>
 <form method="post" action="{{ url_for('submit') }}">
   {% for section, fields in sections %}
-  <fieldset>
+  <fieldset{% if section == 'Namespaces - Promotion Environments' %} id="promotion-namespaces-fieldset"{% endif %}>
     <legend>{{ section }}</legend>
     {% for field in fields %}
+    <div class="field-row{% if field.startswith('promotion-namespace-') %} promotion-ns-row{% endif %}"{% if field.startswith('promotion-namespace-') and loop.index > 1 %} style="display:none"{% endif %}>
     <label for="{{ field }}">{{ field }}{% if help.get(field) %}<span class="help">?<span class="tip">{{ help[field]|safe }}</span></span>{% endif %}</label>
     {% if field in ('values-content',) %}
     <textarea id="{{ field }}" name="{{ field }}">{{ defaults[field] }}</textarea>
     {% else %}
     <input type="text" id="{{ field }}" name="{{ field }}" value="{{ defaults[field] }}"{% if field in required_fields %} required{% endif %}>
     {% endif %}
+    </div>
     {% endfor %}
+    {% if section == 'Namespaces - Promotion Environments' %}
+    <button type="button" id="add-namespace-btn" style="margin-top:8px; font-size:0.85em; padding:4px 12px;">+ Add Environment Namespace</button>
+    {% endif %}
   </fieldset>
   {% endfor %}
   <button type="submit">Submit Model for Onboarding</button>
@@ -642,6 +551,42 @@ Tekton PipelineRun, monitor execution, and report status back here.</p>
     var el = byId(id);
     if (el) { el.addEventListener("input", recompute); }
   });
+  var nextPromoIndex = 1;
+  var promoContainer = document.getElementById("promotion-namespaces-fieldset");
+  var addBtn = document.getElementById("add-namespace-btn");
+  if (addBtn && promoContainer) {
+    var promoRows = promoContainer.querySelectorAll(".promotion-ns-row");
+    promoRows.forEach(function (row, i) {
+      if (i > 0) { nextPromoIndex = Math.max(nextPromoIndex, i + 1); }
+    });
+
+    addBtn.addEventListener("click", function () {
+      var newDiv = document.createElement("div");
+      newDiv.className = "field-row promotion-ns-row";
+      var fieldName = "promotion-namespace-" + nextPromoIndex;
+      var label = document.createElement("label");
+      label.htmlFor = fieldName;
+      label.textContent = fieldName + " ";
+      var helpSpan = document.createElement("span");
+      helpSpan.className = "help";
+      helpSpan.textContent = "?";
+      var tipSpan = document.createElement("span");
+      tipSpan.className = "tip";
+      tipSpan.textContent = "Additional promotion namespace.";
+      helpSpan.appendChild(tipSpan);
+      label.appendChild(helpSpan);
+      newDiv.appendChild(label);
+      var input = document.createElement("input");
+      input.type = "text";
+      input.id = fieldName;
+      input.name = fieldName;
+      input.value = "";
+      newDiv.appendChild(input);
+      promoContainer.insertBefore(newDiv, addBtn);
+      nextPromoIndex++;
+    });
+  }
+
   var form = document.querySelector("form");
   var requiredFields = {{ required_fields_json|safe }};
   form.addEventListener("submit", function (e) {
@@ -699,7 +644,7 @@ REQUEST_DETAIL_TEMPLATE = (
     PAGE_HEAD
     + """
 <h1>Model Request: {{ name }}</h1>
-<p><strong>Model:</strong> {{ spec.get('modelURI', '') }} ({{ spec.get('modelSource', '') }})</p>
+<p><strong>Model:</strong> {{ model_uri }} ({{ model_source }})</p>
 <p><strong>Phase:</strong> <span class="badge {{ phase|lower }}">{{ phase }}</span></p>
 {% if pipeline_run_name %}
 <p><strong>Pipeline Run:</strong> {{ pipeline_run_name }}</p>
@@ -815,16 +760,17 @@ def submit():
         )
 
     db = get_db()
+    model_info = spec.get("model", {})
     db.execute(
         "INSERT INTO model_requests (request_name, model_source, model_uri, model_name, target_environment, requested_by, spec_json, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             request_name,
-            spec.get("modelSource"),
-            spec.get("modelURI"),
-            spec.get("modelName"),
-            spec.get("targetEnvironment"),
-            spec.get("requestedBy"),
+            model_info.get("sourceType", ""),
+            model_info.get("uri", ""),
+            model_info.get("name", ""),
+            (spec.get("requirements", {}) or {}).get("targetEnvironment", ""),
+            spec.get("requestedBy", ""),
             json.dumps(spec),
             now_iso(),
         ),
@@ -846,8 +792,8 @@ def list_requests():
         rows.append(
             {
                 "name": name,
-                "model_source": r.get("model_source", ""),
-                "model_uri": r.get("model_uri", ""),
+                "model_source": r["model_source"] or "",
+                "model_uri": r["model_uri"] or "",
                 "phase": modelrequest_status(mr) if mr else "Unknown",
                 "pipeline_run_name": (mr.get("status", {}).get("pipelineRunName", "") if mr else ""),
                 "created": r["created_at"],
@@ -861,6 +807,7 @@ def list_requests():
 def request_detail(name):
     mr = get_model_request(name)
     spec = mr.get("spec", {}) if mr else {}
+    model_info = spec.get("model", {}) if spec else {}
     status_block = mr.get("status", {}) if mr else {}
     phase = status_block.get("phase", "Pending")
     pipeline_run_name = status_block.get("pipelineRunName", "")
@@ -875,6 +822,8 @@ def request_detail(name):
         REQUEST_DETAIL_TEMPLATE,
         name=name,
         spec=spec,
+        model_uri=model_info.get("uri", ""),
+        model_source=model_info.get("sourceType", ""),
         phase=phase,
         pipeline_run_name=pipeline_run_name,
         message=message,

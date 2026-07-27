@@ -12,9 +12,26 @@ Environment variables:
 import glob
 import os
 import sys
+from datetime import datetime, timezone
 
 import boto3
 from botocore.client import Config
+
+
+def safe_timestamp(env_key):
+    val = os.environ.get(env_key, "")
+    if not val or "$" in val:
+        return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return val
+
+
+def safe_prefix(env_key):
+    val = os.environ.get(env_key, "")
+    if not val:
+        return safe_timestamp("") + "_compliance_artifact"
+    if "$" in val:
+        return safe_timestamp("") + "_compliance_artifact"
+    return val
 
 
 def main():
@@ -22,9 +39,9 @@ def main():
     access_key = os.environ.get("S3_ACCESS_KEY_ID")
     secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
     bucket = os.environ.get("S3_BUCKET", "benchmark-results")
-    timestamp = os.environ.get("TIMESTAMP", "unknown")
+    timestamp = safe_timestamp("TIMESTAMP")
     pattern = os.environ.get("PATTERN", "*")
-    prefix_override = os.environ.get("PREFIX_OVERRIDE", "")
+    prefix_override = safe_prefix("PREFIX_OVERRIDE")
 
     s3 = boto3.client(
         "s3", endpoint_url=endpoint,

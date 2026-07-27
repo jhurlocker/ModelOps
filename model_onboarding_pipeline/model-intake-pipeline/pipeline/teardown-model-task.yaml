@@ -32,7 +32,7 @@ spec:
       description: Shared workspace (unused; kept for pipeline wiring consistency).
   steps:
     - name: teardown
-      image: quay.io/jhurlocker/deploy-model-task-helm-oc:latest
+      image: quay.io/jhurlocker/deploy-model-task-helm-oc:v0.1.0
       script: |
         #!/usr/bin/env bash
         set -uo pipefail

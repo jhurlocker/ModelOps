@@ -1,0 +1,342 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: model-intake-sandbox
+spec:
+  description: |
+    ModelOps sandbox governance pipeline (Phase 1).
+
+    Runs compliance scan, GPU advisor, GPU sharing, model deployment,
+    security scan, and teardown in the sandbox namespace. Upon success,
+    the promotion pipeline is triggered.
+
+  params:
+    - name: model-id
+      type: string
+      description: "Hugging Face model ID"
+    - name: model-name
+      type: string
+      description: "Model name identifier"
+      default: "granite-2b"
+    - name: model-version
+      type: string
+      default: "v1"
+      description: "Model Registry version name"
+    - name: requested-by
+      type: string
+      default: ""
+      description: "Who triggered this pipeline run"
+    - name: target-namespace
+      type: string
+      default: "vllm"
+      description: "Sandbox namespace"
+    - name: modelcar-repo
+      type: string
+      default: "redhat-ai-services/modelcar-catalog"
+    - name: modelcar-image
+      type: string
+      default: ""
+    - name: artifact-scan-image
+      type: string
+      default: "registry.access.redhat.com/ubi9/python-311:latest"
+    - name: artifact-cve-threshold
+      type: string
+      default: "critical"
+    - name: ignore-unfixed
+      type: string
+      default: "true"
+    - name: allowed-architectures
+      type: string
+      default: "amd64,x86_64"
+    - name: mr-server
+      type: string
+      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+    - name: mr-port
+      type: string
+      default: "8080"
+    - name: model-reg-author
+      type: string
+      default: "ModelOps Platform Team"
+    - name: scan-s3-endpoint
+      type: string
+      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - name: scan-s3-access-key-id
+      type: string
+      default: "minio"
+    - name: scan-s3-secret-access-key
+      type: string
+      default: "minio123"
+    - name: compliance-s3-bucket
+      type: string
+      default: "compliance-artifact-results"
+    - name: security-s3-bucket
+      type: string
+      default: "security-scan-results"
+    - name: s3-ui-route
+      type: string
+      default: ""
+    - name: context-length
+      type: string
+      default: "32768"
+    - name: concurrency
+      type: string
+      default: "4"
+    - name: allow-time-slicing
+      type: string
+      default: "true"
+    - name: allow-mig
+      type: string
+      default: "false"
+    - name: gpu-isolation-policy
+      type: string
+      default: "dedicated"
+    - name: gpu-operator-namespace
+      type: string
+      default: "nvidia-gpu-operator"
+    - name: clusterpolicy-name
+      type: string
+      default: "gpu-cluster-policy"
+    - name: time-slicing-configmap
+      type: string
+      default: "modelops-time-slicing"
+    - name: max-time-slices
+      type: string
+      default: "8"
+    - name: advisor-endpoint
+      type: string
+      default: ""
+    - name: advisor-secret-name
+      type: string
+      default: "gpu-advisor-credentials"
+    - name: advisor-timeout-seconds
+      type: string
+      default: "300"
+    - name: release-name
+      type: string
+      default: "granite-2b"
+    - name: chart-url
+      type: string
+      default: "https://redhat-ai-services.github.io/helm-charts/"
+    - name: chart-version
+      type: string
+      default: "0.7.1"
+    - name: values-content
+      type: string
+      default: ""
+    - name: gpu-count-override
+      type: string
+      default: ""
+    - name: hardware-profile-name
+      type: string
+      default: "gpu-profile"
+    - name: hardware-profile-namespace
+      type: string
+      default: "redhat-ods-applications"
+    - name: severity-threshold
+      type: string
+      default: "block"
+    - name: evalhub-url
+      type: string
+      default: ""
+    - name: evalhub-token
+      type: string
+      default: ""
+    - name: tenant-ns
+      type: string
+      default: ""
+    - name: openshift-console-domain
+      type: string
+      default: ""
+    - name: huggingface-token
+      type: string
+      default: ""
+
+  tasks:
+    - name: compliance-artifact-scan
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: modelcar-repo
+          value: $(params.modelcar-repo)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: artifact-scan-image
+          value: $(params.artifact-scan-image)
+        - name: artifact-cve-threshold
+          value: $(params.artifact-cve-threshold)
+        - name: ignore-unfixed
+          value: $(params.ignore-unfixed)
+        - name: allowed-architectures
+          value: $(params.allowed-architectures)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: $(params.compliance-s3-bucket)
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+      taskRef:
+        kind: Task
+        name: compliance-artifact-scan
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: gpu-advisor-sandbox
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: plan-id
+          value: $(context.pipelineRun.name)-sandbox
+        - name: environment
+          value: "sandbox"
+        - name: target-namespace
+          value: $(params.target-namespace)
+        - name: context-length
+          value: $(params.context-length)
+        - name: concurrency
+          value: $(params.concurrency)
+        - name: allow-time-slicing
+          value: $(params.allow-time-slicing)
+        - name: allow-mig
+          value: $(params.allow-mig)
+        - name: gpu-isolation-policy
+          value: $(params.gpu-isolation-policy)
+        - name: gpu-operator-namespace
+          value: $(params.gpu-operator-namespace)
+        - name: clusterpolicy-name
+          value: $(params.clusterpolicy-name)
+        - name: time-slicing-configmap
+          value: $(params.time-slicing-configmap)
+        - name: max-time-slices
+          value: $(params.max-time-slices)
+        - name: advisor-endpoint
+          value: $(params.advisor-endpoint)
+        - name: advisor-secret-name
+          value: $(params.advisor-secret-name)
+        - name: advisor-timeout-seconds
+          value: $(params.advisor-timeout-seconds)
+      runAfter:
+        - compliance-artifact-scan
+      taskRef:
+        kind: Task
+        name: gpu-advisor
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: apply-gpu-sharing-sandbox
+      runAfter:
+        - gpu-advisor-sandbox
+      taskRef:
+        kind: Task
+        name: apply-gpu-sharing
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: deploy-model
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+        - name: chartUrl
+          value: $(params.chart-url)
+        - name: chartVersion
+          value: $(params.chart-version)
+        - name: model-id
+          value: $(params.model-id)
+        - name: modelcar-image
+          value: $(params.modelcar-image)
+        - name: huggingface-token
+          value: $(params.huggingface-token)
+        - name: valuesContent
+          value: $(params.values-content)
+        - name: gpu-count-override
+          value: $(params.gpu-count-override)
+        - name: hardwareProfileName
+          value: $(params.hardware-profile-name)
+        - name: hardwareProfileNamespace
+          value: $(params.hardware-profile-namespace)
+      runAfter:
+        - apply-gpu-sharing-sandbox
+      taskRef:
+        kind: Task
+        name: deploy-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: security-scan
+      params:
+        - name: target
+          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: evalhub-url
+          value: $(params.evalhub-url)
+        - name: evalhub-token
+          value: $(params.evalhub-token)
+        - name: tenant-ns
+          value: $(params.target-namespace)
+        - name: severity-threshold
+          value: $(params.severity-threshold)
+        - name: s3-api-endpoint
+          value: $(params.scan-s3-endpoint)
+        - name: s3-access-key-id
+          value: $(params.scan-s3-access-key-id)
+        - name: s3-secret-access-key
+          value: $(params.scan-s3-secret-access-key)
+        - name: s3-bucket
+          value: $(params.security-s3-bucket)
+        - name: s3-ui-route
+          value: $(params.s3-ui-route)
+        - name: mr-server
+          value: $(params.mr-server)
+        - name: mr-port
+          value: $(params.mr-port)
+        - name: model-reg-author
+          value: $(params.model-reg-author)
+      runAfter:
+        - deploy-model
+      taskRef:
+        kind: Task
+        name: security-scan
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+    - name: teardown-model
+      params:
+        - name: releaseName
+          value: $(params.model-name)
+        - name: namespace
+          value: $(params.target-namespace)
+      runAfter:
+        - security-scan
+      taskRef:
+        kind: Task
+        name: teardown-model
+      workspaces:
+        - name: shared-workspace
+          workspace: shared-workspace
+
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for the sandbox pipeline

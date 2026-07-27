@@ -68,6 +68,9 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+        if ! command -v oc &>/dev/null; then
+          curl -sSL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz" | tar xz oc -C /usr/local/bin
+        fi
         pip install -q pyyaml 2>&1 | grep -v "already satisfied" || true
         python3 <<'PYEOF'
         import json

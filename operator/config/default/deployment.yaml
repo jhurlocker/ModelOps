@@ -27,12 +27,11 @@ spec:
       serviceAccountName: modelops-operator
       containers:
         - name: manager
-          image: quay.io/jhurlocker/modelops-operator:latest
+          image: quay.io/jhurlocker/modelops-operator:v0.1.1
           imagePullPolicy: Always
           command:
             - /usr/local/bin/manager
           args:
-            - --leader-elect
             - --health-probe-bind-address=:8081
           ports:
             - name: metrics

@@ -30,67 +30,77 @@ def submit_benchmark():
     evalhub_url = os.environ["EVALHUB_URL"]
     token = os.environ["EVALHUB_TOKEN"]
     tenant_ns = os.environ["TENANT_NS"]
-    profile = os.environ.get("GUIDELLM_PROFILE", "constant")
-    rate = float(os.environ.get("GUIDELLM_RATE", "4.0"))
-    max_seconds = int(os.environ.get("GUIDELLM_MAX_SECONDS", "15"))
-    max_requests = int(os.environ.get("GUIDELLM_MAX_REQUESTS", "2"))
+    model_name = os.environ["MODEL_NAME"]
+    profile = os.environ.get("GUIDELLM_PROFILE", "throughput")
+    rate = float(os.environ.get("GUIDELLM_RATE", "2"))
+    max_seconds = int(float(os.environ.get("GUIDELLM_MAX_SECONDS", "30")))
 
-    base = f"https://{evalhub_url}"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base = evalhub_url.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Tenant": tenant_ns}
 
-    job_id = f"guidellm-{uuid.uuid4().hex[:8]}"
+    job_name = f"guidellm-{uuid.uuid4().hex[:8]}"
 
     payload = {
-        "apiVersion": "trustyai.opendatahub.io/v1alpha1",
-        "kind": "EvalJob",
-        "metadata": {
-            "name": job_id,
-            "namespace": tenant_ns,
-            "labels": {"job-type": "guidellm", "model-name": os.environ["MODEL_NAME"]},
+        "name": job_name,
+        "model": {
+            "url": target,
+            "name": model_name,
         },
-        "spec": {
-            "provider": "guidellm",
-            "model": target,
-            "arguments": {
-                "profile": profile,
-                "rate": rate,
-                "max_seconds": max_seconds,
-                "max_requests": max_requests,
-            },
-        },
+        "benchmarks": [
+            {
+                "provider_id": "guidellm",
+                "id": profile,
+                "parameters": {
+                    "rate": rate,
+                    "max_seconds": max_seconds,
+                },
+            }
+        ],
     }
 
-    print(f"Submitting GuideLLM benchmark {job_id} to EvalHub...")
+    print(f"Submitting GuideLLM benchmark {job_name} to EvalHub...")
     resp = requests.post(
         f"{base}/api/v1/evaluations/jobs",
         json=payload, headers=headers,
     )
     resp.raise_for_status()
+    result = resp.json()
+    job_id = result.get("resource", {}).get("id", job_name)
     print(f"GuideLLM job submitted: {job_id}")
     return job_id
 
 
-def poll_completion(job_id, max_attempts=60, poll_interval=15):
+def poll_completion(job_id, max_attempts=30, poll_interval=10):
     evalhub_url = os.environ["EVALHUB_URL"]
     token = os.environ["EVALHUB_TOKEN"]
     tenant_ns = os.environ["TENANT_NS"]
 
-    base = f"https://{evalhub_url}"
-    headers = {"Authorization": f"Bearer {token}"}
+    base = evalhub_url.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
+    headers = {"Authorization": f"Bearer {token}", "X-Tenant": tenant_ns}
 
     for attempt in range(1, max_attempts + 1):
         print(f"Polling GuideLLM job {job_id} (attempt {attempt}/{max_attempts})...")
         try:
             resp = requests.get(
-                f"{base}/api/v1/evaluations/jobs/{tenant_ns}/{job_id}",
+                f"{base}/api/v1/evaluations/jobs/{job_id}",
                 headers=headers,
             )
             resp.raise_for_status()
-            status = resp.json()
-            job_status = (status.get("status", {}) or {}).get("conditions", [{}])[0].get("type", "Running")
-            if job_status == "Complete":
+            job_data = resp.json()
+            status_obj = job_data.get("status", {})
+            job_state = status_obj.get("state", "unknown") if isinstance(status_obj, dict) else str(status_obj)
+            state_lower = job_state.lower()
+            if state_lower in ("completed", "finished", "succeeded"):
                 print("GuideLLM job completed.")
-                return status
+                return job_data
+            elif state_lower in ("failed", "error"):
+                raise RuntimeError(f"GuideLLM job failed: {json.dumps(job_data, indent=2)}")
+            else:
+                print(f"  Status: {job_state}")
         except Exception as e:
             print(f"Poll error: {e}")
 
@@ -101,14 +111,16 @@ def poll_completion(job_id, max_attempts=60, poll_interval=15):
 
 
 def extract_metrics(result):
-    """Extract key metrics from GuideLLM results."""
     metrics = {}
     try:
-        data = result.get("status", {}).get("results", {})
-        for key in ["tps", "average_tps", "time_to_first_token", "inter_token_latency",
-                     "requests_per_second", "latency", "concurrency"]:
-            if key in data:
-                metrics[key] = data[key]
+        results_obj = result.get("results", {})
+        benchmarks = results_obj.get("benchmarks", [])
+        if not benchmarks:
+            benchmarks = result.get("benchmarks", [])
+        for bm in benchmarks:
+            bm_metrics = bm.get("metrics", {})
+            for key, val in bm_metrics.items():
+                metrics[key] = val
     except Exception:
         pass
     return metrics

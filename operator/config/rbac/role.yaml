@@ -32,7 +32,52 @@ rules:
       - get
       - patch
       - update
-  # Tekton PipelineRuns (create + watch for status)
+  # ModelLifecycleProfile CRD (read-only for resolution)
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - modellifecycleprofiles
+    verbs:
+      - get
+      - list
+      - watch
+  # PlatformConfig CRD (read-only for resolution)
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - platformconfigs
+    verbs:
+      - get
+      - list
+      - watch
+  # CapacityPlan CRD
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - capacityplans
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - capacityplans/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - modelops.example.io
+    resources:
+      - capacityplans/status
+    verbs:
+      - get
+      - patch
+      - update
+  # Tekton PipelineRuns
   - apiGroups:
       - tekton.dev
     resources:
@@ -44,6 +89,15 @@ rules:
       - list
       - patch
       - update
+      - watch
+  # Secrets (read for credential resolution)
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
       - watch
   # Events
   - apiGroups:

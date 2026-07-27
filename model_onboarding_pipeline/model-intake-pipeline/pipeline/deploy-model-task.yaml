@@ -171,11 +171,7 @@ spec:
         vllm_flags = []
         source = "default (1 GPU, no gpu-advisor output found)"
 
-        if gpu_override:
-            gpu_count = int(gpu_override)
-            tp_size = gpu_count
-            source = "gpu-count-override param"
-        elif os.path.isfile("deployment-options.json"):
+        if os.path.isfile("deployment-options.json"):
             try:
                 with open("deployment-options.json") as f:
                     data = json.load(f)
@@ -193,6 +189,10 @@ spec:
                     )
             except Exception as e:
                 print("WARNING: could not parse deployment-options.json: {}".format(e))
+        elif gpu_override:
+            gpu_count = int(gpu_override)
+            tp_size = gpu_count
+            source = "gpu-count-override param"
 
         print("--- Deriving Helm values ---")
         print("GPU count per replica: {} (source: {})".format(gpu_count, source))
@@ -337,7 +337,7 @@ spec:
         PYEOF
 
     - name: deploy
-      image: quay.io/jhurlocker/deploy-model-task-helm-oc:latest
+      image: quay.io/jhurlocker/deploy-model-task-helm-oc:v0.1.0
       workingDir: $(workspaces.shared-workspace.path)
       script: |
         #!/usr/bin/env bash

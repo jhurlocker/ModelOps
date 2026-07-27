@@ -1,0 +1,40 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: PlatformConfig
+metadata:
+  name: default-modelops-platform
+  namespace: sandbox
+spec:
+  complianceS3Bucket: compliance-artifact-results
+  securityS3Bucket: security-scan-results
+  registryServer: http://modelops-registry.rhoai-model-registries.svc.cluster.local
+  registryPort: "8080"
+  registryAuthor: ModelOps Platform Team
+  complianceScanImage: registry.access.redhat.com/ubi9/python-311:latest
+  complianceIgnoreUnfixed: "true"
+  complianceAllowedArch:
+    - amd64
+    - x86_64
+  modelCarRepo: redhat-ai-services/modelcar-catalog
+  gpuOperatorNamespace: nvidia-gpu-operator
+  clusterPolicyName: gpu-cluster-policy
+  timeSlicingConfigMap: modelops-time-slicing
+  maxTimeSlices: 8
+  advisorSecretName: gpu-advisor-credentials
+  advisorTimeoutSeconds: 300
+  chartUrl: https://redhat-ai-services.github.io/helm-charts/
+  chartVersion: "0.7.1"
+  hardwareProfileName: gpu-profile
+  hardwareProfileNamespace: redhat-ods-applications
+  evalhubUrl: evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com
+  approvalPollIntervalSeconds: 15
+  approvalTimeoutSeconds: 3600
+  benchmarkProfile: constant
+  benchmarkRate: 4.0
+  benchmarkMaxSeconds: 15
+  benchmarkMaxRequests: 2
+  maasServingNs: llm
+  maasPolicyNs: models-as-a-service
+  maasGpuCount: "1"
+  maasRuntimeImage: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+  maasAuthorizedGroup: system:authenticated
+  lmEvalJobName: mmlu-jurisprudence-eval-job

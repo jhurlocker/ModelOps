@@ -20,6 +20,22 @@ import glob
 import json
 import os
 import sys
+from datetime import datetime, timezone
+
+
+def safe_timestamp(env_key):
+    val = os.environ.get(env_key, "")
+    if not val or "$" in val:
+        return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return val
+
+def safe_prefix(env_key):
+    val = os.environ.get(env_key, "")
+    if not val:
+        return safe_timestamp("") + "_compliance_artifact"
+    if "$" in val:
+        return safe_timestamp("") + "_compliance_artifact"
+    return val
 
 
 def load_json(path, default=None):
@@ -120,7 +136,7 @@ def evaluate():
         f.write("true" if overall_passed else "false")
 
     machine = {
-        "timestamp": os.environ.get("TIMESTAMP"),
+        "timestamp": safe_timestamp("TIMESTAMP"),
         "model_name": os.environ.get("MODEL_NAME"),
         "model_id": os.environ.get("MODEL_ID"),
         "modelcar_ref": modelcar_ref,
@@ -157,7 +173,7 @@ def upload_to_s3():
     ws = os.environ["WORKSPACE_PATH"]
     sandbox = os.path.join(ws, "compliance-artifact-sandbox")
     bucket = os.environ["S3_BUCKET"]
-    prefix = os.environ["S3_PREFIX"]
+    prefix = safe_prefix("S3_PREFIX")
 
     try:
         s3 = boto3.client(
