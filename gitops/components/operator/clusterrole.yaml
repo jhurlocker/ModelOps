@@ -119,6 +119,7 @@ rules:
       - create
       - get
       - list
+      - watch
       - patch
       - update
   - apiGroups:
@@ -129,5 +130,6 @@ rules:
       - create
       - get
       - list
+      - watch
       - patch
       - update

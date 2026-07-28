@@ -496,6 +496,10 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "security-s3-bucket", strOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
 	addParam(&p, "s3-ui-route", "")
 
+	addParam(&p, "s3-api-endpoint", secrets.resultS3Endpoint)
+	addParam(&p, "s3-access-key-id", secrets.resultS3AccessKey)
+	addParam(&p, "s3-secret-access-key", secrets.resultS3SecretKey)
+
 	addParam(&p, "mr-server", strOrDefault(cfg.Spec.RegistryServer, "http://modelops-registry.rhoai-model-registries.svc.cluster.local"))
 	addParam(&p, "mr-port", strOrDefault(cfg.Spec.RegistryPort, "8080"))
 	addParam(&p, "model-reg-author", strOrDefault(cfg.Spec.RegistryAuthor, "ModelOps Platform Team"))
