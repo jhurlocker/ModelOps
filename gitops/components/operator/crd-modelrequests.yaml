@@ -1,0 +1,161 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelrequests.modelops.example.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.0
+spec:
+  group: modelops.example.io
+  names:
+    kind: ModelRequest
+    listKind: ModelRequestList
+    plural: modelrequests
+    singular: modelrequest
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - model
+                - lifecycleProfile
+              properties:
+                model:
+                  type: object
+                  required:
+                    - sourceType
+                    - uri
+                  properties:
+                    sourceType:
+                      type: string
+                      description: Source type (huggingface, oci, s3)
+                    uri:
+                      type: string
+                      description: Model URI (e.g. ibm-granite/granite-3.3-2b-instruct)
+                    name:
+                      type: string
+                      description: Kubernetes-safe model name identifier
+                    version:
+                      type: string
+                      description: Version label for this onboarding run
+                lifecycleProfile:
+                  type: string
+                  description: Name of the ModelLifecycleProfile defining workflow, policy, and platform config
+                pipelineRef:
+                  type: string
+                  description: Override the pipeline defined in the lifecycle profile
+                requirements:
+                  type: object
+                  properties:
+                    contextLength:
+                      type: integer
+                    expectedConcurrency:
+                      type: integer
+                    gpuIsolationPolicy:
+                      type: string
+                      enum: [dedicated, shared]
+                    allowTimeSlicing:
+                      type: boolean
+                    allowMIG:
+                      type: boolean
+                    cveThreshold:
+                      type: string
+                      enum: [none, critical, high]
+                    securityThreshold:
+                      type: string
+                    targetEnvironment:
+                      type: string
+                    sandboxNamespace:
+                      type: string
+                    stagingNamespace:
+                      type: string
+                    advisorEndpoint:
+                      type: string
+                    gpuCountOverride:
+                      type: string
+                    valuesContent:
+                      type: string
+                    customBenchmarkData:
+                      type: boolean
+                    customBenchmarkFile:
+                      type: string
+                    openshiftConsoleDomain:
+                      type: string
+                access:
+                  type: object
+                  properties:
+                    authorizedViewers:
+                      type: string
+                    accessRole:
+                      type: string
+                requestedBy:
+                  type: string
+                evalhubSecretName:
+                  type: string
+                  description: "K8s Secret name containing EvalHub credentials (keys: token, url)"
+                huggingfaceSecretName:
+                  type: string
+                  description: "K8s Secret name containing HuggingFace token (key: token)"
+                scanS3SecretName:
+                  type: string
+                  description: "K8s Secret name containing scan-result S3 credentials"
+                resultS3SecretName:
+                  type: string
+                  description: "K8s Secret name containing benchmark/eval S3 credentials"
+                maas:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    gpuCount:
+                      type: string
+                    runtimeImage:
+                      type: string
+                    authorizedGroup:
+                      type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                pipelineRunName:
+                  type: string
+                message:
+                  type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PipelineRun
+          type: string
+          jsonPath: .status.pipelineRunName
+        - name: Model
+          type: string
+          jsonPath: .spec.model.uri
+        - name: Profile
+          type: string
+          jsonPath: .spec.lifecycleProfile

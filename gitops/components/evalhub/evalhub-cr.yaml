@@ -1,0 +1,8 @@
+apiVersion: trustyai.opendatahub.io/v1alpha1
+kind: EvalHub
+metadata:
+  name: default-evalhub
+  namespace: redhat-ods-applications
+spec:
+  database:
+    type: sqlite

@@ -284,6 +284,18 @@ spec:
           value: $(params.hardware-profile-name)
         - name: hardwareProfileNamespace
           value: $(params.hardware-profile-namespace)
+        - name: deploy-maas
+          value: $(params.deploy-maas)
+        - name: maas-serving-ns
+          value: $(params.maas-serving-ns)
+        - name: maas-policy-ns
+          value: $(params.maas-policy-ns)
+        - name: maas-gpu-count
+          value: $(params.maas-gpu-count)
+        - name: maas-runtime-image
+          value: $(params.maas-runtime-image)
+        - name: maas-authorized-group
+          value: $(params.maas-authorized-group)
       runAfter:
         - apply-gpu-sharing
       taskRef:
@@ -390,40 +402,6 @@ spec:
       taskRef:
         kind: Task
         name: model-registry
-      workspaces:
-        - name: shared-workspace
-          workspace: shared-workspace
-
-    - name: deploy-maas
-      params:
-        - name: model-name
-          value: $(params.model-name)
-        - name: model-id
-          value: $(params.model-id)
-        - name: modelcar-image
-          value: $(params.modelcar-image)
-        - name: maas-serving-ns
-          value: $(params.maas-serving-ns)
-        - name: maas-policy-ns
-          value: $(params.maas-policy-ns)
-        - name: gpu-count
-          value: $(params.maas-gpu-count)
-        - name: runtime-image
-          value: $(params.maas-runtime-image)
-        - name: authorized-group
-          value: $(params.maas-authorized-group)
-      runAfter:
-        - register-model-and-results
-      when:
-        - input: $(params.run-register)
-          operator: in
-          values: ["true"]
-        - input: $(params.deploy-maas)
-          operator: in
-          values: ["true"]
-      taskRef:
-        kind: Task
-        name: deploy-maas
       workspaces:
         - name: shared-workspace
           workspace: shared-workspace

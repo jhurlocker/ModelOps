@@ -1,0 +1,53 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipeline-evalhub-submitter
+  labels:
+    app.kubernetes.io/part-of: modelops
+rules:
+  - apiGroups:
+      - trustyai.opendatahub.io
+    resources:
+      - evaluations
+    verbs:
+      - create
+      - get
+      - list
+  - apiGroups:
+      - mlflow.kubeflow.org
+    resources:
+      - experiments
+    verbs:
+      - create
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-pipeline-evalhub
+  labels:
+    app.kubernetes.io/part-of: modelops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pipeline-evalhub-submitter
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: sandbox
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: staging-pipeline-evalhub
+  labels:
+    app.kubernetes.io/part-of: modelops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pipeline-evalhub-submitter
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: staging

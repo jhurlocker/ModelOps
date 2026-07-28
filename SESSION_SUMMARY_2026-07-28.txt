@@ -1,0 +1,168 @@
+# Session Summary — 2026-07-27/28
+# ModelOps Pipeline: Two-Phase Onboarding & EvalHub SA Token Integration
+
+## Primary Objective
+Split the single `model-intake-pipeline` into a **sandbox pipeline** (compliance → GPU advisor → deploy → security-scan → teardown) and a **promotion pipeline** (per-namespace deploy → benchmark → register → MaaS), with the controller creating one PipelineRun per promotion namespace.
+
+## Key Accomplishments
+
+### 1. Two-Phase Pipeline Split
+- **CRD:** Added `promotionNamespaces []string` to `ModelRequirements`, `sandboxPipelineRunName`/`promotionPipelineRunName` to status.
+- **Controller:** `modelrequest_controller.go` — two-phase reconciliation. Sandbox runs first; on success, creates N promotion PipelineRuns (one per namespace in `promotionNamespaces`). First namespace gets `approval-api-url` set; last gets `run-register=true`.
+- **Promotion pipeline** (`promotion-pipeline.yaml`): Reuses existing tasks — `gpu-advisor`, `wait-for-approval`, `apply-gpu-sharing`, `deploy-model`, `grant-model-access`, `guidellm-benchmark`, `upload-guidellm-benchmark-results`, `model-registry`, `deploy-maas`.
+- **Operator:** `quay.io/jhurlocker/modelops-operator:v0.2.4`
+- **UI:** `quay.io/jhurlocker/model-intake-ui:v0.2.0` — dynamic promotion namespace fields.
+
+### 2. EvalHub SA Token Authentication (CRITICAL — avoid repeating this work)
+EvalHub requires an authenticated OpenShift principal for every API request (except `/health`). The pipeline's service account can be used, but needs specific RBAC.
+
+#### The Problem
+- `evalhub-credentials` secret stored a user OAuth token that expired every 24 hours.
+- Pipeline SA token was rejected by EvalHub with `unable_to_authorize_request`.
+- EvalHub performs Kubernetes `SubjectAccessReview` checks against `trustyai.opendatahub.io/evaluations` and `mlflow.kubeflow.org/experiments`.
+
+#### The Solution
+1. **ClusterRole** (must exist in cluster):
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipeline-evalhub-submitter
+rules:
+  - apiGroups: ["trustyai.opendatahub.io"]
+    resources: ["evaluations"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: ["mlflow.kubeflow.org"]
+    resources: ["experiments"]
+    verbs: ["create", "get", "list", "delete"]
+```
+
+2. **ClusterRoleBinding** (binds pipeline SA to above role):
+```bash
+kubectl create clusterrolebinding pipeline-evalhub-submitter \
+  --clusterrole=pipeline-evalhub-submitter \
+  --serviceaccount=sandbox:pipeline
+```
+
+3. **Controller:** Passes `evalhub-token: "auto"` instead of `secrets.evalhubToken`.
+   File: `operator/internal/controller/modelrequest_controller.go`
+   Both `buildSandboxPipelineParams` and `buildPromotionPipelineParams`.
+
+4. **Task wrappers:** Both `security-scan` and `guidellm-benchmark` tasks read SA token
+   from `/var/run/secrets/kubernetes.io/serviceaccount/token` when `EVALHUB_TOKEN` is empty or `"auto"`.
+   - `security-scan`: Uses `command: [/bin/sh, -c]` + `args: [...]` with `python /usr/local/bin/security-scanner full`
+     (the security-scanner binary has execute-permission issues when run via `script:` — must use `python` prefix)
+   - `guidellm-benchmark`: Uses `script:` with Python-based EvalHub API integration
+
+5. **EvalHub tenant label:** Target namespaces MUST have:
+   ```
+   evalhub.trustyai.opendatahub.io/tenant=true
+   ```
+   The `deploy-model` task applies this label automatically:
+   ```
+   oc label ns "$(params.namespace)" evalhub.trustyai.opendatahub.io/tenant=true --overwrite
+   ```
+
+### 3. Guidellm Benchmark Parameters (CRITICAL)
+EvalHub's GuideLLM provider requires specific benchmark parameters. If omitted, EvalHub uses provider defaults which may run indefinitely.
+
+#### Required Parameters
+- `rate`: Must be >= 2 (rate=1 causes `sweep_size=1` → invalid → guide fails)
+- `max_seconds`: Recommended 15
+- `max_requests`: Recommended 2
+- `id`: `constant` (supported by EvalHub provider; `sweep` may use unpredictable defaults)
+
+#### Controller Defaults
+File: `operator/internal/controller/modelrequest_controller.go`
+```
+addParam(&p, "guidellm-profile", "constant")
+addParam(&p, "guidellm-rate", "4.0")          // MUST be >= 2
+addParam(&p, "guidellm-max-seconds", "15")
+addParam(&p, "guidellm-max-requests", "2")
+```
+
+#### Model URL
+Use INTERNAL service URL, not external route:
+```
+http://<release-name>-predictor.<namespace>.svc.cluster.local:8080/v1
+```
+The controller builds this as `$(params.release-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1`.
+
+### 4. S3 Upload Configuration
+The `upload-guidellm-benchmark-results` task requires S3 credentials.
+
+#### Controller Defaults
+File: `operator/internal/controller/modelrequest_controller.go` → `resolveSecrets()`
+```go
+if s.resultS3Endpoint == "" {
+    s.resultS3Endpoint = "http://minio-service.s3-storage.svc.cluster.local:9000"
+}
+if s.resultS3AccessKey == "" {
+    s.resultS3AccessKey = "minio"
+}
+if s.resultS3SecretKey == "" {
+    s.resultS3SecretKey = "minio123"
+}
+```
+
+#### Pipeline Defaults
+File: `promotion-pipeline.yaml`
+```
+- name: s3-api-endpoint
+  default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+- name: s3-access-key-id
+  default: "minio"
+- name: s3-secret-access-key
+  default: "minio123"
+```
+
+### 5. Promotion Pipeline Defaults Changed
+File: `promotion-pipeline.yaml`
+- `guidellm-profile`: `"constant"` 
+- `guidellm-rate`: `"4.0"`
+- `guidellm-max-seconds`: `"15"`
+- `guidellm-max-requests`: `"2"`
+
+## DO NOT CHANGE / REGRESSION RISKS
+
+### EvalHub Auth
+- NEVER revert to `secrets.evalhubToken` — it expires. Always use `"auto"`.
+- NEVER remove the `pipeline-evalhub-submitter` ClusterRole/ClusterRoleBinding.
+- NEVER remove the EvalHub tenant label from deploy-model task.
+
+### Guidellm Benchmark
+- NEVER set `guidellm-rate` to 1 or below — causes EvalHub `sweep_size=1` error.
+- NEVER use external route URL for target — use internal `svc.cluster.local`.
+- NEVER omit `max_seconds`/`max_requests` — EvalHub may run indefinitely.
+
+### Task Execution
+- `security-scan` binary has execute-permission issue when run via `script:` or `exec`.
+  Must use `command:` + `args:` approach with `python /usr/local/bin/security-scanner full`.
+- `guidellm-benchmark` Python binary also has permission issues.
+  Must use `script:` approach with inline Python calling EvalHub API directly.
+
+## Files Changed
+- `operator/api/v1alpha1/modelrequest_types.go` — CRD changes
+- `operator/internal/controller/modelrequest_controller.go` — two-phase, SA token, S3 defaults
+- `model_onboarding_pipeline/model-intake-pipeline/pipeline/promotion-pipeline.yaml` — new pipeline
+- `model_onboarding_pipeline/model-intake-pipeline/pipeline/sandbox-pipeline.yaml` — sandbox pipeline
+- `model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-model-task.yaml` — EvalHub label
+- `model_onboarding_pipeline/model-intake-ui/app.py` — dynamic promotion namespace fields
+
+## Cluster State (must persist across sessions)
+- ClusterRole `pipeline-evalhub-submitter` (trustyai.opendatahub.io + mlflow.kubeflow.org)
+- ClusterRoleBinding `pipeline-evalhub-submitter` → `sandbox:pipeline`
+- Tasks in `sandbox` namespace: `security-scan`, `guidellm-benchmark`, `deploy-model`
+- Pipeline `model-intake-promotion` in `sandbox` namespace
+- Pipeline `model-intake-sandbox` in `sandbox` namespace
+
+## Testing Checklist
+1. Verify ClusterRoleBinding exists: `kubectl get clusterrolebinding pipeline-evalhub-submitter`
+2. Test security-scan standalone: `kubectl create taskrun` with `evalhub-token: auto`
+3. Test guidellm-benchmark standalone: `kubectl create taskrun` with `rate: 4, max_seconds: 15`
+4. Verify `/tmp/summary` file written: check controller logs
+5. Submit ModelRequest and verify sandbox → promotion flow
+
+## Known Infrastructure Issues
+- **Trivy DB:** The compliance-artifact-scan Trivy step may fail with "image scan error: unable to read the file: unexpected EOF". This is a Trivy database/infrastructure issue, not a code issue. When Trivy fails, the pipeline halts (gate fails). Workaround: retry or fix Trivy DB connectivity.
+- **EvalHub benchmark timing:** GuideLLM benchmark duration is controlled by EvalHub's internal provider configuration, not solely by API parameters. Parameters we pass influence but don't fully control run time.

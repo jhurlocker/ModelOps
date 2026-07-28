@@ -1,0 +1,19 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: modelops-rbac
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: modelops
+spec:
+  project: modelops
+  source:
+    repoURL: https://github.com/jhurlocker/ModelOps.git
+    targetRevision: feat/model-request-controller
+    path: gitops/components/rbac
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -68,8 +68,17 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+        mkdir -p "$HOME/.local/bin"
+        export OC_BIN="$HOME/.local/bin/oc"
         if ! command -v oc &>/dev/null; then
-          curl -sSL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz" | tar xz oc -C /usr/local/bin
+          curl -sSL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz" -o /tmp/oc.tar.gz
+          tar xzf /tmp/oc.tar.gz -C "$HOME/.local/bin" oc
+          chmod +x "$OC_BIN"
+          rm -f /tmp/oc.tar.gz
+          export PATH="$HOME/.local/bin:$PATH"
+        else
+          OC_BIN="$(command -v oc)"
+          export OC_BIN
         fi
         pip install -q pyyaml 2>&1 | grep -v "already satisfied" || true
         python3 <<'PYEOF'
@@ -80,7 +89,11 @@ spec:
         import time
         import yaml
 
+        OC = os.environ["OC_BIN"]
+
         def run(cmd_args, check=True):
+            if cmd_args and cmd_args[0] == "oc":
+                cmd_args = [OC] + list(cmd_args[1:])
             print("+ " + " ".join(cmd_args))
             result = subprocess.run(cmd_args, capture_output=True, text=True)
             if result.stdout:

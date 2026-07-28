@@ -272,6 +272,8 @@ spec:
           value: $(params.hardware-profile-name)
         - name: hardwareProfileNamespace
           value: $(params.hardware-profile-namespace)
+        - name: deploy-maas
+          value: "false"
       runAfter:
         - apply-gpu-sharing-sandbox
       taskRef:

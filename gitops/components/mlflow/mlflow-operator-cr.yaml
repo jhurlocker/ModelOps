@@ -1,0 +1,6 @@
+apiVersion: components.platform.opendatahub.io/v1alpha1
+kind: MLflowOperator
+metadata:
+  name: default-mlflowoperator
+  namespace: redhat-ods-applications
+spec: {}

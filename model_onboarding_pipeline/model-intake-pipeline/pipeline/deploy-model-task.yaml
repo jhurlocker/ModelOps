@@ -3,32 +3,23 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: deploy-model
-  namespace: vllm
 spec:
   description: |
-    Runs AFTER the wait-for-approval gate. Deploys the model via the
-    vllm-kserve Helm chart (0.7.1 schema: deploymentMode/model.uri/
-    resources/scaling - NOT the old cachedModel/predictor.* schema, which
-    does not exist in any published version of this chart) to OpenShift.
+    Deploys a model via one of two paths, controlled by deploy-maas:
 
-    Model weights are sourced from the community "modelcar" OCI catalog
-    (quay.io/redhat-ai-services/modelcar-catalog) rather than downloaded
-    directly from Hugging Face at pod startup - that mechanism does not
-    exist in this chart. model-id is translated to a modelcar tag and
-    verified to exist in the catalog before deploying; if the model isn't
-    cataloged, this Task fails with a clear error (use valuesContent to
-    fully override with your own values, e.g. model.mode=s3, if you need
-    to deploy an uncataloged model).
+    deploy-maas=false (default / sandbox pipeline):
+      Helm-based vLLM KServe deployment. Model weights sourced from the
+      community "modelcar" OCI catalog. GPU sizing from gpu-advisor's
+      deployment-options.json. Creates a ServingRuntime + InferenceService.
 
-    Helm values are derived automatically from the gpu-advisor Task's
-    deployment-options.json (found on shared-workspace) - GPU count,
-    tensor-parallel-size, and vllm_flags come from the APPROVED plan, not
-    from guesswork at deploy time. Set valuesContent to fully override
-    this behavior with your own Helm values.
+    deploy-maas=true (promotion pipeline, user opted in):
+      Distributed inference via LLMInferenceService + MaaS CRDs
+      (MaaSModelRef, MaaSAuthPolicy, MaaSSubscriptions). Registers the
+      model in MaaS for API-key-based access.
   params:
     - name: releaseName
       type: string
-      description: "The name for the Helm release."
+      description: "The name for the Helm release / deployment."
       default: "granite-2b"
     - name: namespace
       type: string
@@ -45,76 +36,64 @@ spec:
     - name: modelcar-image
       type: string
       default: ""
-      description: >-
-        Optional explicit modelcar OCI image reference (e.g.
-        'quay.io/redhat-ai-services/modelcar-catalog:llama-3.2-1b-instruct',
-        with or without an 'oci://' scheme). When set, it is used verbatim
-        and the model-id -> catalog-tag derivation is skipped.
+      description: "Optional explicit modelcar OCI image reference."
     - name: huggingface-token
       type: string
       default: ""
-      description: >-
-        Unused by the modelcar-based deployment (kept for interface
-        compatibility with callers/pipelines that still pass it).
     - name: valuesContent
       type: string
       default: ""
-      description: >-
-        Optional full Helm values YAML. When set, this is used verbatim
-        and the gpu-advisor-derived sizing below is ignored.
+      description: "Optional full Helm values YAML override."
     - name: gpu-count-override
       type: string
       default: ""
-      description: >-
-        Optional manual override for GPU count per replica. Only used
-        when deployment-options.json is not found on the workspace (e.g.
-        running deploy-model standalone, outside the full pipeline).
+      description: "Optional manual GPU count override for Helm path."
     - name: hardwareProfileName
       type: string
       default: "gpu-profile"
-      description: >-
-        Name of a pre-registered OpenShift AI HardwareProfile CR that
-        provides GPU/CPU/memory sizing. NOTE: chart 0.7.1 has a template
-        bug where setting Values.resources directly (bypassing
-        hardwareProfile) crashes rendering with a nil-pointer error, so
-        GPU sizing MUST go through a HardwareProfile. This means the
-        gpu-advisor's recommended GPU count is only actually honored if
-        a HardwareProfile with a matching GPU count exists - this Task
-        only warns (does not fail) on a mismatch since it cannot fully
-        verify RHOAI's per-request count-override behavior from here.
     - name: hardwareProfileNamespace
       type: string
       default: "redhat-ods-applications"
     - name: servingRuntimeName
       type: string
       default: ""
-      description: >-
-        Name of the ServingRuntime the InferenceService should reference.
-        This Task creates a "vLLM NVIDIA GPU ServingRuntime for KServe"
-        (the RHOAI NVIDIA GPU vLLM runtime) with this name in the target
-        namespace and sets the chart's servingRuntime.useExisting so the
-        chart does NOT create its own bespoke "...via Helm" runtime. When
-        empty (default), the runtime is named after releaseName, matching
-        the RHOAI dashboard convention where the ServingRuntime shares the
-        model's name. Set to a literal name to share one runtime across
-        models, or leave empty for one-per-model.
     - name: servingRuntimeImage
       type: string
       default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.2.4"
-      description: >-
-        Container image for the "vLLM NVIDIA GPU ServingRuntime for
-        KServe". Defaults to the Red Hat AI Inference Server CUDA vLLM
-        runtime image.
+    - name: deploy-maas
+      type: string
+      default: "false"
+      description: "Set to 'true' to deploy via LLMInferenceService + MaaS CRDs instead of Helm vLLM."
+    - name: maas-serving-ns
+      type: string
+      default: "llm"
+    - name: maas-policy-ns
+      type: string
+      default: "models-as-a-service"
+    - name: maas-gpu-count
+      type: string
+      default: "1"
+    - name: maas-runtime-image
+      type: string
+      default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+    - name: maas-gpu-mem-util
+      type: string
+      default: "0.90"
+    - name: maas-authorized-group
+      type: string
+      default: "system:authenticated"
   workspaces:
     - description: Shared workspace for storing benchmark/advisor results
       name: shared-workspace
   steps:
-    - name: prepare-values
-      image: registry.access.redhat.com/ubi9/python-311
+    - name: deploy
+      image: quay.io/jhurlocker/deploy-model-task:v0.1.0
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: RELEASE_NAME
           value: $(params.releaseName)
+        - name: NAMESPACE
+          value: $(params.namespace)
         - name: MODEL_ID
           value: $(params.model-id)
         - name: MODELCAR_IMAGE
@@ -129,420 +108,25 @@ spec:
           value: $(params.hardwareProfileName)
         - name: HW_PROFILE_NAMESPACE
           value: $(params.hardwareProfileNamespace)
+        - name: CHART_URL
+          value: $(params.chartUrl)
+        - name: CHART_VERSION
+          value: $(params.chartVersion)
         - name: SERVING_RUNTIME_NAME
           value: $(params.servingRuntimeName)
-        - name: RELEASE_NAME_FOR_SR
-          value: $(params.releaseName)
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-        pip install -q requests pyyaml 2>&1 | grep -v "already satisfied" || true
-        python3 <<'PYEOF'
-        import json
-        import os
-        import sys
-        import requests
-        import yaml
-
-        release_name = os.environ["RELEASE_NAME"]
-        model_id = os.environ["MODEL_ID"]
-        modelcar_image = os.environ.get("MODELCAR_IMAGE", "").strip()
-        values_content = os.environ.get("VALUES_CONTENT", "")
-        gpu_override = os.environ.get("GPU_COUNT_OVERRIDE", "").strip()
-        hw_profile_name = os.environ.get("HW_PROFILE_NAME", "")
-        hw_profile_namespace = os.environ.get("HW_PROFILE_NAMESPACE", "")
-        # When servingRuntimeName is empty, name the runtime after the
-        # release (RHOAI convention: the ServingRuntime shares the model's
-        # name). This MUST match the name the deploy step creates the
-        # ServingRuntime under, so useExisting resolves correctly.
-        serving_runtime_name = (
-            os.environ.get("SERVING_RUNTIME_NAME", "").strip()
-            or os.environ.get("RELEASE_NAME_FOR_SR", "").strip()
-        )
-
-        if values_content.strip():
-            print("--- Using caller-supplied valuesContent (gpu-advisor sizing ignored) ---")
-            with open("deploy-values.yaml", "w") as f:
-                f.write(values_content)
-            sys.exit(0)
-
-        gpu_count = 1
-        tp_size = 1
-        vllm_flags = []
-        source = "default (1 GPU, no gpu-advisor output found)"
-
-        if os.path.isfile("deployment-options.json"):
-            try:
-                with open("deployment-options.json") as f:
-                    data = json.load(f)
-                options = data.get("options", [])
-                recommended = options[0] if options else None
-                if recommended and recommended.get("status") == "blocked":
-                    print("FATAL: gpu-advisor's top plan is BLOCKED; refusing to deploy.", file=sys.stderr)
-                    sys.exit(1)
-                if recommended:
-                    gpu_count = int(recommended.get("gpu_per_replica", 1)) or 1
-                    tp_size = int(recommended.get("topology", {}).get("tp", gpu_count)) or gpu_count
-                    vllm_flags = recommended.get("vllm_flags", []) or []
-                    source = "gpu-advisor deployment-options.json ({})".format(
-                        recommended.get("name", "unknown option")
-                    )
-            except Exception as e:
-                print("WARNING: could not parse deployment-options.json: {}".format(e))
-        elif gpu_override:
-            gpu_count = int(gpu_override)
-            tp_size = gpu_count
-            source = "gpu-count-override param"
-
-        print("--- Deriving Helm values ---")
-        print("GPU count per replica: {} (source: {})".format(gpu_count, source))
-        print("Tensor-parallel size: {}".format(tp_size))
-        print("vLLM flags from plan: {}".format(vllm_flags))
-
-        # --- Resolve model-id to a modelcar OCI tag and verify it exists. ---
-        # The vllm-kserve chart has no "download from Hugging Face at pod
-        # startup" mechanism; model.mode=uri expects a pre-built modelcar
-        # image (or model.mode=s3 for self-hosted weights via
-        # valuesContent). Try the short tag (last path segment) first, then
-        # the full "org--name" form, matching the catalog's own convention.
-        if modelcar_image:
-            # Explicit override: use it verbatim (normalise to an oci:// URI).
-            bare = modelcar_image
-            for scheme in ("oci://", "docker://"):
-                if bare.startswith(scheme):
-                    bare = bare[len(scheme):]
-                    break
-            modelcar_uri = "oci://{}".format(bare)
-            print("--- Using explicit modelcar-image override: {} ---".format(modelcar_uri))
-        else:
-            short_tag = model_id.split("/")[-1].lower()
-            org_tag = model_id.lower().replace("/", "--")
-            repo = "redhat-ai-services/modelcar-catalog"
-
-            def tag_exists(tag):
-                resp = requests.get(
-                    "https://quay.io/api/v1/repository/{}/tag/".format(repo),
-                    params={"specificTag": tag}, timeout=30,
-                )
-                if resp.status_code != 200:
-                    return False
-                return bool(resp.json().get("tags"))
-
-            modelcar_tag = None
-            for candidate in (short_tag, org_tag):
-                print("  Checking modelcar catalog for tag '{}'...".format(candidate))
-                if tag_exists(candidate):
-                    modelcar_tag = candidate
-                    break
-
-            if not modelcar_tag:
-                print(
-                    "FATAL: no modelcar image found for '{}' (tried tags '{}' "
-                    "and '{}') in quay.io/{}. This model isn't in the "
-                    "prebuilt catalog - either request it be added, set the "
-                    "'modelcar-image' param to an explicit OCI ref, or "
-                    "override deployment entirely via the 'valuesContent' "
-                    "param (e.g. model.mode=s3 pointing at your own "
-                    "MinIO/S3-hosted weights).".format(
-                        model_id, short_tag, org_tag, repo
-                    ),
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-
-            modelcar_uri = "oci://quay.io/{}:{}".format(repo, modelcar_tag)
-        print("--- Using modelcar image: {} ---".format(modelcar_uri))
-
-        # Base vLLM args; caller-supplied flags (from the approved plan)
-        # take precedence over these defaults on exact key collision.
-        base_args = {"--gpu-memory-utilization": "0.90"}
-        plan_args = {}
-        passthrough_flags = []
-        for flag in vllm_flags:
-            if flag.startswith("--") and "=" in flag:
-                key, val = flag.split("=", 1)
-                plan_args[key] = val
-            else:
-                passthrough_flags.append(flag)
-        base_args.update(plan_args)
-        if tp_size > 1:
-            base_args["--tensor-parallel-size"] = str(tp_size)
-
-        model_args = ["{}={}".format(k, v) for k, v in base_args.items()]
-        model_args.extend(passthrough_flags)
-
-        values = {
-            "deploymentMode": "RawDeployment",
-            "servingTopology": "singleNode",
-            # NOTE: chart 0.7.1 has a template bug - explicitly setting
-            # Values.resources crashes rendering with a nil-pointer error
-            # ({{- with .Values.resources }} rebinds "." so the nested
-            # ".Values.resources" reference inside is undefined). GPU/CPU/
-            # memory sizing therefore MUST go through a HardwareProfile
-            # instead of a raw resources block.
-            "hardwareProfile": {
-                "name": hw_profile_name,
-                "namespace": hw_profile_namespace,
-            },
-            # Without this, Helm's fullname template appends "-vllm-kserve"
-            # to releaseName whenever releaseName doesn't already contain
-            # the chart name (e.g. "granite-2b" -> "granite-2b-vllm-kserve"),
-            # breaking every downstream assumption (oc wait target, the
-            # pipeline's security-scan/benchmark "target" hostname, etc.)
-            # that the InferenceService/predictor is named exactly releaseName.
-            "inferenceService": {"name": release_name},
-            "model": {
-                "mode": "uri",
-                "uri": modelcar_uri,
-                "args": model_args,
-            },
-            "scaling": {
-                "minReplicas": 1,
-                "maxReplicas": 1,
-                # Use Recreate (not the chart default RollingUpdate) for the
-                # predictor Deployment. This is a single-replica GPU
-                # deployment (minReplicas==maxReplicas==1), so two pods can
-                # never run at once anyway - and on a single-GPU node a
-                # rolling update DEADLOCKS: the old pod holds the only GPU
-                # and won't terminate until the new pod is Ready, but the
-                # new pod can't schedule without a free GPU. Recreate tears
-                # the old pod down first, so any pod-spec change (notably
-                # KServe re-rendering the podspec when we toggle the
-                # enable-auth annotation below) rolls cleanly.
-                "rawDeployment": {"deploymentStrategy": {"type": "Recreate"}},
-            },
-        }
-
-        # Point the InferenceService at the "vLLM NVIDIA GPU ServingRuntime
-        # for KServe" (the RHOAI NVIDIA GPU vLLM runtime) that the deploy
-        # step creates in this namespace, instead of the chart's own
-        # bespoke "...via Helm" runtime. NOTE: chart 0.7.1 has a guard bug
-        # ({{ if not (quote .Values.servingRuntime.useExisting | empty) }}
-        # is always true because quote never yields an empty string), so
-        # the chart STILL renders its own orphan ServingRuntime even when
-        # useExisting is set - the deploy step deletes that orphan
-        # afterwards. The InferenceService itself correctly references
-        # useExisting.
-        if serving_runtime_name:
-            values["servingRuntime"] = {"useExisting": serving_runtime_name}
-
-        with open("deploy-values.yaml", "w") as f:
-            yaml.dump(values, f, default_flow_style=False, sort_keys=False)
-
-        with open("gpu-count-required.txt", "w") as f:
-            f.write(str(gpu_count))
-
-        print("--- Generated deploy-values.yaml ---")
-        print(open("deploy-values.yaml").read())
-        PYEOF
-
-    - name: deploy
-      image: quay.io/jhurlocker/deploy-model-task-helm-oc:v0.1.0
-      workingDir: $(workspaces.shared-workspace.path)
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        mkdir -p ~/bin
-        export PATH=$PATH:~/bin
-
-        echo "oc/kubectl available. Version: $(oc version --client)"
-        echo "Helm available. Version: $(helm version --short)"
-
-        echo "Adding Helm repository..."
-        helm repo add redhat-ai-services "$(params.chartUrl)"
-        helm repo update
-
-        # Create the "vLLM NVIDIA GPU ServingRuntime for KServe" (the RHOAI
-        # NVIDIA GPU vLLM runtime) in the target namespace. KServe resolves
-        # an InferenceService's spec.predictor.model.runtime against a
-        # ServingRuntime of that name in the SAME namespace, so the runtime
-        # must exist here before the chart's InferenceService references it
-        # via servingRuntime.useExisting. Applied idempotently so the
-        # spec/image stay current on every run. Name defaults to releaseName
-        # (RHOAI convention: the ServingRuntime shares the model's name).
-        SR_NAME="$(params.servingRuntimeName)"
-        [ -z "$SR_NAME" ] && SR_NAME="$(params.releaseName)"
-        SR_IMAGE="$(params.servingRuntimeImage)"
-        echo "Applying ServingRuntime [$SR_NAME] (image: $SR_IMAGE) to namespace [$(params.namespace)]..."
-        cat <<EOF | oc apply -n "$(params.namespace)" -f -
-        apiVersion: serving.kserve.io/v1alpha1
-        kind: ServingRuntime
-        metadata:
-          name: ${SR_NAME}
-          annotations:
-            opendatahub.io/apiProtocol: REST
-            opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
-            opendatahub.io/runtime-version: v0.9.1.0
-            opendatahub.io/serving-runtime-scope: global
-            opendatahub.io/template-display-name: vLLM NVIDIA GPU ServingRuntime for KServe
-            opendatahub.io/template-name: vllm-cuda-runtime-template
-            openshift.io/display-name: vLLM NVIDIA GPU ServingRuntime for KServe
-          labels:
-            opendatahub.io/dashboard: 'true'
-        spec:
-          annotations:
-            prometheus.io/path: /metrics
-            prometheus.io/port: '8080'
-          containers:
-            - args:
-                - '--port=8080'
-                - '--model=/mnt/models'
-                - '--served-model-name={{.Name}}'
-              command:
-                - python
-                - '-m'
-                - vllm.entrypoints.openai.api_server
-              env:
-                - name: HF_HOME
-                  value: /tmp/hf_home
-              image: '${SR_IMAGE}'
-              name: kserve-container
-              ports:
-                - containerPort: 8080
-                  protocol: TCP
-          multiModel: false
-          supportedModelFormats:
-            - autoSelect: true
-              name: vLLM
-        EOF
-
-        echo "--- Helm values to be applied ---"
-        cat deploy-values.yaml
-        echo "----------------------------------"
-
-        REQUIRED_GPUS="$(cat gpu-count-required.txt 2>/dev/null || echo 1)"
-        HW_NAME="$(params.hardwareProfileName)"
-        HW_NS="$(params.hardwareProfileNamespace)"
-        if [ -n "$HW_NAME" ]; then
-          PROFILE_DEFAULT_GPU="$(oc get hardwareprofile "$HW_NAME" -n "$HW_NS" -o jsonpath='{.spec.identifiers[?(@.identifier=="nvidia.com/gpu")].defaultCount}' 2>/dev/null || true)"
-          if [ -z "$PROFILE_DEFAULT_GPU" ]; then
-            echo "WARNING: could not read HardwareProfile [$HW_NAME] in namespace [$HW_NS] (missing, or no nvidia.com/gpu identifier). Skipping GPU-count cross-check."
-          else
-            echo "HardwareProfile [$HW_NAME] default GPU count: $PROFILE_DEFAULT_GPU (plan requires: $REQUIRED_GPUS)"
-            if [ "$PROFILE_DEFAULT_GPU" != "$REQUIRED_GPUS" ]; then
-              echo "WARNING: HardwareProfile [$HW_NAME]'s default GPU count ($PROFILE_DEFAULT_GPU) does not match the gpu-advisor plan's requirement ($REQUIRED_GPUS). The deployed pod will get whatever the HardwareProfile provides, NOT necessarily what the plan recommended. Register/select a HardwareProfile matching the plan's GPU count, or override via 'valuesContent'."
-            fi
-          fi
-        fi
-
-        echo "Deploying release [$(params.releaseName)] to namespace [$(params.namespace)]"
-        # Label namespace for EvalHub tenant access (supports SA-token auth)
-        oc label ns "$(params.namespace)" evalhub.trustyai.opendatahub.io/tenant=true --overwrite 2>/dev/null || true
-        helm upgrade --install \
-          "$(params.releaseName)" \
-          redhat-ai-services/vllm-kserve \
-          --version "$(params.chartVersion)" \
-          --namespace "$(params.namespace)" \
-          -f deploy-values.yaml
-
-        # Chart guard bug: even with servingRuntime.useExisting set, the
-        # chart still renders its own bespoke "<release>-vllm-kserve"
-        # ServingRuntime ("vLLM ServingRuntime for KServe via Helm"). The
-        # InferenceService correctly references useExisting instead, so
-        # this chart-created runtime is an unused orphan that just clutters
-        # the RHOAI dashboard - delete it so only the intended runtime
-        # (e.g. "vLLM NVIDIA GPU ServingRuntime for KServe") remains.
-        if [ -n "$SR_NAME" ]; then
-          ORPHAN_SR="$(params.releaseName)-vllm-kserve"
-          if [ "$ORPHAN_SR" != "$SR_NAME" ] && oc get servingruntime "$ORPHAN_SR" -n "$(params.namespace)" >/dev/null 2>&1; then
-            echo "Deleting chart-created orphan ServingRuntime [$ORPHAN_SR] (InferenceService uses [$SR_NAME] instead)..."
-            oc delete servingruntime "$ORPHAN_SR" -n "$(params.namespace)" --ignore-not-found || true
-          fi
-        fi
-
-        # Chart bug: templates/inferenceservice.yaml unconditionally sets
-        # security.opendatahub.io/enable-auth: "true" regardless of the
-        # endpoint.auth.enabled value. On this deployment mode (KServe
-        # RawDeployment) that annotation controls whether a
-        # kube-rbac-proxy sidecar is injected in front of the predictor,
-        # requiring a valid Kubernetes bearer token for every request.
-        # This model doesn't require that, and downstream security-scan/
-        # benchmark tasks don't supply one - so disable it immediately,
-        # racing the KServe controller's first reconcile (best-effort).
-        echo "Disabling enforced predictor auth (chart always enables it)..."
-        oc annotate inferenceservice "$(params.releaseName)" \
-          --namespace "$(params.namespace)" \
-          security.opendatahub.io/enable-auth=false --overwrite || true
-
-        # Actively drive the deployment to a clean Ready state. We can't
-        # just `oc wait` first and recover afterwards, because the failure
-        # mode we need to handle (an auth-sidecar pod holding the only GPU
-        # while its replacement can't schedule) happens DURING the initial
-        # rollout - so `oc wait` would block on the very deadlock we need
-        # to break. Instead, loop: (re)assert auth=false, break any
-        # single-GPU rollout deadlock by scaling superseded ReplicaSets to
-        # zero, and poll for Ready-without-auth-sidecar. With the Recreate
-        # strategy set in the Helm values this usually converges on its
-        # own; the ReplicaSet scale-down is a belt-and-suspenders fallback.
-        PREDICTOR_DEPLOY="$(params.releaseName)-predictor"
-        NS="$(params.namespace)"
-
-        has_auth_sidecar() {
-          local containers
-          containers="$(oc get deployment "$PREDICTOR_DEPLOY" -n "$NS" \
-            -o jsonpath='{.spec.template.spec.containers[*].name}' 2>/dev/null || true)"
-          [[ "$containers" == *kube-rbac-proxy* ]]
-        }
-
-        is_ready() {
-          [ "$(oc get inferenceservice "$(params.releaseName)" -n "$NS" \
-            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == "True" ]
-        }
-
-        echo "Waiting for InferenceService [$(params.releaseName)] to be Ready without the auth sidecar..."
-        # Model downloads (OCI modelcar pull) can take several minutes, and
-        # with Recreate a spec change means a second pull, so allow ample time.
-        DEADLINE=$(( $(date +%s) + 1500 ))
-        LAST_ANNOTATE=0
-        while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-          if is_ready && ! has_auth_sidecar; then
-            echo "InferenceService [$(params.releaseName)] is Ready with no auth sidecar."
-            break
-          fi
-
-          # Re-assert the annotation if the sidecar is (still) present. The
-          # KServe controller may have re-added it on its first reconcile
-          # after helm install (race), or reverted our earlier annotate.
-          if has_auth_sidecar && [ "$(( $(date +%s) - LAST_ANNOTATE ))" -ge 20 ]; then
-            echo "  Auth sidecar present - (re)asserting enable-auth=false..."
-            oc annotate inferenceservice "$(params.releaseName)" \
-              --namespace "$NS" \
-              security.opendatahub.io/enable-auth=false --overwrite || true
-            LAST_ANNOTATE=$(date +%s)
-          fi
-
-          # Break a single-GPU rollout deadlock: scale every superseded
-          # (non-newest) predictor ReplicaSet that still wants pods down to
-          # 0, freeing the GPU for the newest ReplicaSet's pod.
-          NEWEST_RS="$(oc get replicaset -n "$NS" \
-            -l "serving.kserve.io/inferenceservice=$(params.releaseName),component=predictor" \
-            --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{.items[-1:].metadata.name}' 2>/dev/null || true)"
-          for RS in $(oc get replicaset -n "$NS" \
-            -l "serving.kserve.io/inferenceservice=$(params.releaseName),component=predictor" \
-            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true); do
-            if [ -n "$NEWEST_RS" ] && [ "$RS" != "$NEWEST_RS" ]; then
-              DESIRED="$(oc get replicaset "$RS" -n "$NS" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo 0)"
-              if [ "$DESIRED" != "0" ]; then
-                echo "  Scaling down superseded ReplicaSet [$RS] to unblock single-GPU rollout..."
-                oc scale replicaset "$RS" -n "$NS" --replicas=0 || true
-              fi
-            fi
-          done
-
-          sleep 10
-        done
-
-        if ! is_ready; then
-          echo "ERROR: InferenceService [$(params.releaseName)] did not become Ready within the timeout." >&2
-          oc get inferenceservice "$(params.releaseName)" -n "$NS" -o yaml >&2 || true
-          oc get pods -n "$NS" -l "serving.kserve.io/inferenceservice=$(params.releaseName)" >&2 || true
-          exit 1
-        fi
-
-        if has_auth_sidecar; then
-          echo "WARNING: could not remove auth sidecar automatically; security-scan/benchmark may get 401s. Manual intervention may be required."
-        else
-          echo "Predictor is Ready and serving without an auth sidecar - no bearer token required."
-        fi
+        - name: SERVING_RUNTIME_IMAGE
+          value: $(params.servingRuntimeImage)
+        - name: DEPLOY_MAAS
+          value: $(params.deploy-maas)
+        - name: MAAS_SERVING_NS
+          value: $(params.maas-serving-ns)
+        - name: MAAS_POLICY_NS
+          value: $(params.maas-policy-ns)
+        - name: MAAS_GPU_COUNT
+          value: $(params.maas-gpu-count)
+        - name: MAAS_RUNTIME_IMAGE
+          value: $(params.maas-runtime-image)
+        - name: MAAS_GPU_MEM_UTIL
+          value: $(params.maas-gpu-mem-util)
+        - name: MAAS_AUTHORIZED_GROUP
+          value: $(params.maas-authorized-group)

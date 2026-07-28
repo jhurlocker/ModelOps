@@ -1,0 +1,16 @@
+FROM registry.access.redhat.com/ubi9/python-311:latest
+
+ARG HELM_VERSION=v3.17.4
+ARG OC_VERSION=stable
+
+USER 0
+RUN pip install --no-cache-dir requests pyyaml && \
+    mkdir -p /usr/local/bin && \
+    curl -sL "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" | tar -C /usr/local/bin -xzf - oc && \
+    curl -sL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -C /usr/local/bin --strip-components=1 -xzf - linux-amd64/helm
+USER 1001
+
+COPY deploy_model.py /usr/local/bin/deploy-model
+COPY maas_deploy.py /usr/local/bin/maas-deploy
+
+ENTRYPOINT ["python3", "/usr/local/bin/deploy-model"]
