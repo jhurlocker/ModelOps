@@ -1,6 +1,6 @@
 FROM registry.access.redhat.com/ubi9/python-311:latest
 
-RUN pip install --no-cache-dir boto3
+RUN pip install --no-cache-dir boto3 model-registry==0.3.0
 
 COPY evaluate.py /usr/local/bin/compliance-scanner
 

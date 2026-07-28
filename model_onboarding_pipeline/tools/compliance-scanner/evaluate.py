@@ -47,23 +47,25 @@ def load_json(path, default=None):
 
 
 def register_in_model_registry():
-    """Register/update the model in the OpenShift AI Model Registry via REST API.
-    Best-effort: always returns, even on failure."""
-    import urllib.request, urllib.error
+    """Register/update the model in the OpenShift AI Model Registry.
+    Uses the model-registry Python client with an explicit SA token."""
+    try:
+        from model_registry import ModelRegistry
+    except ImportError:
+        print("model-registry package not available, skipping.", flush=True)
+        return
 
     ws = os.environ.get("WORKSPACE_PATH", os.getcwd())
     sandbox = os.path.join(ws, "compliance-artifact-sandbox")
 
     mr_server = os.environ.get("MR_SERVER", "").rstrip("/")
-    mr_port = os.environ.get("MR_PORT", "8080")
+    mr_port = int(os.environ.get("MR_PORT", "8080"))
     name = os.environ.get("MODEL_NAME", "unknown-model")
     version = os.environ.get("MODEL_VERSION", "v1")
     author = os.environ.get("MR_AUTHOR", "ModelOps Platform Team")
     model_id = os.environ.get("MODEL_ID", "")
     stage = os.environ.get("MR_STAGE", "compliance-artifact-scan")
     artifact_scan_image = os.environ.get("ARTIFACT_SCAN_IMAGE", "")
-
-    api_base = f"{mr_server}:{mr_port}/api/model_registry/v1alpha3"
 
     uri = f"oci://unknown/{name}:{version}"
     try:
@@ -96,7 +98,7 @@ def register_in_model_registry():
         "onboarding-stage": stage,
         "last-updated": ts,
     }
-    props = {k: {"string_value": str(v) if v is not None else ""} for k, v in props.items()}
+    props = {k: v for k, v in props.items() if v}
 
     token = ""
     try:
@@ -105,75 +107,29 @@ def register_in_model_registry():
     except Exception:
         pass
 
-    def req(method, path, data=None):
-        url = f"{api_base}/{path}"
-        headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        body = json.dumps(data).encode() if data else None
-        try:
-            rq = urllib.request.Request(url, data=body, headers=headers, method=method)
-            with urllib.request.urlopen(rq, timeout=15) as resp:
-                return json.loads(resp.read()) if resp.status < 300 else None
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode()[:200]
-            print(f"  HTTP {e.code} {method} {path}: {err_body}", flush=True)
-            return None
-        except Exception as e:
-            print(f"  ERROR {method} {path}: {e}", flush=True)
-            return None
-
-    print(f"Model Registry: checking if model '{name}' exists...", flush=True)
-    rms = req("GET", f"registered_models?pageSize=100")
-    if rms is None:
-        print("  WARNING: could not list registered models. Skipping registration.", flush=True)
+    try:
+        registry = ModelRegistry(
+            server_address=mr_server,
+            port=mr_port,
+            is_secure=False,
+            user_token=token,
+            author=author,
+        )
+    except Exception as e:
+        print(f"  ERROR connecting to Model Registry: {e}", flush=True)
         return
 
-    existing_ids = {m["name"]: m["id"] for m in rms.get("items", [])}
-
-    if name in existing_ids:
-        rm_id = existing_ids[name]
-        print(f"  Model '{name}' already registered (id={rm_id}).", flush=True)
-        versions = req("GET", f"registered_models/{rm_id}/versions?pageSize=100")
-        existing_vers = {}
-        if versions:
-            for m in versions.get("items", []):
-                existing_vers[m.get("name", "")] = m["id"]
-
-        if version in existing_vers:
-            mv_id = existing_vers[version]
-            print(f"  Updating version '{version}' (id={mv_id}) with {len(props)} properties.", flush=True)
-            req("PATCH", f"model_versions/{mv_id}", {"customProperties": props})
-        else:
-            print(f"  Creating version '{version}'.", flush=True)
-            mv = req("POST", f"registered_models/{rm_id}/versions", {
-                "name": version, "author": author,
-                "description": os.environ.get("MODEL_DESCRIPTION", ""),
-                "customProperties": props, "registeredModelId": rm_id,
-            })
-            if mv:
-                req("POST", f"model_versions/{mv['id']}/artifacts", {
-                    "name": name, "uri": uri, "modelFormatName": "vLLM", "modelFormatVersion": "1",
-                })
-    else:
-        print(f"  Registering new model '{name}'.", flush=True)
-        rm = req("POST", "registered_models", {
-            "name": name,
-            "owner": author,
-            "description": os.environ.get("MODEL_DESCRIPTION", ""),
-        })
-        if rm and rm.get("id"):
-            rm_id = rm["id"]
-            mv = req("POST", f"registered_models/{rm_id}/versions", {
-                "name": version, "author": author,
-                "description": os.environ.get("MODEL_DESCRIPTION", ""),
-                "customProperties": props, "registeredModelId": rm_id,
-            })
-            if mv:
-                req("POST", f"model_versions/{mv['id']}/artifacts", {
-                    "name": name, "uri": uri, "modelFormatName": "vLLM", "modelFormatVersion": "1",
-                })
-    print("  Registration complete.", flush=True)
+    try:
+        rm = registry.register_model(
+            name,
+            uri=uri,
+            version=version,
+            description=os.environ.get("MODEL_DESCRIPTION", ""),
+            metadata=props,
+        )
+        print(f"  Registered model id={rm.id}, version id={rm.version_id}.", flush=True)
+    except Exception as e:
+        print(f"  WARNING: registration failed: {e}", flush=True)
 
 
 def evaluate():

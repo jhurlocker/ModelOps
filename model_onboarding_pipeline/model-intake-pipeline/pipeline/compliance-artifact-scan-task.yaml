@@ -322,7 +322,7 @@ spec:
 
     # --- Register model in Model Registry (best-effort, even on failure) ---
     - name: register-model
-      image: quay.io/jhurlocker/compliance-scanner:v0.1.2
+      image: quay.io/jhurlocker/compliance-scanner:v0.1.3
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: WORKSPACE_PATH
