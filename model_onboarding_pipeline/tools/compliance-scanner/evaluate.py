@@ -96,7 +96,7 @@ def register_in_model_registry():
         "onboarding-stage": stage,
         "last-updated": ts,
     }
-    props = {k: (v if v is not None else "") for k, v in props.items()}
+    props = {k: {"string_value": str(v) if v is not None else ""} for k, v in props.items()}
 
     token = ""
     try:
