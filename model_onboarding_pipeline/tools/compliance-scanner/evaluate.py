@@ -158,9 +158,9 @@ def register_in_model_registry():
     else:
         print(f"  Registering new model '{name}'.", flush=True)
         rm = req("POST", "registered_models", {
-            "name": name, "owner": author,
+            "name": name,
+            "owner": author,
             "description": os.environ.get("MODEL_DESCRIPTION", ""),
-            "customProperties": props,
         })
         if rm and rm.get("id"):
             rm_id = rm["id"]
