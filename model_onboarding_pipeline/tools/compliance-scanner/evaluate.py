@@ -46,6 +46,136 @@ def load_json(path, default=None):
         return default if default is not None else {}
 
 
+def register_in_model_registry():
+    """Register/update the model in the OpenShift AI Model Registry via REST API.
+    Best-effort: always returns, even on failure."""
+    import urllib.request, urllib.error
+
+    ws = os.environ.get("WORKSPACE_PATH", os.getcwd())
+    sandbox = os.path.join(ws, "compliance-artifact-sandbox")
+
+    mr_server = os.environ.get("MR_SERVER", "").rstrip("/")
+    mr_port = os.environ.get("MR_PORT", "8080")
+    name = os.environ.get("MODEL_NAME", "unknown-model")
+    version = os.environ.get("MODEL_VERSION", "v1")
+    author = os.environ.get("MR_AUTHOR", "ModelOps Platform Team")
+    model_id = os.environ.get("MODEL_ID", "")
+    stage = os.environ.get("MR_STAGE", "compliance-artifact-scan")
+    artifact_scan_image = os.environ.get("ARTIFACT_SCAN_IMAGE", "")
+
+    api_base = f"{mr_server}:{mr_port}/api/model_registry/v1alpha3"
+
+    uri = f"oci://unknown/{name}:{version}"
+    try:
+        with open(os.path.join(sandbox, "modelcar-ref.txt")) as f:
+            ref = f.read().strip()
+            if ref:
+                uri = ref
+    except Exception:
+        pass
+
+    def _read(path, default=""):
+        p = os.path.join(ws, path)
+        try:
+            with open(p) as f:
+                return f.read().strip()
+        except Exception:
+            return default
+
+    summary_text = _read("compliance-artifact-summary.txt", "")
+    compliance_link = _read("compliance-result-link.txt", "")
+    trivy_link = _read("trivy-result-link.txt", "")
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    props = {
+        "model-id": model_id,
+        "overall-status": summary_text[:500] if summary_text else stage,
+        "artifact-scan-image": artifact_scan_image,
+        "compliance-report": compliance_link,
+        "artifact-scan-report": trivy_link,
+        "onboarding-stage": stage,
+        "last-updated": ts,
+    }
+    props = {k: (v if v is not None else "") for k, v in props.items()}
+
+    token = ""
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+            token = f.read().strip()
+    except Exception:
+        pass
+
+    def req(method, path, data=None):
+        url = f"{api_base}/{path}"
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        body = json.dumps(data).encode() if data else None
+        try:
+            rq = urllib.request.Request(url, data=body, headers=headers, method=method)
+            with urllib.request.urlopen(rq, timeout=15) as resp:
+                return json.loads(resp.read()) if resp.status < 300 else None
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode()[:200]
+            print(f"  HTTP {e.code} {method} {path}: {err_body}", flush=True)
+            return None
+        except Exception as e:
+            print(f"  ERROR {method} {path}: {e}", flush=True)
+            return None
+
+    print(f"Model Registry: checking if model '{name}' exists...", flush=True)
+    rms = req("GET", f"registered_models?pageSize=100")
+    if rms is None:
+        print("  WARNING: could not list registered models. Skipping registration.", flush=True)
+        return
+
+    existing_ids = {m["name"]: m["id"] for m in rms.get("items", [])}
+
+    if name in existing_ids:
+        rm_id = existing_ids[name]
+        print(f"  Model '{name}' already registered (id={rm_id}).", flush=True)
+        versions = req("GET", f"registered_models/{rm_id}/versions?pageSize=100")
+        existing_vers = {}
+        if versions:
+            for m in versions.get("items", []):
+                existing_vers[m.get("name", "")] = m["id"]
+
+        if version in existing_vers:
+            mv_id = existing_vers[version]
+            print(f"  Updating version '{version}' (id={mv_id}) with {len(props)} properties.", flush=True)
+            req("PATCH", f"model_versions/{mv_id}", {"customProperties": props})
+        else:
+            print(f"  Creating version '{version}'.", flush=True)
+            mv = req("POST", f"registered_models/{rm_id}/versions", {
+                "name": version, "author": author,
+                "description": os.environ.get("MODEL_DESCRIPTION", ""),
+                "customProperties": props, "registeredModelId": rm_id,
+            })
+            if mv:
+                req("POST", f"model_versions/{mv['id']}/artifacts", {
+                    "name": name, "uri": uri, "modelFormatName": "vLLM", "modelFormatVersion": "1",
+                })
+    else:
+        print(f"  Registering new model '{name}'.", flush=True)
+        rm = req("POST", "registered_models", {
+            "name": name, "owner": author,
+            "description": os.environ.get("MODEL_DESCRIPTION", ""),
+            "customProperties": props,
+        })
+        if rm and rm.get("id"):
+            rm_id = rm["id"]
+            mv = req("POST", f"registered_models/{rm_id}/versions", {
+                "name": version, "author": author,
+                "description": os.environ.get("MODEL_DESCRIPTION", ""),
+                "customProperties": props, "registeredModelId": rm_id,
+            })
+            if mv:
+                req("POST", f"model_versions/{mv['id']}/artifacts", {
+                    "name": name, "uri": uri, "modelFormatName": "vLLM", "modelFormatVersion": "1",
+                })
+    print("  Registration complete.", flush=True)
+
+
 def evaluate():
     ws = os.environ["WORKSPACE_PATH"]
     sandbox = os.path.join(ws, "compliance-artifact-sandbox")
@@ -210,12 +340,13 @@ def main():
         env_vars = evaluate()
         for k, v in env_vars.items():
             print(f"EXPORT {k}={v}")
-        # Write env file for shell sourcing
         with open("/tmp/scan_env.sh", "w") as f:
             for k, v in env_vars.items():
                 f.write(f'{k}={v}\n')
     elif cmd == "upload":
         upload_to_s3()
+    elif cmd == "register":
+        register_in_model_registry()
     else:
         print(f"Unknown command: {cmd}", file=sys.stderr)
         sys.exit(1)
