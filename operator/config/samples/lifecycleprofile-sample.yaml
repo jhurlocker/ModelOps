@@ -6,7 +6,7 @@ metadata:
 spec:
   workflow:
     engine: tekton
-    pipelineRef: model-intake-pipeline
+    pipelineRef: model-intake-sandbox
   platformConfigRef: default-modelops-platform
   defaultAccess:
     authorizedViewers: ""

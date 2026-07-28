@@ -6,6 +6,9 @@ kind: ClusterRole
 metadata:
   name: modelops-gpu-sharing
 rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["nvidia.com"]
     resources: ["clusterpolicies"]
     verbs: ["get", "list", "watch", "patch", "update"]
