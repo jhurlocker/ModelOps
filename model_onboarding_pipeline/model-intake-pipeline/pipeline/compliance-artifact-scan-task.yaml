@@ -142,7 +142,7 @@ spec:
           BARE="$(echo "$MODELCAR_IMAGE" | sed -E 's#^(oci|docker)://##')"
           CANDIDATE="docker://${BARE}"
           echo "  Using explicit modelcar-image override: $CANDIDATE"
-          if skopeo inspect --no-tags "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
+          if skopeo inspect "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
             REF="$BARE"
           fi
         else
@@ -152,7 +152,7 @@ spec:
           for TAG in "$SHORT_TAG" "$ORG_TAG"; do
             CANDIDATE="docker://quay.io/${MODELCAR_REPO}:${TAG}"
             echo "  Trying modelcar artifact: $CANDIDATE"
-            if skopeo inspect --no-tags "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
+            if skopeo inspect "$CANDIDATE" > "$SANDBOX/modelcar-inspect.json" 2>/tmp/skopeo.err; then
               REF="quay.io/${MODELCAR_REPO}:${TAG}"
               break
             fi
