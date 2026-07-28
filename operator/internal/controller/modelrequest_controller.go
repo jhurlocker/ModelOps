@@ -483,7 +483,7 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 
 	addParam(&p, "severity-threshold", strOrDefault(reqs.SecurityThreshold, "block"))
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", "auto")
+	addParam(&p, "evalhub-token", secrets.evalhubToken)
 	addParam(&p, "tenant-ns", strOrDefault(reqs.SandboxNamespace, "vllm"))
 	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
 
@@ -654,7 +654,7 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	addParam(&p, "approval-timeout-seconds", strconv.Itoa(intOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
 
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", "auto")
+	addParam(&p, "evalhub-token", secrets.evalhubToken)
 	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
 
 	addParam(&p, "guidellm-profile", strOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
