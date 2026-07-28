@@ -296,6 +296,9 @@ spec:
         export OVERALL_STATUS
 
         echo "Composed links: COMPLIANCE=$COMPLIANCE_LINK TRIVY=$TRIVY_LINK"
+        echo "$OVERALL_STATUS" > "$ws/compliance-artifact-summary.txt"
+        echo "$COMPLIANCE_LINK" > "$ws/compliance-result-link.txt"
+        echo "$TRIVY_LINK" > "$ws/trivy-result-link.txt"
 
     # --- Upload reports to S3 via containerized tool ---
     - name: s3-upload
@@ -317,9 +320,9 @@ spec:
         - name: PATTERN
           value: compliance-artifact-sandbox/*,compliance-artifact-summary.txt
 
-    # --- Register model in Model Registry (best-effort, even on failure) ---
+    # --- Register model in Model Registry via REST API (best-effort, even on failure) ---
     - name: register-model
-      image: quay.io/jhurlocker/model-registry-helper:v0.1.0
+      image: registry.access.redhat.com/ubi9/python-311
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_NAME
@@ -332,23 +335,157 @@ spec:
           value: $(params.mr-port)
         - name: MR_AUTHOR
           value: $(params.model-reg-author)
-        - name: MODEL_URI
-          value: $(cat compliance-artifact-sandbox/modelcar-ref.txt 2>/dev/null || echo "oci://quay.io/unknown")
         - name: MODEL_DESCRIPTION
           value: Onboarding candidate registered at compliance/artifact scan stage by the ModelOps pipeline.
         - name: MR_STAGE
           value: compliance-artifact-scan
-        - name: MR_PROPS_JSON
-          value: |
-            {
-              "model-id": "$(params.model-id)",
-              "overall-status": "${OVERALL_STATUS}",
-              "compliance-status": "${COMPLIANCE_STATUS}",
-              "artifact-scan-status": "${ARTIFACT_STATUS}",
-              "artifact-scan-image": "$(params.artifact-scan-image)",
-              "compliance-report": "${COMPLIANCE_LINK}",
-              "artifact-scan-report": "${TRIVY_LINK}"
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: ARTIFACT_SCAN_IMAGE
+          value: $(params.artifact-scan-image)
+      script: |
+        #!/usr/bin/env python3
+        import json, os, sys, urllib.request, urllib.error
+
+        base = f"{os.environ['MR_SERVER'].rstrip('/')}:{os.environ.get('MR_PORT','8080')}"
+        api = f"{base}/api/model_registry/v1alpha3"
+        name = os.environ["MODEL_NAME"]
+        version = os.environ.get("MODEL_VERSION", "v1")
+        author = os.environ.get("MR_AUTHOR", "ModelOps Platform Team")
+        description = os.environ.get("MODEL_DESCRIPTION", "")
+        stage = os.environ.get("MR_STAGE", "")
+
+        # Read modelcar URI from workspace file written by compliance-inspect step
+        ref_path = "compliance-artifact-sandbox/modelcar-ref.txt"
+        uri = f"oci://unknown/{name}:{version}"
+        try:
+            with open(ref_path) as f:
+                ref = f.read().strip()
+                if ref:
+                    uri = ref
+        except Exception:
+            pass
+
+        # Read summary/status from workspace files written by evaluate-and-upload
+        def read_file(path, default=""):
+            try:
+                with open(path) as f:
+                    return f.read().strip()
+            except Exception:
+                return default
+
+        overall_status = read_file("compliance-artifact-summary.txt", "")
+        compliance_link = read_file("compliance-result-link.txt", "")
+        trivy_link = read_file("trivy-result-link.txt", "")
+
+        ts = os.popen("date -u +'%Y-%m-%d %H:%M:%S UTC'").read().strip()
+        props = {
+            "model-id": os.environ.get("MODEL_ID", ""),
+            "overall-status": overall_status[:500] if overall_status else "compliance-artifact-scan",
+            "artifact-scan-image": os.environ.get("ARTIFACT_SCAN_IMAGE", ""),
+            "compliance-report": compliance_link,
+            "artifact-scan-report": trivy_link,
+            "onboarding-stage": stage,
+            "last-updated": ts,
+        }
+        props = {k: (v if v is not None else "") for k, v in props.items()}
+
+        token = ""
+        try:
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+                token = f.read().strip()
+        except Exception:
+            pass
+
+        def req(method, path, data=None):
+            url = f"{api}/{path}"
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            body = json.dumps(data).encode() if data else None
+            try:
+                rq = urllib.request.Request(url, data=body, headers=headers, method=method)
+                with urllib.request.urlopen(rq, timeout=15) as resp:
+                    return json.loads(resp.read()) if resp.status < 300 else None
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode()[:200]
+                print(f"[model-registry] HTTP {e.code} {method} {path}: {err_body}", flush=True)
+                return None
+            except Exception as e:
+                print(f"[model-registry] ERROR {method} {path}: {e}", flush=True)
+                return None
+
+        print(f"[model-registry] Checking if model '{name}' exists...", flush=True)
+        rms = req("GET", f"registered_models?pageSize=100")
+        if rms is None:
+            print("[model-registry] WARNING: could not list registered models. Skipping.", flush=True)
+            sys.exit(0)
+
+        existing_ids = {m["name"]: m["id"] for m in rms.get("items", [])}
+
+        if name in existing_ids:
+            rm_id = existing_ids[name]
+            print(f"[model-registry] Model '{name}' already registered (id={rm_id}), checking version '{version}'...", flush=True)
+            versions = req("GET", f"registered_models/{rm_id}/versions?pageSize=100")
+            existing_vers = {}
+            if versions:
+                for m in versions.get("items", []):
+                    existing_vers[m.get("name", "")] = m["id"]
+
+            if version in existing_vers:
+                mv_id = existing_vers[version]
+                print(f"[model-registry] Updating version '{version}' (id={mv_id}) with {len(props)} properties.", flush=True)
+                patch_data = {"customProperties": props}
+                req("PATCH", f"model_versions/{mv_id}", patch_data)
+            else:
+                print(f"[model-registry] Creating new version '{version}' under model '{name}'.", flush=True)
+                mv_data = {
+                    "name": version,
+                    "author": author,
+                    "description": description,
+                    "customProperties": props,
+                    "registeredModelId": rm_id,
+                }
+                mv = req("POST", f"registered_models/{rm_id}/versions", mv_data)
+                if mv:
+                    mv_id = mv["id"]
+                    ma_data = {
+                        "name": name,
+                        "uri": uri,
+                        "modelFormatName": "vLLM",
+                        "modelFormatVersion": "1",
+                    }
+                    req("POST", f"model_versions/{mv_id}/artifacts", ma_data)
+        else:
+            print(f"[model-registry] Model '{name}' not found - registering new entry.", flush=True)
+            rm_data = {
+                "name": name,
+                "owner": author,
+                "description": description,
+                "customProperties": props,
             }
+            rm = req("POST", "registered_models", rm_data)
+            if rm and rm.get("id"):
+                rm_id = rm["id"]
+                mv_data = {
+                    "name": version,
+                    "author": author,
+                    "description": description,
+                    "customProperties": props,
+                    "registeredModelId": rm_id,
+                }
+                mv = req("POST", f"registered_models/{rm_id}/versions", mv_data)
+                if mv:
+                    mv_id = mv["id"]
+                    ma_data = {
+                        "name": name,
+                        "uri": uri,
+                        "modelFormatName": "vLLM",
+                        "modelFormatVersion": "1",
+                    }
+                    req("POST", f"model_versions/{mv_id}/artifacts", ma_data)
+        print("[model-registry] Registration complete.", flush=True)
+        sys.exit(0)
 
     # --- Gate LAST, so the model is always registered first. ---
     - name: gate
