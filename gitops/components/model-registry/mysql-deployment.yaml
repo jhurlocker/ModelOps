@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: rhoai-model-registries
+  labels:
+    app.openshift.io/runtime: mysql-database
+spec:
+  # The replica count is carried over directly.
+  replicas: 1
+  revisionHistoryLimit: 10
+  # The 'selector' from DeploymentConfig is mapped to 'selector.matchLabels'.
+  # These labels must match the labels in the pod template below.
+  selector:
+    matchLabels:
+      name: mysql
+  # The 'Recreate' strategy is supported in both.
+  strategy:
+    type: Recreate
+  # The pod template is copied directly from the DeploymentConfig.
+  template:
+    metadata:
+      labels:
+        name: mysql
+    spec:
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql
+      containers:
+        - name: mysql
+          # The exact image digest is preserved for an identical deployment.
+          image: registry.redhat.io/rhel8/mysql-80:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+              protocol: TCP
+          env:
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql
+                  key: database-user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql
+                  key: database-password
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql
+                  key: database-root-password
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql
+                  key: database-name
+            - name: MYSQL_DEFAULT_AUTHENTICATION_PLUGIN
+              value: "mysql_native_password"
+          resources:
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql/data
+          # Liveness and Readiness probes are directly compatible.
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -i
+                - -c
+                - MYSQL_PWD="$MYSQL_PASSWORD" mysqladmin -u $MYSQL_USER ping
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -i
+                - -c
+                - MYSQL_PWD="$MYSQL_PASSWORD" mysqladmin -u $MYSQL_USER ping
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext: {}
+      schedulerName: default-scheduler

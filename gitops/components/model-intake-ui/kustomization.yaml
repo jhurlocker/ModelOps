@@ -3,4 +3,4 @@ kind: Kustomization
 namespace: sandbox
 
 resources:
-  - ../../../model_onboarding_pipeline/model-intake-ui/deployment.yaml
+  - deployment.yaml

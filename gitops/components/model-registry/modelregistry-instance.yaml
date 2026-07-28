@@ -1,0 +1,22 @@
+apiVersion: modelregistry.opendatahub.io/v1beta1
+kind: ModelRegistry
+metadata:
+  name: modelops-registry
+  namespace: rhoai-model-registries
+  labels:
+    app.kubernetes.io/name: modelops-registry
+    app.kubernetes.io/part-of: model-registry
+spec:
+  # REST endpoint served on 8080; expose an OpenShift Route for the pipeline client.
+  rest:
+    port: 8080
+    serviceRoute: enabled
+  # Back the registry with the MySQL deployed by the manifests in this directory.
+  mysql:
+    host: mysql.rhoai-model-registries.svc.cluster.local
+    port: 3306
+    database: sampledb
+    username: admin
+    passwordSecret:
+      name: mysql
+      key: database-password
