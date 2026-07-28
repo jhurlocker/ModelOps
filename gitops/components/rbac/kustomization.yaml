@@ -4,3 +4,4 @@ kind: Kustomization
 resources:
   - pipeline-evalhub-clusterrole.yaml
   - rbac-namespace-provisioner.yaml
+  - sandbox-rolebindings.yaml
