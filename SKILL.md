@@ -42,46 +42,29 @@ The pipeline runs on a single cluster with two namespaces simulating separate en
 
 ## Deployment Order
 
-Follow this order for a fresh cluster. Each phase is a separate decision point — load the corresponding skill when the previous phase completes.
+The platform is deployed via GitOps (ArgoCD App of Apps). For a fresh cluster:
 
-- [ ] Phase 0: Deploy the ModelOps Operator → **NEW in v3.0** (see below)
-- [ ] Phase 1: Deploy S3 storage → load `configure-s3-storage`
-- [ ] Phase 2: Deploy EvalHub → load `configure-evalhub`
-- [ ] Phase 3: Deploy Model Registry → load `configure-model-registry`
-- [ ] Phase 4: Deploy MaaS platform → load `configure-maas-platform`
-- [ ] Phase 5: Deploy results viewer → load `deploy-results-ui`
-- [ ] Phase 6: Deploy model intake UI → load `deploy-model-intake-ui`
-- [ ] Phase 7: Deploy pipeline → load `deploy-openshift-pipeline`
-- [ ] Phase 8: Create credential Secrets and platform config → see Phase 0
-- [ ] Phase 9: Submit a model via the UI → creates a ModelRequest CR; controller handles the rest
+- [ ] Phase 0: Install OpenShift GitOps operator (if not already present)
+- [ ] Phase 1: Deploy entire platform via GitOps root application
+- [ ] Phase 2: Create PlatformConfig and ModelLifecycleProfile CRs
+- [ ] Phase 3: Create credential Secrets in sandbox namespace
+- [ ] Phase 4: Submit a model via UI or kubectl → controller handles the rest
+
+See [GitOps Deployment](#gitops-deployment-v3x) above for detailed commands.
 
 ## Phase 0: Deploy the ModelOps Operator
 
-The operator is the central controller for the new architecture. It watches ModelRequest CRs and orchestrates the full lifecycle.
-
-### 0.1 Build and push the operator image
+The operator is deployed via GitOps — `gitops/components/operator/`. To rebuild:
 
 ```bash
 cd operator
-podman build -t quay.io/jhurlocker/modelops-operator:v0.1.0 .
-podman push quay.io/jhurlocker/modelops-operator:v0.1.0
+podman build --platform linux/amd64 -t quay.io/jhurlocker/modelops-operator:v0.2.4 .
+podman push quay.io/jhurlocker/modelops-operator:v0.2.4
 ```
 
-### 0.2 Apply CRDs
+Then update `gitops/components/operator/deployment.yaml` to the new image tag and push. ArgoCD auto-syncs.
 
-```bash
-oc apply -f operator/config/crd/bases/modelops.example.io_modelrequests.yaml
-oc apply -f operator/config/crd/bases/modelops.example.io_modellifecycleprofiles.yaml
-oc apply -f operator/config/crd/bases/modelops.example.io_platformconfigs.yaml
-oc apply -f operator/config/crd/bases/modelops.example.io_capacityplans.yaml
-```
-
-### 0.3 Deploy the operator
-
-```bash
-oc apply -f operator/config/rbac/role.yaml
-oc apply -f operator/config/default/deployment.yaml
-```
+CRDs and RBAC are managed by the same GitOps application. No manual `oc apply` needed.
 
 ### 0.4 Create PlatformConfig (shared platform plumbing)
 
@@ -97,56 +80,68 @@ oc apply -f operator/config/samples/lifecycleprofile-sample.yaml
 
 ### 0.6 Create credential Secrets
 
+Create secrets in the sandbox namespace (operator resolves secrets by name at runtime):
+
 ```bash
-# EvalHub credentials (required by security scan task)
-oc create secret generic evalhub-credentials \
+CLUSTER_DOMAIN=$(oc whoami --show-server | sed 's|https://api.||; s|:6443||')
+
+# EvalHub credentials
+oc -n sandbox create secret generic evalhub-credentials \
   --from-literal=token=$(oc whoami -t) \
-  --from-literal=url=evalhub-redhat-ods-applications.apps.REPLACE_WITH_CLUSTER_DOMAIN
+  --from-literal=url=https://evalhub-redhat-ods-applications.apps.${CLUSTER_DOMAIN}
 
-# S3 credentials for scan results
-oc create secret generic scan-s3-credentials \
-  --from-literal=endpoint=http://minio-service.s3-storage.svc.cluster.local:9000 \
-  --from-literal=accessKeyId=minio \
-  --from-literal=secretAccessKey=minio123
+# S3 credentials for scan results (MinIO)
+oc -n sandbox create secret generic scan-s3-credentials \
+  --from-literal=endpoint=https://minio-modelops-storage.apps.${CLUSTER_DOMAIN} \
+  --from-literal=accessKeyId=minioadmin \
+  --from-literal=secretAccessKey=minioadmin
 
-# S3 credentials for benchmark/eval result uploads
-oc create secret generic result-s3-credentials \
-  --from-literal=endpoint=http://s3.openshift-storage.svc.cluster.local:80 \
-  --from-literal=accessKeyId=YOUR_ACCESS_KEY \
-  --from-literal=secretAccessKey=YOUR_SECRET_KEY
+# S3 credentials for benchmark/eval results
+oc -n sandbox create secret generic result-s3-credentials \
+  --from-literal=endpoint=https://minio-modelops-storage.apps.${CLUSTER_DOMAIN} \
+  --from-literal=accessKeyId=minioadmin \
+  --from-literal=secretAccessKey=minioadmin
 
-# Optional: HuggingFace token for gated models
-oc create secret generic huggingface-credentials \
+# Optional: HuggingFace token
+oc -n sandbox create secret generic huggingface-credentials \
   --from-literal=token=YOUR_HF_TOKEN
 ```
 
-### 0.7 Verify the operator is running
+### 0.7 Verify deployment
 
 ```bash
+# Check ArgoCD sync status
+oc get applications -n openshift-gitops
+
+# Check operator
 oc -n modelops get pods
 oc -n modelops logs deployment/modelops-operator
+
+# Check platform components
+oc -n modelops-storage get pods  # MinIO
+oc -n redhat-ods-applications get mlflowoperator,evalhub  # MLflow + EvalHub
 ```
 
 ## Submitting a Model (post-deployment)
 
-With the operator running and UI deployed, submit a model through the UI form or directly via `kubectl`:
+Submit a model and the operator handles the full lifecycle:
 
 ```bash
-# Using the UI: browse to the model-intake route, fill the form, click Submit
-# Or directly:
 oc apply -f model_onboarding_pipeline/model-intake-pipeline/pipeline/sample-modelrequest.yaml
 ```
 
 The operator will:
 1. Create a CapacityPlan → GPU advisor runs, plan status set to Succeeded
-2. Create a Tekton PipelineRun with all params resolved from the profile + secrets
-3. Watch the PipelineRun and sync status back to the ModelRequest
+2. Ensure sandbox RBAC (pipeline SA, RoleBindings) if missing
+3. Ensure promotion namespace RBAC (pipeline SA, RoleBindings) if namespaces are unknown
+4. Create sandbox PipelineRun with all params resolved
+5. Watch and sync status, then create promotion PipelineRuns to each promotion namespace
 
 Check status:
 ```bash
-oc -n vllm get modelrequests
-oc -n vllm get capacityplans
-oc -n vllm get pipelineruns
+oc -n sandbox get modelrequests
+oc -n sandbox get capacityplans
+oc -n sandbox get pipelineruns
 ```
 
 ## Architecture: What Changed in v3.0
@@ -161,7 +156,39 @@ oc -n vllm get pipelineruns
 | GPU capacity | Implicit pipeline task | `CapacityPlan` child CR with heuristic controller |
 | Image tags | `:latest` (mutable) | `:v0.1.0` (pinned) |
 
-## Required Inputs
+## GitOps Deployment (v3.x)
+
+The entire platform is deployed via ArgoCD using an App of Apps pattern. All infrastructure manifests live in `gitops/`.
+
+**Components deployed automatically:**
+- MaaS (KServe Models-as-a-Service via ai-accelerator component)
+- MinIO S3 object storage (`modelops-storage` namespace)
+- MLflow experiment tracking (`redhat-ods-applications` namespace)
+- EvalHub (TrustyAI) evaluation platform (`redhat-ods-applications` namespace)
+- ModelOps operator (`modelops` namespace)
+- Tekton tasks and pipelines (`sandbox` namespace)
+- RBAC policies (ClusterRoles, ClusterRoleBindings)
+
+**To deploy:**
+```bash
+oc apply -f gitops/appproject.yaml
+oc apply -f gitops/root-app.yaml
+```
+
+ArgoCD automatically syncs all child applications. Check status:
+```bash
+oc get applications -n openshift-gitops
+```
+
+**Automatic RBAC for promotion namespaces:**
+When a ModelRequest is submitted, the operator automatically ensures each promotion namespace (from `ModelLifecycleProfile.promotionNamespaces`) has:
+- A `pipeline` ServiceAccount
+- `pipeline-edit` RoleBinding (edit ClusterRole scoped to the namespace)
+- EvalHub ClusterRoleBinding (links `pipeline-evalhub-submitter` ClusterRole to the pipeline SA)
+
+This eliminates manual RBAC setup for unknown/dynamic promotion namespaces.
+
+
 
 Key form fields (set via the model intake UI or direct ModelRequest CR):
 

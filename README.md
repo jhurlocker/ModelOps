@@ -66,29 +66,52 @@ The first implemented lifecycle module. Governs the process of bringing a founda
 | `PlatformConfig` | Shared platform plumbing (S3 buckets, registry, defaults) |
 | `CapacityPlan` | Per-model GPU capacity recommendation |
 
-### Getting started
+### Getting started (GitOps)
+
+The platform is deployed via OpenShift GitOps (ArgoCD). All infrastructure is defined in `gitops/` and deployed as ArgoCD Applications.
 
 ```bash
-# 1. Apply platform configuration and lifecycle profiles
-kubectl apply -f operator/config/samples/platformconfig-sample.yaml
-kubectl apply -f operator/config/samples/lifecycleprofile-sample.yaml
+# 1. Install OpenShift GitOps operator
+oc apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-gitops-operator
+  namespace: openshift-operators
+spec:
+  channel: latest
+  installPlanApproval: Automatic
+  name: openshift-gitops-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
 
-# 2. Deploy the operator
-kubectl apply -f operator/config/default/deployment.yaml
-kubectl apply -f operator/config/rbac/role.yaml
-kubectl apply -f operator/config/crd/bases/
+# 2. Wait for ArgoCD, then deploy platform
+oc apply -f gitops/appproject.yaml
+oc apply -f gitops/root-app.yaml
 
-# 3. Create credential secrets
-kubectl create secret generic evalhub-credentials \
-  --from-literal=token=<token> \
+# 3. Apply platform configuration
+oc apply -f operator/config/samples/platformconfig-sample.yaml
+oc apply -f operator/config/samples/lifecycleprofile-sample.yaml
+
+# 4. Create credential secrets
+oc -n sandbox create secret generic evalhub-credentials \
+  --from-literal=token=$(oc whoami -t) \
   --from-literal=url=<evalhub-url>
-kubectl create secret generic scan-s3-credentials \
-  --from-literal=endpoint=<endpoint> \
-  --from-literal=accessKeyId=<key> \
-  --from-literal=secretAccessKey=<secret>
+oc -n sandbox create secret generic scan-s3-credentials \
+  --from-literal=endpoint=https://minio-modelops-storage.apps.<cluster-domain> \
+  --from-literal=accessKeyId=minioadmin \
+  --from-literal=secretAccessKey=minioadmin
+oc -n sandbox create secret generic result-s3-credentials \
+  --from-literal=endpoint=https://minio-modelops-storage.apps.<cluster-domain> \
+  --from-literal=accessKeyId=minioadmin \
+  --from-literal=secretAccessKey=minioadmin
 
-# 4. Create a model request
+# 5. Create a model request
 kubectl apply -f model_onboarding_pipeline/model-intake-pipeline/pipeline/sample-modelrequest.yaml
+
+# Check deployment status
+oc get applications -n openshift-gitops
 ```
 
 ## Roadmap
