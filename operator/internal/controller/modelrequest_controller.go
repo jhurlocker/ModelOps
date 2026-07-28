@@ -345,6 +345,16 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 		s.resultS3SecretKey = string(secret.Data["secretAccessKey"])
 	}
 
+	if s.resultS3Endpoint == "" {
+		s.resultS3Endpoint = "http://minio-service.s3-storage.svc.cluster.local:9000"
+	}
+	if s.resultS3AccessKey == "" {
+		s.resultS3AccessKey = "minio"
+	}
+	if s.resultS3SecretKey == "" {
+		s.resultS3SecretKey = "minio123"
+	}
+
 	return s, nil
 }
 
@@ -461,7 +471,7 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 
 	addParam(&p, "severity-threshold", strOrDefault(reqs.SecurityThreshold, "block"))
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", secrets.evalhubToken)
+	addParam(&p, "evalhub-token", "auto")
 	addParam(&p, "tenant-ns", strOrDefault(reqs.SandboxNamespace, "vllm"))
 	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
 
@@ -556,7 +566,7 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	addParam(&p, "approval-timeout-seconds", strconv.Itoa(intOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
 
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", secrets.evalhubToken)
+	addParam(&p, "evalhub-token", "auto")
 	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
 
 	addParam(&p, "guidellm-profile", strOrDefault(cfg.Spec.BenchmarkProfile, "constant"))

@@ -427,6 +427,8 @@ spec:
         fi
 
         echo "Deploying release [$(params.releaseName)] to namespace [$(params.namespace)]"
+        # Label namespace for EvalHub tenant access (supports SA-token auth)
+        oc label ns "$(params.namespace)" evalhub.trustyai.opendatahub.io/tenant=true --overwrite 2>/dev/null || true
         helm upgrade --install \
           "$(params.releaseName)" \
           redhat-ai-services/vllm-kserve \

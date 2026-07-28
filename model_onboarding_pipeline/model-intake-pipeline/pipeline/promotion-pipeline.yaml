@@ -118,7 +118,7 @@ spec:
       default: ""
     - name: guidellm-profile
       type: string
-      default: "constant"
+      default: "sweep"
     - name: guidellm-rate
       type: string
       default: "4.0"
@@ -136,13 +136,13 @@ spec:
       default: "no-file"
     - name: s3-api-endpoint
       type: string
-      default: ""
+      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
     - name: s3-access-key-id
       type: string
-      default: ""
+      default: "minio"
     - name: s3-secret-access-key
       type: string
-      default: ""
+      default: "minio123"
     - name: huggingface-token
       type: string
       default: ""
