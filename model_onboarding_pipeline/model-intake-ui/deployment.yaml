@@ -6,7 +6,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: model-intake-data
-  namespace: vllm
+  namespace: sandbox
 spec:
   accessModes:
     - ReadWriteOnce
@@ -24,15 +24,15 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: model-intake-config
-  namespace: vllm
+  namespace: sandbox
 data:
-  PIPELINE_NAMESPACE: "vllm"
+  PIPELINE_NAMESPACE: "sandbox"
   PIPELINE_NAME: "model-intake-pipeline"
   PIPELINE_SERVICE_ACCOUNT: "pipeline"
   SHARED_WORKSPACE_PVC: "guidellm-output-pvc"
   MANIFESTS_CONFIGMAP: "mmlu-manifest"
   CUSTOM_MMLU_CONFIGMAP: "custom-mmlu"
-  SELF_INTERNAL_URL: "http://model-intake.vllm.svc.cluster.local:8080"
+  SELF_INTERNAL_URL: "http://model-intake.sandbox.svc.cluster.local:8080"
   DEFAULT_S3_ENDPOINT: "http://minio-service.s3-storage.svc.cluster.local:9000"
   # Set to the same RunPod/agentic-skill endpoint used by the gpu-advisor
   # Task if you want it prefilled in the intake form (still overridable
@@ -50,7 +50,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: model-intake-secrets
-  namespace: vllm
+  namespace: sandbox
 type: Opaque
 stringData:
   DEFAULT_S3_ACCESS_KEY: "minio"
@@ -67,14 +67,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: model-intake
-  namespace: vllm
+  namespace: sandbox
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: model-intake-tekton
-  namespace: vllm
+  namespace: sandbox
 rules:
   # ModelRequests - the primary CRD for onboarding
   - apiGroups: ["modelops.example.io"]
@@ -96,7 +96,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: model-intake-tekton
-  namespace: vllm
+  namespace: sandbox
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -104,7 +104,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: model-intake
-    namespace: vllm
+    namespace: sandbox
 
 ---
 # ===================================================================
@@ -114,7 +114,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: model-intake
-  namespace: vllm
+  namespace: sandbox
   labels:
     app: model-intake
 spec:
@@ -174,13 +174,13 @@ spec:
 # ===================================================================
 #  6. SERVICE
 #  Internal DNS name used by the wait-for-approval Task (approval-api-url
-#  param defaults to http://model-intake.vllm.svc.cluster.local:8080).
+#  param defaults to http://model-intake.sandbox.svc.cluster.local:8080).
 # ===================================================================
 apiVersion: v1
 kind: Service
 metadata:
   name: model-intake
-  namespace: vllm
+  namespace: sandbox
   labels:
     app: model-intake
 spec:
@@ -201,7 +201,7 @@ apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
   name: model-intake
-  namespace: vllm
+  namespace: sandbox
   labels:
     app: model-intake
 spec:

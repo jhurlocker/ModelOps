@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: security-scan
-  namespace: vllm
 spec:
   description: |
     Submit a garak security scan via EvalHub, wait for completion, download

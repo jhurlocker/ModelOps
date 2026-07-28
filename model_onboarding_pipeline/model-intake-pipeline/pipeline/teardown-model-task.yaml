@@ -3,7 +3,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: teardown-model
-  namespace: vllm
 spec:
   description: |
     Frees the single shared GPU after the live security (garak) scan passes,

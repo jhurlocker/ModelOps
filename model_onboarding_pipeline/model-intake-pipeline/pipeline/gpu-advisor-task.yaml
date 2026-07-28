@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: gpu-advisor
-  namespace: vllm
 spec:
   description: |
     Gate 1 - Runs FIRST in the pipeline, before any deployment or security

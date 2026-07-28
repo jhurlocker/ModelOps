@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: wait-for-approval
-  namespace: vllm
 spec:
   description: |
     Gate 2 - Runs immediately after gpu-advisor. Publishes the GPU advisor's

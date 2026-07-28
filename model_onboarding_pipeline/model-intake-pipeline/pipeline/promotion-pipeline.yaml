@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
   name: model-intake-promotion
-  namespace: sandbox
 spec:
   description: |
     Per-namespace promotion pipeline. The controller creates one PipelineRun

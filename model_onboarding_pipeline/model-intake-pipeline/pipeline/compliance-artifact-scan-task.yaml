@@ -3,7 +3,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: compliance-artifact-scan
-  namespace: vllm
 spec:
   description: |
     FIRST gate in the onboarding pipeline. Simulates pulling a candidate LLM

@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: deploy-maas
-  namespace: vllm
 spec:
   description: >-
     Deploys a model via Red Hat OpenShift AI Models-as-a-Service (MaaS) CRDs:

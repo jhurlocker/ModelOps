@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: model-registry
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: modelops
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: modelops
+  source:
+    repoURL: https://github.com/jhurlocker/ModelOps.git
+    targetRevision: feat/model-request-controller
+    path: gitops/components/model-registry
+    kustomize: {}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: rhoai-model-registries
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

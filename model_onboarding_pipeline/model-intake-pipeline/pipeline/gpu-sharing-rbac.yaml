@@ -1,11 +1,5 @@
-# FILE: gpu-sharing-rbac.yaml
-# Extra permissions the pipeline ServiceAccount (vllm:pipeline) needs so the
-# apply-gpu-sharing task can enable NVIDIA GPU time-slicing automatically:
-#   - get/list/patch the cluster-scoped NVIDIA ClusterPolicy
-#   - manage the time-slicing device-plugin ConfigMap in the GPU operator ns
-# (Node read access is already covered by the cluster-reader ClusterRole the
-# SKILL grants; InferenceService patch access in vllm / vllm-staging is covered
-# by the existing `edit` bindings.)
+# Extra permissions the pipeline ServiceAccount (sandbox:pipeline) needs so the
+# apply-gpu-sharing task can enable NVIDIA GPU time-slicing.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -23,7 +17,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: pipeline
-    namespace: vllm
+    namespace: sandbox
 roleRef:
   kind: ClusterRole
   name: modelops-gpu-sharing
@@ -48,7 +42,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: pipeline
-    namespace: vllm
+    namespace: sandbox
 roleRef:
   kind: Role
   name: modelops-gpu-sharing-configmaps

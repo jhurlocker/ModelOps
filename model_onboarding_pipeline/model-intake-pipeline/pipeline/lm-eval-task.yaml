@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: lm-eval
-  namespace: vllm
 spec:
   params:
     - default: mmlu-jurisprudence-eval-job
@@ -13,6 +12,10 @@ spec:
       description: Using a custom evaluation benchmark file?
       name: lm-eval-custom
       type: string
+    - default: sandbox
+      description: Target namespace for model deployment and LMEvalJob
+      name: target-namespace
+      type: string
   steps:
     - computeResources: {}
       image: registry.redhat.io/openshift4/ose-cli
@@ -21,17 +24,17 @@ spec:
         #!/bin/sh
         set -e
         echo "Cleaning up previous lm-eval runs"
-        oc delete LMEvalJob $(params.lm-eval-job-name) -n vllm --ignore-not-found=true
+        oc delete LMEvalJob $(params.lm-eval-job-name) -n $(params.target-namespace) --ignore-not-found=true
         
         echo "Applying file from workspace..."
         # This is the corrected POSIX 'sh' syntax for string comparison
         #if [ $(params.lm-eval-custom).lower() = "false" ]; then
         if [ "$(echo "$(params.lm-eval-custom)" | tr '[:upper:]' '[:lower:]')" == "false" ]; then
             echo "Applying standard mmlu.yaml"
-            oc apply -f $(workspaces.manifests.path)/mmlu.yaml -n vllm
+            oc apply -f $(workspaces.manifests.path)/mmlu.yaml -n $(params.target-namespace)
         else
             echo "Applying custom-mmlu.yaml"
-            oc apply -f $(workspaces.custom-mmlu.path)/custom-mmlu.yaml -n vllm
+            oc apply -f $(workspaces.custom-mmlu.path)/custom-mmlu.yaml -n $(params.target-namespace)
         fi
           
         echo "Apply command finished."
@@ -42,7 +45,7 @@ spec:
           # Get the current status phase
           # NOTE: This assumes your LMEvalJob *creates a pod* with the
           # *exact same name* as the LMEvalJob CR.
-          status=$(oc get pod $(params.lm-eval-job-name) -n vllm --ignore-not-found=true -o jsonpath='{.status.phase}')
+          status=$(oc get pod $(params.lm-eval-job-name) -n $(params.target-namespace) --ignore-not-found=true -o jsonpath='{.status.phase}')
 
           if [ -z "$status" ]; then
             echo "Pod not found yet, waiting..."
@@ -60,7 +63,7 @@ spec:
                     echo "$TIMESTAMP" > $(workspaces.shared-workspace.path)/lm-eval-timestamp.txt
 
                     echo "Copying results from LMEvalJob..."
-                    oc get LMEvalJob $(params.lm-eval-job-name) -n vllm -o jsonpath='{.status.results}' > $(workspaces.shared-workspace.path)/${TIMESTAMP}_lm-eval-results.json
+                    oc get LMEvalJob $(params.lm-eval-job-name) -n $(params.target-namespace) -o jsonpath='{.status.results}' > $(workspaces.shared-workspace.path)/${TIMESTAMP}_lm-eval-results.json
 
                     cat $(workspaces.shared-workspace.path)/${TIMESTAMP}_lm-eval-results.json
                     echo "Pod Succeeded."
@@ -83,7 +86,7 @@ spec:
         # directly), and the benchmark/S3 UI routes are only used to build
         # human-friendly links in the registry metadata.
         MODEL_REG_ROUTE=$(oc get route model-registry-https -n rhoai-model-registries -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-        BNCMRK_ROUTE=$(oc get route -n vllm 2>/dev/null | grep benchmark-viewer | awk '{print $2}' || echo "")
+        BNCMRK_ROUTE=$(oc get route -n $(params.target-namespace) 2>/dev/null | grep benchmark-viewer | awk '{print $2}' || echo "")
         S3_HOST=$(oc get route -n s3-storage 2>/dev/null | grep s3-ui-route | awk '{print $2}' || echo "")
         S3_ROUTE=""
         [ -n "$S3_HOST" ] && S3_ROUTE="https://$S3_HOST"

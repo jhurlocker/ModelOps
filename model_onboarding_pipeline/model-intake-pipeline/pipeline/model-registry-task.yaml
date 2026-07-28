@@ -3,7 +3,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: model-registry
-  namespace: vllm
 spec:
   description: |
     FINAL onboarding step. UPDATES the model's existing OpenShift AI Model
@@ -41,7 +40,7 @@ spec:
       default: "8080"
     - name: staging-namespace
       type: string
-      default: "vllm-staging"
+      default: "staging"
       description: "Namespace the model was promoted to (recorded as metadata)."
     - name: custom-data
       type: string
@@ -63,6 +62,10 @@ spec:
       type: string
       default: ""
       description: "Tenant namespace used by EvalHub jobs."
+    - name: target-namespace
+      type: string
+      default: "sandbox"
+      description: "Namespace where model is deployed (for benchmark-viewer route resolution)."
   workspaces:
     - name: shared-workspace
       description: Shared workspace holding benchmark/eval result timestamps + UI routes.
@@ -79,7 +82,7 @@ spec:
         #!/usr/bin/env bash
         set -uo pipefail
         WS="$(workspaces.shared-workspace.path)"
-        BNCMRK_HOST=$(oc get route benchmark-viewer -n vllm -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+        BNCMRK_HOST=$(oc get route benchmark-viewer -n $(params.target-namespace) -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
         S3_HOST=$(oc get route s3-ui-route -n s3-storage -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
         S3_ROUTE=""
         [ -n "$S3_HOST" ] && S3_ROUTE="https://$S3_HOST"

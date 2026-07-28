@@ -3,7 +3,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: apply-gpu-sharing
-  namespace: vllm
 spec:
   description: |
     Applies the GPU-sharing plan produced by the gpu-advisor task (read from

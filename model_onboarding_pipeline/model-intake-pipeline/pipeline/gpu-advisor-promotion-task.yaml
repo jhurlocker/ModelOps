@@ -2,7 +2,6 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: gpu-advisor-promotion
-  namespace: vllm
 spec:
   description: |
     Batched GPU advisor for the promotion pipeline. Discovers cluster GPU
