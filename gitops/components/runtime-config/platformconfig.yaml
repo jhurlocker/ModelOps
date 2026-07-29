@@ -32,8 +32,6 @@ spec:
   benchmarkRate: 4.0
   benchmarkMaxSeconds: 15
   benchmarkMaxRequests: 2
-  maasServingNs: llm
-  maasPolicyNs: models-as-a-service
   maasGpuCount: "1"
   maasRuntimeImage: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
   maasAuthorizedGroup: system:authenticated
