@@ -125,6 +125,8 @@ def register_in_model_registry():
             uri=uri,
             version=version,
             description=os.environ.get("MODEL_DESCRIPTION", ""),
+            model_format_name="vLLM",
+            model_format_version="1",
             metadata=props,
         )
         print(f"  Registered model id={rm.id}, version id={rm.version_id}.", flush=True)
