@@ -73,25 +73,8 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
 
     display_name = model_id
 
-    # 1. Ensure namespaces and labels
-    print("\n=== Step 1: Namespace preparation ===")
-    for ns, labels in [
-        (serving_ns, [
-            "opendatahub.io/generated-namespace=true",
-            "maas.opendatahub.io/gateway-access=true",
-            "opendatahub.io/dashboard=true",
-        ]),
-        (policy_ns, []),
-    ]:
-        r = _oc(["get", "namespace", ns], check=False)
-        if r.returncode != 0:
-            _oc(["create", "namespace", ns])
-        for lbl in labels:
-            k, v = lbl.split("=", 1)
-            _oc(["label", "namespace", ns, f"{k}={v}", "--overwrite"], check=False)
-
-    # 2. LLMInferenceService (Distributed inference)
-    print("\n=== Step 2: LLMInferenceService ===")
+    # 1. LLMInferenceService (Distributed inference)
+    print("\n=== Step 1: LLMInferenceService ===")
     llm_service = {
         "apiVersion": "serving.kserve.io/v1alpha1",
         "kind": "LLMInferenceService",
@@ -190,8 +173,8 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
     }
     _apply_yaml(llm_service, serving_ns)
 
-    # 3. MaaSModelRef
-    print("\n=== Step 3: MaaSModelRef ===")
+    # 2. MaaSModelRef
+    print("\n=== Step 2: MaaSModelRef ===")
     maas_ref = {
         "apiVersion": "maas.opendatahub.io/v1alpha1",
         "kind": "MaaSModelRef",
@@ -212,8 +195,8 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
     }
     _apply_yaml(maas_ref, serving_ns)
 
-    # 4. MaaSAuthPolicy
-    print("\n=== Step 4: MaaSAuthPolicy ===")
+    # 3. MaaSAuthPolicy
+    print("\n=== Step 3: MaaSAuthPolicy ===")
     auth_policy_name = f"{safe_name}-access"
     auth_policy = {
         "apiVersion": "maas.opendatahub.io/v1alpha1",
@@ -240,7 +223,7 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
     _apply_yaml(auth_policy, policy_ns)
 
     # 5. MaaSSubscriptions
-    print("\n=== Step 5: MaaSSubscriptions ===")
+    print("\n=== Step 4: MaaSSubscriptions ===")
     sub_free_name = f"{safe_name}-free"
     sub_free = {
         "apiVersion": "maas.opendatahub.io/v1alpha1",
@@ -296,11 +279,11 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
     _apply_yaml(sub_premium, policy_ns)
 
     # 6. Wait for readiness
-    print("\n=== Step 6: Waiting for LLMInferenceService readiness ===")
+    print("\n=== Step 5: Waiting for LLMInferenceService readiness ===")
     ready = _wait_for_llm_ready(safe_name, serving_ns)
 
     # 7. Write deployment info
-    print("\n=== Step 7: Writing MaaS deployment info ===")
+    print("\n=== Step 6: Writing MaaS deployment info ===")
     cluster_domain = subprocess.run(
         ["oc", "get", "ingresses.config/cluster", "-o", "jsonpath={.spec.domain}"],
         capture_output=True, text=True,

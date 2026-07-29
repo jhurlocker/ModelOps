@@ -157,6 +157,9 @@ func (r *ModelRequestReconciler) Reconcile(
 		if err := r.ensurePromotionNamespaceRBAC(ctx, ns); err != nil {
 			return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", err.Error())
 		}
+		if err := r.ensureMaaSNamespaceLabels(ctx, ns); err != nil {
+			return r.failRequest(ctx, &modelRequest, "NamespaceSetupFailed", err.Error())
+		}
 
 		prName := fmt.Sprintf("%s-promotion-%s", modelRequest.Name, ns)
 		promotionRun := tektonv1.PipelineRun{}
@@ -431,6 +434,35 @@ func (r *ModelRequestReconciler) ensureEvalHubTenantLabel(ctx context.Context, n
 		return fmt.Errorf("failed to label namespace %s: %w", namespace, err)
 	}
 	log.FromContext(ctx).Info("added evalhub tenant label to namespace", "namespace", namespace)
+	return nil
+}
+
+func (r *ModelRequestReconciler) ensureMaaSNamespaceLabels(ctx context.Context, namespace string) error {
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
+	}
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+	needsUpdate := false
+	for _, l := range []struct{ k, v string }{
+		{"opendatahub.io/generated-namespace", "true"},
+		{"maas.opendatahub.io/gateway-access", "true"},
+		{"opendatahub.io/dashboard", "true"},
+	} {
+		if ns.Labels[l.k] != l.v {
+			ns.Labels[l.k] = l.v
+			needsUpdate = true
+		}
+	}
+	if !needsUpdate {
+		return nil
+	}
+	if err := r.Update(ctx, &ns); err != nil {
+		return fmt.Errorf("failed to label namespace %s for MaaS: %w", namespace, err)
+	}
+	log.FromContext(ctx).Info("added MaaS labels to namespace", "namespace", namespace)
 	return nil
 }
 
@@ -740,8 +772,8 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	} else {
 		addParam(&p, "deploy-maas", "false")
 	}
-	addParam(&p, "maas-serving-ns", strOrDefault(cfg.Spec.MaaSServingNS, "llm"))
-	addParam(&p, "maas-policy-ns", strOrDefault(cfg.Spec.MaaSPolicyNS, "models-as-a-service"))
+	addParam(&p, "maas-serving-ns", strOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
+	addParam(&p, "maas-policy-ns", strOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
 	addParam(&p, "maas-gpu-count", maasGPU)
 	addParam(&p, "maas-runtime-image", strOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
 	addParam(&p, "maas-authorized-group", strOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
