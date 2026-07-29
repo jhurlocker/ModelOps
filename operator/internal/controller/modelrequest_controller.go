@@ -113,7 +113,7 @@ func (r *ModelRequestReconciler) Reconcile(
 	err = r.Get(ctx, sandboxKey, &sandboxRun)
 
 	if apierrors.IsNotFound(err) {
-		if rbacErr := r.ensurePromotionNamespaceRBAC(ctx, modelRequest.Namespace); rbacErr != nil {
+		if rbacErr := r.ensurePromotionNamespaceRBAC(ctx, modelRequest.Namespace, modelRequest.Namespace); rbacErr != nil {
 			return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", rbacErr.Error())
 		}
 		sandboxRun = buildPipelineRun(sandboxRunName, modelRequest.Namespace,
@@ -154,7 +154,7 @@ func (r *ModelRequestReconciler) Reconcile(
 	anyRunning := false
 
 	for i, ns := range promoNamespaces {
-		if err := r.ensurePromotionNamespaceRBAC(ctx, ns); err != nil {
+		if err := r.ensurePromotionNamespaceRBAC(ctx, ns, modelRequest.Namespace); err != nil {
 			return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", err.Error())
 		}
 		if err := r.ensureMaaSNamespaceLabels(ctx, ns); err != nil {
@@ -594,26 +594,26 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	return p
 }
 
-func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Context, namespace string) error {
+func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Context, targetNS, sourceNS string) error {
 	logger := log.FromContext(ctx)
 
 	sa := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pipeline",
-			Namespace: namespace,
+			Namespace: targetNS,
 		},
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(sa), &corev1.ServiceAccount{}); apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, sa); err != nil {
-			return fmt.Errorf("failed to create pipeline SA in %s: %w", namespace, err)
+			return fmt.Errorf("failed to create pipeline SA in %s: %w", targetNS, err)
 		}
-		logger.Info("created pipeline ServiceAccount", "namespace", namespace)
+		logger.Info("created pipeline ServiceAccount", "namespace", targetNS)
 	}
 
 	rb := &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "pipeline-edit",
-			Namespace: namespace,
+			Namespace: targetNS,
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
@@ -624,20 +624,45 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			{
 				Kind:      "ServiceAccount",
 				Name:      "pipeline",
-				Namespace: namespace,
+				Namespace: sourceNS,
 			},
 		},
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(rb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, rb); err != nil {
-			return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", namespace, err)
+			return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", targetNS, err)
 		}
-		logger.Info("created pipeline-edit RoleBinding", "namespace", namespace)
+		logger.Info("created pipeline-edit RoleBinding", "namespace", targetNS)
+	}
+
+	maasRb := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pipeline-maas-deployer",
+			Namespace: targetNS,
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "pipeline-maas-deployer",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      "pipeline",
+				Namespace: sourceNS,
+			},
+		},
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(maasRb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, maasRb); err != nil {
+			return fmt.Errorf("failed to create pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
+		}
+		logger.Info("created pipeline-maas-deployer RoleBinding", "namespace", targetNS)
 	}
 
 	evalhubCrb := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("%s-pipeline-evalhub", namespace),
+			Name: fmt.Sprintf("%s-pipeline-evalhub", sourceNS),
 			Labels: map[string]string{
 				"app.kubernetes.io/part-of":     "modelops",
 				"app.kubernetes.io/managed-by":  "modelops-operator",
@@ -652,15 +677,15 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			{
 				Kind:      "ServiceAccount",
 				Name:      "pipeline",
-				Namespace: namespace,
+				Namespace: sourceNS,
 			},
 		},
 	}
 	if err := r.Get(ctx, client.ObjectKeyFromObject(evalhubCrb), &rbacv1.ClusterRoleBinding{}); apierrors.IsNotFound(err) {
 		if err := r.Create(ctx, evalhubCrb); err != nil {
-			return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", namespace, err)
+			return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", targetNS, err)
 		}
-		logger.Info("created evalhub ClusterRoleBinding", "namespace", namespace)
+		logger.Info("created evalhub ClusterRoleBinding", "namespace", targetNS)
 	}
 
 	return nil

@@ -1,0 +1,17 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipeline-maas-deployer
+  labels:
+    app.kubernetes.io/name: modelops-operator
+    app.kubernetes.io/managed-by: modelops-operator
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceservices", "llminferenceserviceconfigs"]
+    verbs: ["*"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasauthpolicies", "maasmodelrefs", "maassubscriptions", "externalmodels", "tenants"]
+    verbs: ["*"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["servingruntimes", "inferenceservices"]
+    verbs: ["get", "list", "watch"]

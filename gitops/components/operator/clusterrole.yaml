@@ -149,3 +149,20 @@ rules:
       - watch
       - patch
       - update
+  - apiGroups:
+      - serving.kserve.io
+    resources:
+      - llminferenceservices
+      - llminferenceserviceconfigs
+    verbs:
+      - "*"
+  - apiGroups:
+      - maas.opendatahub.io
+    resources:
+      - maasauthpolicies
+      - maasmodelrefs
+      - maassubscriptions
+      - externalmodels
+      - tenants
+    verbs:
+      - "*"
