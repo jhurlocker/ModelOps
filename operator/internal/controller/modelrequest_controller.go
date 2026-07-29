@@ -9,6 +9,7 @@ import (
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,8 +37,9 @@ type ModelRequestReconciler struct {
 // +kubebuilder:rbac:groups=tekton.dev,resources=pipelineruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch
 
@@ -94,6 +96,10 @@ func (r *ModelRequestReconciler) Reconcile(
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if labelErr := r.ensureEvalHubTenantLabel(ctx, modelRequest.Namespace); labelErr != nil {
+		logger.Error(labelErr, "failed to label namespace for EvalHub")
 	}
 
 	secrets, secretErr := r.resolveSecrets(ctx, &modelRequest)
@@ -323,9 +329,17 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 		if err != nil {
 			return nil, err
 		}
-		s.evalhubToken = string(secret.Data["token"])
 		if v, ok := secret.Data["url"]; ok {
 			s.scanS3Endpoint = string(v)
+		}
+	}
+	if s.evalhubToken == "" {
+		token, err := r.generateServiceAccountToken(ctx, mr.Namespace, "pipeline")
+		if err != nil {
+			logger := log.FromContext(ctx)
+			logger.Error(err, "failed to generate EvalHub token for pipeline SA, falling back to empty")
+		} else {
+			s.evalhubToken = token
 		}
 	}
 
@@ -377,6 +391,47 @@ func (r *ModelRequestReconciler) readSecret(ctx context.Context, namespace, name
 		return nil, fmt.Errorf("Secret %q not found: %w", name, err)
 	}
 	return &secret, nil
+}
+
+func (r *ModelRequestReconciler) generateServiceAccountToken(ctx context.Context, namespace, saName string) (string, error) {
+	tr := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			ExpirationSeconds: ptrInt64(900),
+		},
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: namespace,
+		},
+	}
+	if err := r.SubResource("token").Create(ctx, sa, tr); err != nil {
+		return "", fmt.Errorf("failed to create token for %s/%s: %w", namespace, saName, err)
+	}
+	return tr.Status.Token, nil
+}
+
+func ptrInt64(i int64) *int64 {
+	return &i
+}
+
+func (r *ModelRequestReconciler) ensureEvalHubTenantLabel(ctx context.Context, namespace string) error {
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
+	}
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+	if _, ok := ns.Labels["evalhub.trustyai.opendatahub.io/tenant"]; ok {
+		return nil
+	}
+	ns.Labels["evalhub.trustyai.opendatahub.io/tenant"] = ""
+	if err := r.Update(ctx, &ns); err != nil {
+		return fmt.Errorf("failed to label namespace %s: %w", namespace, err)
+	}
+	log.FromContext(ctx).Info("added evalhub tenant label to namespace", "namespace", namespace)
+	return nil
 }
 
 func fromMap(val, fallback string) string {

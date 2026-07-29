@@ -99,6 +99,35 @@ rules:
       - get
       - list
       - watch
+  # ServiceAccounts (create pipeline SA, generate tokens)
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+  # Namespaces (label tenant namespaces for EvalHub)
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
   # Events
   - apiGroups:
       - ""
