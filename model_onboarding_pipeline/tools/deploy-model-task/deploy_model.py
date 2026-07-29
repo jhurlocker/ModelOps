@@ -378,10 +378,12 @@ spec:
 def _deploy_maas():
     print("\n=== MaaS (LLMInferenceService) deployment ===")
     from maas_deploy import deploy as maas_deploy_func
+    modelcar_uri = _resolve_modelcar_uri()
+    print(f"--- Using modelcar image: {modelcar_uri} ---")
     maas_deploy_func(
         model_name=RELEASE_NAME,
         model_id=MODEL_ID,
-        modelcar_image=MODELCAR_IMAGE,
+        modelcar_image=modelcar_uri,
         serving_ns=MAAS_SERVING_NS,
         policy_ns=MAAS_POLICY_NS,
         gpu_count=MAAS_GPU_COUNT,
