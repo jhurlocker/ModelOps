@@ -396,7 +396,7 @@ func (r *ModelRequestReconciler) readSecret(ctx context.Context, namespace, name
 func (r *ModelRequestReconciler) generateServiceAccountToken(ctx context.Context, namespace, saName string) (string, error) {
 	tr := &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{
-			ExpirationSeconds: ptrInt64(900),
+			ExpirationSeconds: ptrInt64(86400),
 		},
 	}
 	sa := &corev1.ServiceAccount{
