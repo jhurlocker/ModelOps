@@ -11,6 +11,6 @@ RUN pip install --no-cache-dir requests pyyaml && \
 USER 1001
 
 COPY deploy_model.py /usr/local/bin/deploy-model
-COPY maas_deploy.py /usr/local/bin/maas-deploy
+COPY maas_deploy.py /usr/local/bin/maas_deploy.py
 
 ENTRYPOINT ["python3", "/usr/local/bin/deploy-model"]

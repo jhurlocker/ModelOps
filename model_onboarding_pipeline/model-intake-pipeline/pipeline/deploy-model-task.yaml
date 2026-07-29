@@ -87,7 +87,7 @@ spec:
       name: shared-workspace
   steps:
     - name: deploy
-      image: quay.io/jhurlocker/deploy-model-task:v0.1.0
+      image: quay.io/jhurlocker/deploy-model-task:v0.1.1
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: RELEASE_NAME
