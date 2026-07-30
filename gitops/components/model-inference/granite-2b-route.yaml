@@ -1,0 +1,16 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: granite-2b-inference
+  labels:
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/name: granite-2b
+    app.kubernetes.io/part-of: modelops
+spec:
+  port:
+    targetPort: 8000
+  tls:
+    termination: passthrough
+  to:
+    kind: Service
+    name: granite-2b-kserve-workload-svc

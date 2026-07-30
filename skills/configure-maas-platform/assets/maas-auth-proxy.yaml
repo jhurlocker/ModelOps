@@ -1,0 +1,210 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redhat-ods-applications
+  annotations:
+    openshift.io/description: ""
+    openshift.io/display-name: ""
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maas-auth-proxy
+rules:
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maas-auth-proxy
+  namespace: redhat-ods-applications
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maas-auth-proxy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maas-auth-proxy
+subjects:
+- kind: ServiceAccount
+  name: maas-auth-proxy
+  namespace: redhat-ods-applications
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maas-auth-proxy
+  namespace: redhat-ods-applications
+data:
+  proxy.py: |
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import ssl, json, urllib.request, logging
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
+
+    MAAS_API = "https://maas-api.redhat-ods-applications.svc.cluster.local:8443"
+    K8S_API = "https://kubernetes.default.svc"
+    K8S_TOKEN = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read().strip()
+    CA = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+    class Proxy(BaseHTTPRequestHandler):
+        def _forward(self, method, body=None):
+            path = self.path
+            auth = self.headers.get("Authorization", "")
+            logging.info(f"{method} {path}")
+
+            headers = {}
+            for k, v in self.headers.items():
+                hl = k.lower()
+                if hl not in ("host", "content-length",
+                              "x-maas-username", "x-maas-group",
+                              "x-maas-group-oc", "x-maas-subscription"):
+                    headers[k] = v
+
+            username = "unknown"
+            groups_json = "[]"
+            if auth.startswith("Bearer "):
+                token = auth[7:]
+                try:
+                    ctx = ssl.create_default_context(cafile=CA)
+                    treq = urllib.request.Request(
+                        f"{K8S_API}/apis/authentication.k8s.io/v1/tokenreviews",
+                        data=json.dumps({
+                            "apiVersion": "authentication.k8s.io/v1",
+                            "kind": "TokenReview",
+                            "spec": {"token": token}
+                        }).encode(),
+                        headers={
+                            "Authorization": f"Bearer {K8S_TOKEN}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json"
+                        },
+                        method="POST"
+                    )
+                    resp = urllib.request.urlopen(treq, context=ctx, timeout=10)
+                    result = json.loads(resp.read())
+                    status = result.get("status", {})
+                    if status.get("authenticated"):
+                        user = status.get("user", {})
+                        username = user.get("username", "unknown")
+                        groups = user.get("groups", [])
+                        groups_json = json.dumps(groups)
+                        logging.info(f"OK: {username} groups={groups_json}")
+                    else:
+                        logging.warning(f"Not authenticated: {status.get('error')}")
+                except Exception as e:
+                    logging.error(f"TokenReview: {e}")
+
+            headers["X-MaaS-Username"] = username
+            headers["X-MaaS-Group"] = groups_json
+
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            maas_req = urllib.request.Request(
+                f"{MAAS_API}{path}", data=body,
+                headers=headers, method=method
+            )
+            try:
+                resp = urllib.request.urlopen(maas_req, context=ctx, timeout=60)
+                self.send_response(resp.status)
+                for k, v in resp.getheaders():
+                    if k.lower() not in ("transfer-encoding",):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(resp.read())
+            except urllib.error.HTTPError as e:
+                self.send_response(e.code)
+                for k, v in e.headers.items():
+                    if k.lower() not in ("transfer-encoding",):
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(e.read())
+            except Exception as e:
+                logging.error(f"Forward: {e}")
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+        def do_GET(self):
+            self._forward("GET")
+
+        def do_POST(self):
+            cl = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(cl) if cl else None
+            self._forward("POST", body)
+
+        def do_PUT(self):
+            cl = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(cl) if cl else None
+            self._forward("PUT", body)
+
+        def do_DELETE(self):
+            self._forward("DELETE")
+
+        def do_PATCH(self):
+            cl = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(cl) if cl else None
+            self._forward("PATCH", body)
+
+    if __name__ == "__main__":
+        server = HTTPServer(("0.0.0.0", 8443), Proxy)
+        logging.info("Auth proxy on :8443")
+        server.serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maas-auth-proxy
+  namespace: redhat-ods-applications
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maas-auth-proxy
+  template:
+    metadata:
+      labels:
+        app: maas-auth-proxy
+    spec:
+      serviceAccountName: maas-auth-proxy
+      containers:
+      - name: proxy
+        image: registry.access.redhat.com/ubi9/python-311:latest
+        command: ["python3", "/opt/proxy/proxy.py"]
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: proxy-script
+          mountPath: /opt/proxy
+      volumes:
+      - name: proxy-script
+        configMap:
+          name: maas-auth-proxy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maas-auth-proxy
+  namespace: redhat-ods-applications
+spec:
+  ports:
+  - port: 8443
+    targetPort: 8443
+    protocol: TCP
+  selector:
+    app: maas-auth-proxy

@@ -76,6 +76,13 @@ oc get crd authpolicies.kuadrant.io
 oc get crd ratelimitpolicies.kuadrant.io
 ```
 
+If LLMInferenceServices are already deployed and stuck in `Pending`, the `llmisvc-controller-manager` may have cached the CRD absence. Restart it:
+
+```bash
+oc rollout restart deployment llmisvc-controller-manager -n redhat-ods-applications
+oc wait -n redhat-ods-applications --for=condition=Available deployment/llmisvc-controller-manager --timeout=120s
+```
+
 ### Step 2: Configure Authorino TLS
 
 The Wasm plugin trusts ONLY the OpenShift service CA. Do NOT use self-signed certificates.
@@ -313,6 +320,62 @@ curl -sk --connect-timeout 5 "https://maas.${CLUSTER_DOMAIN}/maas-api/health"
 
 Expected: `{"status":"healthy"}`.
 
+### Step 11: Auth Proxy Fallback (when kuadrant WASM enforcement fails)
+
+If the kuadrant AuthPolicy WASM plugin cannot enforce authentication (Gateway logs show `Failed to dispatch gRPC call to kuadrant-auth-service`, or `AuthPolicy` status shows `Enforced: False`), deploy a lightweight auth proxy that handles TokenReview and header injection without the Gateway.
+
+**Symptoms requiring this step:**
+- `curl https://maas.<cluster>/maas-api/health` returns 200, but authenticated requests return 500 `"Exception thrown while generating token"`
+- MaaS API logs show `Missing or empty username header header="X-MaaS-Username"`
+- Dashboard shows warning `"Models as a Service could not be loaded"`
+
+```bash
+CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+
+# 1. Deploy the auth proxy
+oc apply -f skills/configure-maas-platform/assets/maas-auth-proxy.yaml
+oc wait -n redhat-ods-applications --for=condition=Available deployment/maas-auth-proxy --timeout=120s
+
+# 2. Point the MaaS Route at the proxy
+oc delete route maas-api -n redhat-ods-applications --ignore-not-found
+cat <<EOF | oc apply -f -
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: maas-api
+  namespace: redhat-ods-applications
+  annotations:
+    haproxy.router.openshift.io/rewrite-target: /
+  labels:
+    app.kubernetes.io/component: api
+    app.kubernetes.io/name: maas-api
+    app.kubernetes.io/part-of: models-as-a-service
+spec:
+  host: maas.\${CLUSTER_DOMAIN}
+  path: /maas-api
+  port:
+    targetPort: 8443
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: maas-auth-proxy
+EOF
+
+# 3. Restart the dashboard
+oc rollout restart deployment rhods-dashboard -n redhat-ods-applications
+oc wait -n redhat-ods-applications --for=condition=Available deployment/rhods-dashboard --timeout=120s
+
+# 4. Verify
+curl -sk -H "Authorization: Bearer \$(oc whoami -t)" \
+  -X POST -H "Content-Type: application/json" -d '{}' \
+  "https://maas.\${CLUSTER_DOMAIN}/maas-api/v1/api-keys/search"
+# Expected: {"object":"list","data":null,"has_more":false}
+```
+
+See [auth-proxy.md](references/auth-proxy.md) for detailed architecture, tear-down, and troubleshooting.
+
 ## Gateway OOMKill Prevention
 
 LLMInferenceService deployment triggers Kuadrant Wasm extensions that can push the Istio gateway past the default 1Gi memory limit:
@@ -330,8 +393,13 @@ oc delete pods -n openshift-ingress -l app=istio-ingressgateway
 - **Rhcl-operator install plan never appears**: Broken subscriptions in `openshift-operators` block the catalog-operator sync loop. See Step 1 cleanup commands.
 - **MaaS namespace not labeled for Gateway access**: Without `maas.opendatahub.io/gateway-access=true`, HTTPRoutes from the namespace are rejected.
 - **MaaS API returns 401/403/429**: 401 = invalid API key, 403 = MaaSAuthPolicy denies access, 429 = rate limit hit.
+- **LLMInferenceService stuck in Pending after kuadrant install**: `llmisvc-controller-manager` caches CRD availability. Restart it. See Step 1.
+- **AuthPolicy not enforced (Enforced: False, MissingResource)**: The `Kuadrant` CR is missing or kuadrant controller isn't running. Create the Kuadrant CR — the operator needs it to wire Authorino, Limitador, and Wasm.
+- **Kuadrant WASM plugin fails to load**: Authorino gRPC may be unreachable from the Gateway Envoy. Try restarting the Gateway first. If `Failed to dispatch gRPC call` persists, deploy the auth proxy fallback (Step 11).
+- **maas-ui cannot reach MaaS API (503/500)**: The Gateway Route may not correctly forward traffic. Use the auth proxy fallback (Step 11) to bypass Gateway auth routing.
 
 ## References
 
 - [DNS hijacking recovery procedure](references/dns-hijacking.md)
 - [MaaS LLMInferenceService troubleshooting](references/troubleshooting-maas.md)
+- [Auth proxy fallback (bypass kuadrant WASM)](references/auth-proxy.md)

@@ -26,6 +26,7 @@ spec:
   hardwareProfileName: gpu-profile
   hardwareProfileNamespace: redhat-ods-applications
   evalhubUrl: default-evalhub-redhat-ods-applications.apps.ocp.wpmzp.sandbox2855.opentlc.com
+  approvalApiUrl: http://model-intake.sandbox.svc.cluster.local:8080
   approvalPollIntervalSeconds: 15
   approvalTimeoutSeconds: 3600
   benchmarkProfile: constant
