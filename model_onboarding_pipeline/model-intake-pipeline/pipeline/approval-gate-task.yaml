@@ -55,7 +55,7 @@ spec:
       description: Workspace holding gpu-advisor artifacts
   steps:
     - name: submit-and-wait
-      image: quay.io/jhurlocker/approval-gate:v0.1.0
+      image: quay.io/jhurlocker/approval-gate:v0.1.3
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_ID
