@@ -230,6 +230,8 @@ spec:
       env:
         - name: HF_HOME
           value: /tmp/hf_home
+        - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+          value: '1'
       image: '{SR_VLLM_IMAGE}'
       name: kserve-container
       ports:
