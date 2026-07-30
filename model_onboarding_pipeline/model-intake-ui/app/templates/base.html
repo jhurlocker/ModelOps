@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Model Intake Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="/static/js/app.js" defer></script>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <h2 class="sidebar-title">Model Intake</h2>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="/" class="nav-item {% if active_page == 'overview' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+                Overview
+            </a>
+            <a href="/requests" class="nav-item {% if active_page == 'requests' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+                Model Requests
+            </a>
+            <a href="/intake" class="nav-item {% if active_page == 'intake' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+                New Request
+            </a>
+            <a href="/approvals" class="nav-item {% if active_page == 'approvals' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+                Approvals
+            </a>
+            <a href="/gpu-inventory" class="nav-item {% if active_page == 'gpu_inventory' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M21 10.12h-6.78l-2.83-2.83-1.42 1.41L12.39 7H7V3h14v7.12zM3 13.88h6.78l2.83 2.83 1.42-1.41L11.61 17H17v4H3v-7.12z"/></svg>
+                GPU Inventory
+            </a>
+            <a href="/platform-health" class="nav-item {% if active_page == 'platform_health' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm-7 7H3v4c0 1.1.9 2 2 2h4v-2H5v-4zM5 5h4V3H5c-1.1 0-2 .9-2 2v4h2V5zm14-2h-4v2h4v4h2V5c0-1.1-.9-2-2-2zm0 16h-4v2h4c1.1 0 2-.9 2-2v-4h-2v4z"/></svg>
+                Platform Health
+                {% if platform_health_status == 'Degraded' %}<span class="nav-badge warning">!</span>{% endif %}
+            </a>
+            <a href="/configuration" class="nav-item {% if active_page == 'configuration' %}active{% endif %}">
+                <svg class="nav-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                Configuration
+            </a>
+        </nav>
+    </aside>
+    <main class="main-content">
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

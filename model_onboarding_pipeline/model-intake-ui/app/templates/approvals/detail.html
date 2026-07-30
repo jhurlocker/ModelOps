@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div>
+        <h1>{{ plan.plan_id }}</h1>
+        <p>
+            <span class="badge {{ 'badge-warning' if plan.status == 'pending' else 'badge-success' if plan.status == 'approved' else 'badge-danger' }}">
+                {{ plan.status }}
+            </span>
+            {% if plan.decided_by %} decided by {{ plan.decided_by }}{% endif %}
+        </p>
+    </div>
+    <a href="/approvals" class="btn btn-outline">Back to Approvals</a>
+</div>
+
+<div class="card">
+    <div class="card-header">Plan Details</div>
+    <div class="card-body" style="font-size:13px">
+        <table>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0;width:180px">Model</td><td>{{ plan.model_name or plan.model_id or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Target Namespace</td><td>{{ plan.target_namespace or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Requested By</td><td>{{ plan.requested_by or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Plan Status</td><td>
+                <span class="badge {{ 'badge-success' if plan.plan_status == 'CAPACITY_AVAILABLE' else 'badge-danger' }}">{{ plan.plan_status or '—' }}</span>
+            </td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Pipeline Run</td><td>{{ plan.pipelinerun_name or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Created</td><td>{{ plan.created_at or '—' }}</td></tr>
+        </table>
+    </div>
+</div>
+
+{% if recommendation %}
+<div class="card">
+    <div class="card-header">GPU Advisor Recommendation</div>
+    <div class="card-body">
+        <pre style="white-space:pre-wrap;font-family:system-ui;font-size:14px;line-height:1.6">{{ recommendation }}</pre>
+    </div>
+</div>
+{% endif %}
+
+{% if vllm_cmd %}
+<div class="card">
+    <div class="card-header">Recommended vLLM Command</div>
+    <div class="card-body">
+        <div class="yaml-panel">{{ vllm_cmd }}</div>
+    </div>
+</div>
+{% endif %}
+
+{% if inventory %}
+<div class="card">
+    <div class="card-header">GPU Inventory</div>
+    <div class="card-body">
+        <pre style="font-size:13px;white-space:pre-wrap">{{ inventory | tojson(indent=2) if inventory is mapping else inventory }}</pre>
+    </div>
+</div>
+{% endif %}
+
+{% if options %}
+<div class="card">
+    <div class="card-header">Deployment Options</div>
+    <div class="card-body">
+        <pre style="font-size:13px;white-space:pre-wrap">{{ options | tojson(indent=2) if options is mapping else options }}</pre>
+    </div>
+</div>
+{% endif %}
+
+{% if plan.status == 'pending' %}
+<div class="card">
+    <div class="card-header">Decision</div>
+    <div class="card-body">
+        <div style="display:flex;gap:16px;align-items:flex-start">
+            <form method="POST" action="/approvals/{{ plan.plan_id }}/approve" style="flex:1">
+                <div class="form-group">
+                    <label>Comment (optional)</label>
+                    <textarea name="comment" rows="2" placeholder="Approval note..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-success">Approve</button>
+            </form>
+            <form method="POST" action="/approvals/{{ plan.plan_id }}/reject" style="flex:1">
+                <div class="form-group">
+                    <label>Comment (optional)</label>
+                    <textarea name="comment" rows="2" placeholder="Rejection reason..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-danger">Reject</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-header">Decision Record</div>
+    <div class="card-body" style="font-size:13px">
+        <table>
+            <tr><td style="font-weight:600;padding:4px 16px 4px 0;width:140px">Decision</td><td><span class="badge {{ 'badge-success' if plan.status == 'approved' else 'badge-danger' }}">{{ plan.status }}</span></td></tr>
+            <tr><td style="font-weight:600;padding:4px 16px 4px 0">Decided By</td><td>{{ plan.decided_by or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 16px 4px 0">Comment</td><td>{{ plan.decision_comment or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 16px 4px 0">Decided At</td><td>{{ plan.updated_at or '—' }}</td></tr>
+        </table>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

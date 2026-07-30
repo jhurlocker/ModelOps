@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block content %}
+{% set meta = request.metadata %}
+{% set spec = request.spec %}
+{% set status = request.status or {} %}
+{% set conditions = status.conditions or [] %}
+{% set phase = status.phase or 'Unknown' %}
+{% set ready = False %}
+{% for c in conditions %}
+    {% if c.type == 'Ready' and c.status == 'True' %}{% set ready = True %}{% endif %}
+{% endfor %}
+
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div>
+        <h1>{{ meta.name }}</h1>
+        <p>
+            <span class="badge {{ 'badge-success' if phase in ('Completed','Succeeded') else 'badge-danger' if phase == 'Failed' else 'badge-warning' if phase in ('Pending','Evaluating') else 'badge-info' }}" style="margin-right:8px">
+                {{ phase }}
+            </span>
+            {{ 'Ready' if ready else 'Not Ready' }}
+        </p>
+    </div>
+    <a href="/requests" class="btn btn-outline">Back to List</a>
+</div>
+
+<div class="card">
+    <div class="card-header">Spec</div>
+    <div class="card-body" style="font-size:13px">
+        <table>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0;width:180px">Model Source</td><td>{{ spec.model.sourceType if spec.model else '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Model URI</td><td>{{ spec.model.uri if spec.model else '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Model Name</td><td>{{ spec.model.name if spec.model else '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Lifecycle Profile</td><td>{{ spec.lifecycleProfile or '—' }}</td></tr>
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0">Requester</td><td>{{ spec.requestedBy or '—' }}</td></tr>
+            <tr>
+                <td style="font-weight:600;padding:4px 24px 4px 0">Pipeline Run</td>
+                <td>
+                    {% set pr_name = meta.name + '-sandbox' %}
+                    {{ pr_name }}
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+{% if spec.requirements %}
+<div class="card">
+    <div class="card-header">Requirements</div>
+    <div class="card-body" style="font-size:13px">
+        <table>
+            {% for key, val in spec.requirements.items() %}
+            <tr><td style="font-weight:600;padding:4px 24px 4px 0;width:180px">{{ key }}</td><td>{{ val }}</td></tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% endif %}
+
+{% if conditions %}
+<div class="card">
+    <div class="card-header">Conditions</div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table>
+                <thead><tr><th>Type</th><th>Status</th><th>Reason</th><th>Message</th><th>Last Transition</th></tr></thead>
+                <tbody>
+                    {% for c in conditions %}
+                    <tr>
+                        <td><strong>{{ c.type }}</strong></td>
+                        <td>
+                            <span class="badge {{ 'badge-success' if c.status == 'True' else 'badge-danger' if c.status == 'False' else 'badge-warning' }}">
+                                {{ c.status }}
+                            </span>
+                        </td>
+                        <td>{{ c.reason or '—' }}</td>
+                        <td>{{ c.message or '—' }}</td>
+                        <td>{{ c.lastTransitionTime or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header collapsible-header" onclick="this.nextElementSibling.classList.toggle('open')">
+        Raw YAML <span style="font-size:12px;color:var(--color-text-muted);font-weight:400">(click to expand)</span>
+    </div>
+    <div class="collapsible-content">
+        <div class="yaml-panel" style="margin:16px;border-radius:var(--radius)"><pre>{{ request | tojson(indent=2) }}</pre></div>
+    </div>
+</div>
+{% endblock %}

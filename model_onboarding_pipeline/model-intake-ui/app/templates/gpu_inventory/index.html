@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div>
+        <h1>GPU Inventory</h1>
+        <p>Physical inventory, scheduler allocation, and runtime telemetry across GPU nodes.</p>
+    </div>
+    <div class="form-group" style="margin:0">
+        <select id="view-toggle" onchange="toggleView()" style="width:220px">
+            <option value="physical">Physical GPUs</option>
+            <option value="schedulable">Schedulable GPU Resources</option>
+        </select>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        Summary
+        <span style="font-weight:400;font-size:13px;color:var(--color-text-muted)">{{ total_allocated }} / {{ total_capacity }} GPUs allocated</span>
+    </div>
+    <div class="card-body" style="font-size:13px">
+        <div class="filter-bar">
+            <select><option>All Nodes</option></select>
+            <select><option>All Products</option></select>
+            <select><option>All Namespaces</option></select>
+            <select><option>All Allocation Modes</option></select>
+            <select><option>All Health</option></select>
+            <select><option>All GPUs</option><option>Allocated</option><option>Available</option></select>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        {% if gpu_rows %}
+        <div class="table-wrapper">
+            <table id="physical-view">
+                <thead>
+                    <tr>
+                        <th>Node</th>
+                        <th>GPU</th>
+                        <th>Product</th>
+                        <th>Partitioning</th>
+                        <th>Allocated Workloads</th>
+                        <th>Utilization</th>
+                        <th>VRAM</th>
+                        <th>Health</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for gpu in gpu_rows %}
+                    <tr class="gpu-row">
+                        <td>{{ gpu.node_name }}</td>
+                        <td>GPU {{ gpu.gpu_index }}</td>
+                        <td>{{ gpu.product }}</td>
+                        <td>{{ gpu.partitioning }}</td>
+                        <td>
+                            {% if gpu.workloads %}
+                                {% for wl in gpu.workloads %}{{ wl }}{% if not loop.last %}, {% endif %}{% endfor %}
+                            {% elif gpu.allocated %}
+                                (allocated)
+                            {% else %}
+                                <span style="color:var(--color-text-muted)">Available</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            <span class="{{ 'badge badge-warning' if gpu.utilization|replace('%','')|int > warning_threshold else '' }}">
+                                {{ gpu.utilization }}
+                            </span>
+                        </td>
+                        <td>{{ gpu.vram }}</td>
+                        <td>
+                            <span class="badge {{ 'badge-warning' if gpu.health == 'Warning' else 'badge-success' }}">
+                                {{ gpu.health }}
+                            </span>
+                        </td>
+                    </tr>
+                    <tr class="gpu-expand">
+                        <td colspan="8">
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+                                <div>
+                                    <h4 style="font-size:14px;margin-bottom:8px">Node: {{ gpu.node_name }}</h4>
+                                    <table style="font-size:13px">
+                                        <tr><td style="font-weight:600;padding:3px 16px 3px 0">GPU</td><td>{{ gpu.product }} ({{ gpu.memory }})</td></tr>
+                                        <tr><td style="font-weight:600;padding:3px 16px 3px 0">Partitioning</td><td>{{ gpu.partitioning }}</td></tr>
+                                        {% if gpu.mig_enabled %}
+                                        <tr><td style="font-weight:600;padding:3px 16px 3px 0">MIG Config</td><td>{{ gpu.mig_config }}</td></tr>
+                                        {% endif %}
+                                    </table>
+                                </div>
+                                <div>
+                                    <h4 style="font-size:14px;margin-bottom:8px">Workloads</h4>
+                                    {% if gpu.workloads %}
+                                    <ul style="font-size:13px;list-style:none">
+                                        {% for wl in gpu.workloads %}
+                                        <li style="padding:3px 0">{{ wl }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                    {% else %}
+                                    <span style="font-size:13px;color:var(--color-text-muted)">No workloads</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            {% if gpu.time_slicing_replicas > 1 %}
+                            <div style="margin-top:12px;padding:8px 12px;background:var(--color-warning-light);border-radius:var(--radius);font-size:12px">
+                                <strong>Time-slicing note:</strong> Utilization is measured for the physical GPU. Per-model utilization attribution is unavailable for time-sliced GPUs.
+                            </div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <table id="schedulable-view" style="display:none">
+                <thead>
+                    <tr>
+                        <th>Node</th>
+                        <th>Parent GPU</th>
+                        <th>Schedulable Resource</th>
+                        <th>Workload</th>
+                        <th>Utilization</th>
+                        <th>Memory</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for gpu in gpu_rows %}
+                    {% if gpu.mig_enabled %}
+                    <tr>
+                        <td>{{ gpu.node_name }}</td>
+                        <td>GPU {{ gpu.gpu_index }}</td>
+                        <td>MIG: {{ gpu.mig_config }}</td>
+                        <td>{% for wl in gpu.workloads %}{{ wl }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+                        <td>{{ gpu.utilization }}</td>
+                        <td>{{ gpu.vram }}</td>
+                    </tr>
+                    {% elif gpu.time_slicing_replicas > 1 %}
+                    {% for i in range(gpu.time_slicing_replicas) %}
+                    <tr>
+                        <td>{{ gpu.node_name }}</td>
+                        <td>GPU {{ gpu.gpu_index }}</td>
+                        <td>Time-slice replica {{ i + 1 }}/{{ gpu.time_slicing_replicas }}</td>
+                        <td>{{ gpu.workloads[i] if i < gpu.workloads|length else 'Available' }}</td>
+                        <td><span style="color:var(--color-text-muted)">N/A (shared)</span></td>
+                        <td><span style="color:var(--color-text-muted)">N/A (shared)</span></td>
+                    </tr>
+                    {% endfor %}
+                    {% else %}
+                    <tr>
+                        <td>{{ gpu.node_name }}</td>
+                        <td>GPU {{ gpu.gpu_index }}</td>
+                        <td>Dedicated</td>
+                        <td>{% for wl in gpu.workloads %}{{ wl }}{% if not loop.last %}, {% endif %}{% else %}Available{% endfor %}</td>
+                        <td>{{ gpu.utilization }}</td>
+                        <td>{{ gpu.vram }}</td>
+                    </tr>
+                    {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h3>No GPU nodes found</h3>
+            <p>No nodes with <code>nvidia.com/gpu.present=true</code> label detected.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+function toggleView() {
+    var v = document.getElementById('view-toggle').value;
+    document.getElementById('physical-view').style.display = v === 'physical' ? '' : 'none';
+    document.getElementById('schedulable-view').style.display = v === 'schedulable' ? '' : 'none';
+}
+</script>
+{% endblock %}

@@ -1,0 +1,359 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>New Model Request</h1>
+    <p>Submit a new model for onboarding. Complete all four steps to create a ModelRequest.</p>
+</div>
+
+<form method="POST" action="/intake/submit" class="wizard-form wizard-container">
+    <div class="wizard-steps">
+        <div class="wizard-step active">
+            <span class="step-number">1</span> Model
+        </div>
+        <div class="wizard-step">
+            <span class="step-number">2</span> Workload
+        </div>
+        <div class="wizard-step">
+            <span class="step-number">3</span> Governance
+        </div>
+        <div class="wizard-step">
+            <span class="step-number">4</span> Review
+        </div>
+    </div>
+
+    <!-- Step 1: Model Identity -->
+    <div class="wizard-step-panel">
+        <h2 style="margin-bottom:20px">Select the Model</h2>
+        <div class="form-group">
+            <label>Model Source</label>
+            <select name="model-source">
+                <option value="huggingface" {% if defaults['model-source'] == 'huggingface' %}selected{% endif %}>Hugging Face</option>
+                <option value="s3">S3 Object Store</option>
+                <option value="oci">OCI Container Registry</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Model Identifier *</label>
+            <p class="form-hint">Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct), S3 URI, or OCI image reference.</p>
+            <input type="text" name="model-id" value="{{ defaults['model-id'] }}" required>
+        </div>
+        <div class="form-group">
+            <label>Model Name *</label>
+            <p class="form-hint">Auto-generated from model identifier. Kubernetes-safe name for deployment.</p>
+            <input type="text" name="model-name" value="{{ defaults['model-name'] }}" required>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Version</label>
+                <input type="text" name="model-version" value="{{ defaults['model-version'] }}">
+            </div>
+            <div class="form-group">
+                <label>Display Name</label>
+                <input type="text" name="display-name" placeholder="Human-friendly name" value="">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Requester</label>
+                <input type="text" name="requested-by" value="{{ defaults['requested-by'] }}" placeholder="Your name or email">
+            </div>
+            <div class="form-group">
+                <label>Business Justification</label>
+                <input type="text" name="business-justification" placeholder="Why this model is needed">
+            </div>
+        </div>
+
+        <div class="wizard-actions">
+            <div></div>
+            <button type="button" class="btn btn-primary wizard-next">Next</button>
+        </div>
+    </div>
+
+    <!-- Step 2: Workload -->
+    <div class="wizard-step-panel" style="display:none">
+        <h2 style="margin-bottom:20px">Describe the Workload</h2>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Maximum Context Length</label>
+                <input type="number" name="context-length" value="{{ defaults['context-length'] }}" placeholder="32768">
+            </div>
+            <div class="form-group">
+                <label>Expected Concurrent Requests</label>
+                <input type="number" name="concurrency" value="{{ defaults['concurrency'] }}" placeholder="4">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Expected Request Rate (req/s)</label>
+                <input type="text" name="request-rate" value="{{ defaults['request-rate'] }}" placeholder="Optional">
+            </div>
+            <div class="form-group">
+                <label>Target TTFT (ms)</label>
+                <input type="text" name="target-ttft" value="{{ defaults['target-ttft'] }}" placeholder="Optional">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Target Throughput (tokens/s)</label>
+                <input type="text" name="target-throughput" value="{{ defaults['target-throughput'] }}" placeholder="Optional">
+            </div>
+            <div class="form-group">
+                <label>Isolation Requirement</label>
+                <p class="form-hint">Derives GPU allocation policy.</p>
+                <select name="gpu-isolation-policy">
+                    <option value="shared" {% if defaults['gpu-isolation-policy'] == 'shared' %}selected{% endif %}>Shared capacity is acceptable</option>
+                    <option value="dedicated" {% if defaults['gpu-isolation-policy'] == 'dedicated' %}selected{% endif %}>Dedicated GPU resources</option>
+                    <option value="isolated" {% if defaults['gpu-isolation-policy'] == 'isolated' %}selected{% endif %}>Strong hardware isolation required</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="wizard-actions">
+            <button type="button" class="btn btn-outline wizard-prev">Previous</button>
+            <button type="button" class="btn btn-primary wizard-next">Next</button>
+        </div>
+    </div>
+
+    <!-- Step 3: Governance -->
+    <div class="wizard-step-panel" style="display:none">
+        <h2 style="margin-bottom:20px">Governance &amp; Destination</h2>
+        <div class="form-group">
+            <label>Lifecycle Profile</label>
+            <p class="form-hint">Determines required gates and policies.</p>
+            <select name="lifecycle-profile">
+                <option value="standard-generative-onboarding" {% if defaults['lifecycle-profile'] == 'standard-generative-onboarding' %}selected{% endif %}>
+                    Standard Generative Onboarding
+                </option>
+                <option value="quick-sandbox">Quick Sandbox</option>
+                <option value="production-generative">Production Generative</option>
+            </select>
+        </div>
+
+        <div class="card" style="margin-bottom:16px">
+            <div class="card-header">Resolved Policy Gates</div>
+            <div class="card-body" style="font-size:13px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Artifact scan
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> License evaluation
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Garak security evaluation
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Capacity benchmark
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Human approval
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                    <span style="color:var(--color-success);font-weight:700">&#10003;</span> Registry publication
+                </div>
+            </div>
+        </div>
+
+        <h3 style="margin-bottom:12px;font-size:15px">Promotion Environments</h3>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Sandbox Namespace</label>
+                <input type="text" value="sandbox" disabled style="background:#f1f5f9;color:var(--color-text-muted)">
+                <span class="policy-notice locked">Inherited from profile</span>
+            </div>
+            <div class="form-group">
+                <label>Staging Namespace</label>
+                <input type="text" name="promotion-namespace-0" value="staging" placeholder="staging">
+            </div>
+        </div>
+        <div id="promotion-namespaces-container">
+            <div class="form-group promotion-ns-entry">
+                <label>Production Namespace</label>
+                <input type="text" name="promotion-namespace-1" placeholder="production">
+            </div>
+        </div>
+        <button type="button" class="btn btn-outline btn-sm" onclick="addPromotionNamespace()">+ Add Promotion Namespace</button>
+
+        <h3 style="margin:20px 0 12px;font-size:15px">Access</h3>
+        <div class="form-row">
+            <div class="form-group">
+                <label>Authorized Users/Groups</label>
+                <input type="text" name="authorized-viewers" value="{{ defaults['authorized-viewers'] }}" placeholder="Comma-separated">
+            </div>
+            <div class="form-group">
+                <label>Access Role</label>
+                <select name="access-role">
+                    <option value="view" selected>View</option>
+                    <option value="use">Use</option>
+                    <option value="admin">Admin</option>
+                </select>
+            </div>
+        </div>
+
+        <h3 style="margin:20px 0 12px;font-size:15px">MaaS (Model-as-a-Service)</h3>
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="deploy-maas" value="true" {% if defaults['deploy-maas'] == 'true' %}checked{% endif %}>
+                Deploy to MaaS in production
+            </label>
+        </div>
+
+        <div class="wizard-actions">
+            <button type="button" class="btn btn-outline wizard-prev">Previous</button>
+            <button type="button" class="btn btn-primary wizard-next">Next</button>
+        </div>
+    </div>
+
+    <!-- Step 4: Review -->
+    <div class="wizard-step-panel" style="display:none">
+        <h2 style="margin-bottom:20px">Review &amp; Submit</h2>
+
+        <div class="card">
+            <div class="card-header">Summary</div>
+            <div class="card-body" style="font-size:13px">
+                <table style="margin-bottom:16px">
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0;width:180px">Model</td><td id="review-model-id">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Version</td><td id="review-version">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Requester</td><td id="review-requester">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Context Length</td><td id="review-context">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Concurrency</td><td id="review-concurrency">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Isolation</td><td id="review-isolation">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Lifecycle Profile</td><td id="review-profile">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Promotion Path</td><td id="review-promotions">—</td></tr>
+                    <tr><td style="font-weight:600;padding:4px 16px 4px 0">Access</td><td id="review-access">—</td></tr>
+                </table>
+            </div>
+        </div>
+
+        <!-- Expert Overrides Toggle -->
+        <div class="expert-toggle" style="margin-top:16px">
+            <label style="font-size:13px;font-weight:600">
+                <input type="checkbox"> Show expert overrides
+            </label>
+        </div>
+
+        <div class="expert-section">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Pipeline Override</label>
+                    <input type="text" name="pipeline-ref" placeholder="Override Tekton pipeline name">
+                </div>
+                <div class="form-group">
+                    <label>GPU Count Override</label>
+                    <input type="number" name="gpu-count-override" placeholder="Manual GPU count">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Advisor Endpoint</label>
+                    <input type="text" name="advisor-endpoint" placeholder="{{ defaults.get('advisor-endpoint', '') }}">
+                </div>
+                <div class="form-group">
+                    <label>OpenShift Console Domain</label>
+                    <input type="text" name="openshift-console-domain" placeholder="console-openshift-console.apps...">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Artifact CVE Threshold</label>
+                    <select name="artifact-cve-threshold">
+                        <option value="">Inherited from profile</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Security Severity Threshold</label>
+                    <select name="severity-threshold">
+                        <option value="">Inherited from profile</option>
+                        <option value="block">Block</option>
+                        <option value="warn">Warn</option>
+                        <option value="off">Off</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Helm Values Override (YAML)</label>
+                <textarea name="values-content" rows="4" placeholder="Raw Helm values content..."></textarea>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>EvalHub Secret Name</label>
+                    <input type="text" name="evalhub-secret-name" value="evalhub-credentials">
+                </div>
+                <div class="form-group">
+                    <label>Hugging Face Secret Name</label>
+                    <input type="text" name="huggingface-secret-name" placeholder="hf-secret">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>MaaS GPU Count</label>
+                    <input type="text" name="maas-gpu-count" placeholder="e.g., 2">
+                </div>
+                <div class="form-group">
+                    <label>MaaS Runtime Image</label>
+                    <input type="text" name="maas-runtime-image" placeholder="vLLM image override">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>MaaS Authorized Group</label>
+                <input type="text" name="maas-authorized-group" placeholder="Group allowed to access MaaS endpoint">
+            </div>
+        </div>
+
+        <div class="wizard-actions">
+            <button type="button" class="btn btn-outline wizard-prev">Previous</button>
+            <button type="submit" class="btn btn-primary">Submit Request</button>
+        </div>
+    </div>
+</form>
+
+<script>
+(function() {
+    const modelIdEl = document.querySelector('[name="model-id"]');
+    const modelVerEl = document.querySelector('[name="model-version"]');
+    const requesterEl = document.querySelector('[name="requested-by"]');
+    const contextEl = document.querySelector('[name="context-length"]');
+    const concurrencyEl = document.querySelector('[name="concurrency"]');
+    const isolationEl = document.querySelector('[name="gpu-isolation-policy"]');
+    const profileEl = document.querySelector('[name="lifecycle-profile"]');
+    const accessEl = document.querySelector('[name="authorized-viewers"]');
+
+    function updateReview() {
+        const el = (id) => document.getElementById(id);
+        const reviewModel = el('review-model-id');
+        const reviewVer = el('review-version');
+        const reviewReq = el('review-requester');
+        const reviewCtx = el('review-context');
+        const reviewCon = el('review-concurrency');
+        const reviewIso = el('review-isolation');
+        const reviewProf = el('review-profile');
+        const reviewAcc = el('review-access');
+        const reviewPromo = el('review-promotions');
+
+        if (reviewModel) reviewModel.textContent = modelIdEl ? modelIdEl.value : '--';
+        if (reviewVer) reviewVer.textContent = modelVerEl ? modelVerEl.value : '--';
+        if (reviewReq) reviewReq.textContent = requesterEl ? requesterEl.value || '(not set)' : '--';
+        if (reviewCtx) reviewCtx.textContent = contextEl ? contextEl.value : '--';
+        if (reviewCon) reviewCon.textContent = concurrencyEl ? concurrencyEl.value : '--';
+        if (reviewIso) reviewIso.textContent = isolationEl ? isolationEl.options[isolationEl.selectedIndex].text : '--';
+        if (reviewProf) reviewProf.textContent = profileEl ? profileEl.options[profileEl.selectedIndex].text : '--';
+        if (reviewAcc) reviewAcc.textContent = accessEl ? accessEl.value || '(not set)' : '--';
+
+        if (reviewPromo) {
+            var promos = [];
+            for (var i = 0; i < 5; i++) {
+                var el = document.querySelector('[name="promotion-namespace-' + i + '"]');
+                if (el && el.value) promos.push(el.value);
+            }
+            reviewPromo.textContent = promos.length ? promos.join(' -> ') : 'sandbox only';
+        }
+    }
+
+    setInterval(updateReview, 500);
+    updateReview();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>Platform Overview</h1>
+    <p>Quick summary of platform health, capacity, and items needing attention.</p>
+</div>
+
+<div class="metrics-grid">
+    <div class="metric-card info">
+        <div class="metric-label">GPU Capacity</div>
+        <div class="metric-value">{{ metrics.gpu_capacity }}</div>
+    </div>
+    <div class="metric-card {{ 'warning' if metrics.gpu_utilization|replace('%','')|int > 80 else 'info' }}">
+        <div class="metric-label">GPU Utilization</div>
+        <div class="metric-value">{{ metrics.gpu_utilization }}</div>
+    </div>
+    <div class="metric-card success">
+        <div class="metric-label">Models Deployed</div>
+        <div class="metric-value">{{ metrics.models_deployed }}</div>
+    </div>
+    <div class="metric-card {{ 'warning' if metrics.active_requests > 0 else 'info' }}">
+        <div class="metric-label">Active Requests</div>
+        <div class="metric-value">{{ metrics.active_requests }}</div>
+    </div>
+    <div class="metric-card {{ 'warning' if metrics.awaiting_approval > 0 else 'success' }}">
+        <div class="metric-label">Awaiting Approval</div>
+        <div class="metric-value">{{ metrics.awaiting_approval }}</div>
+    </div>
+    <div class="metric-card {{ 'danger' if metrics.platform_health == 'Degraded' else 'success' }}">
+        <div class="metric-label">Platform Health</div>
+        <div class="metric-value" style="font-size:22px">{{ metrics.platform_health }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">Needs Attention</div>
+    <div class="card-body">
+        {% if metrics.attention_items %}
+        <ul class="attention-list">
+            {% for item in metrics.attention_items %}
+            <li class="attention-item">
+                <div class="attention-icon {{ 'danger' if item.type == 'failed_request' else 'warning' }}">
+                    {{ '!' if item.type == 'failed_request' else '?' }}
+                </div>
+                <div class="attention-body">
+                    <h4>{{ item.title }}</h4>
+                    <p>{{ item.description }} — <a href="{{ item.link }}">View details</a></p>
+                </div>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty-state">
+            <h3>All clear</h3>
+            <p>No items need attention right now.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">Recent Pipeline Runs</div>
+    <div class="card-body">
+        {% if metrics.recent_pipeline_runs %}
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr><th>PipelineRun</th><th>Status</th><th>Started</th></tr>
+                </thead>
+                <tbody>
+                    {% for pr in metrics.recent_pipeline_runs %}
+                    <tr>
+                        <td>{{ pr.name }}</td>
+                        <td>
+                            <span class="badge {{ 'badge-success' if pr.status == 'Succeeded' else 'badge-danger' if pr.status == 'Failed' else 'badge-warning' if pr.status == 'Running' else 'badge-neutral' }}">
+                                {{ pr.status }}
+                            </span>
+                        </td>
+                        <td>{{ pr.started }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state"><p>No pipeline runs found.</p></div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

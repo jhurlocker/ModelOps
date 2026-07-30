@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div>
+        <h1>Model Requests</h1>
+        <p>All model onboarding requests from Kubernetes (source of truth).</p>
+    </div>
+    <a href="/intake" class="btn btn-primary">+ New Request</a>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        {% if items %}
+        <div class="filter-bar">
+            <select onchange="location = this.value">
+                <option value="?">All Phases</option>
+                <option value="?phase=Pending">Pending</option>
+                <option value="?phase=Evaluating">Evaluating</option>
+                <option value="?phase=Deploying">Deploying</option>
+                <option value="?phase=Completed">Completed</option>
+                <option value="?phase=Failed">Failed</option>
+            </select>
+        </div>
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Model</th>
+                        <th>Namespace</th>
+                        <th>Phase</th>
+                        <th>Ready</th>
+                        <th>Created</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    {% set meta = item.metadata %}
+                    {% set spec = item.spec %}
+                    {% set status = item.status %}
+                    {% set conditions = status.conditions or [] %}
+                    {% set phase = status.phase or 'Unknown' %}
+                    {% set ready = False %}
+                    {% for c in conditions %}
+                        {% if c.type == 'Ready' and c.status == 'True' %}{% set ready = True %}{% endif %}
+                    {% endfor %}
+                    <tr>
+                        <td><a href="/requests/{{ meta.name }}">{{ meta.name }}</a></td>
+                        <td>{{ spec.model.uri if spec.model else '—' }}</td>
+                        <td>{{ meta.namespace }}</td>
+                        <td>
+                            <span class="badge {{ 'badge-success' if phase in ('Completed','Succeeded') else 'badge-danger' if phase == 'Failed' else 'badge-warning' if phase in ('Pending','Evaluating') else 'badge-info' }}">
+                                {{ phase }}
+                            </span>
+                        </td>
+                        <td>{{ 'Yes' if ready else 'No' }}</td>
+                        <td>{{ meta.creationTimestamp }}</td>
+                        <td><a href="/requests/{{ meta.name }}" class="btn btn-outline btn-sm">Details</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <svg viewBox="0 0 24 24"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z"/></svg>
+            <h3>No model requests found</h3>
+            <p>Create a new request to get started.</p>
+            <a href="/intake" class="btn btn-primary" style="margin-top:12px">+ New Request</a>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
