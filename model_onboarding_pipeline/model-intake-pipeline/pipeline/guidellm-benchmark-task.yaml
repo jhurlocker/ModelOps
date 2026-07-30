@@ -52,6 +52,8 @@ spec:
       image: quay.io/jhurlocker/guidellm-benchmark:v0.1.5
       workingDir: $(workspaces.shared-workspace.path)
       env:
+        - name: REQUESTS_CA_BUNDLE
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN
