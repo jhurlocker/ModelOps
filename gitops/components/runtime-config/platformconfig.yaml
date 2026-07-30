@@ -25,7 +25,7 @@ spec:
   chartVersion: "0.7.1"
   hardwareProfileName: gpu-profile
   hardwareProfileNamespace: redhat-ods-applications
-  evalhubUrl: default-evalhub-redhat-ods-applications.apps.ocp.wpmzp.sandbox2855.opentlc.com
+  evalhubUrl: https://default-evalhub.redhat-ods-applications.svc.cluster.local:8443
   approvalApiUrl: http://model-intake.sandbox.svc.cluster.local:8080
   approvalPollIntervalSeconds: 15
   approvalTimeoutSeconds: 3600
