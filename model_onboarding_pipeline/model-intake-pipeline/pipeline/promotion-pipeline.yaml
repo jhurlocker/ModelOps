@@ -160,7 +160,7 @@ spec:
       default: "http://minio.modelops-storage.svc.cluster.local:9000"
     - name: s3-access-key-id
       type: string
-      default: "minio"
+      default: "minioadmin"
     - name: s3-secret-access-key
       type: string
       default: "minioadmin"

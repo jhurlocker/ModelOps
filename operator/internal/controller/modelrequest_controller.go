@@ -364,6 +364,16 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 		s.scanS3SecretKey = string(secret.Data["secretAccessKey"])
 	}
 
+	if s.scanS3Endpoint == "" {
+		s.scanS3Endpoint = "http://minio.modelops-storage.svc.cluster.local:9000"
+	}
+	if s.scanS3AccessKey == "" {
+		s.scanS3AccessKey = "minioadmin"
+	}
+	if s.scanS3SecretKey == "" {
+		s.scanS3SecretKey = "minioadmin"
+	}
+
 	if mr.Spec.ResultS3SecretName != "" {
 		secret, err := r.readSecret(ctx, mr.Namespace, mr.Spec.ResultS3SecretName)
 		if err != nil {
