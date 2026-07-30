@@ -5,12 +5,14 @@ import (
 )
 
 type ModelRequestSpec struct {
-	Model             ModelIdentity      `json:"model"`
-	LifecycleProfile  string             `json:"lifecycleProfile"`
-	PipelineRef       string             `json:"pipelineRef,omitempty"`
-	Requirements      *ModelRequirements `json:"requirements,omitempty"`
-	Access            *ModelAccess       `json:"access,omitempty"`
-	RequestedBy       string             `json:"requestedBy,omitempty"`
+	Model                ModelIdentity      `json:"model"`
+	DisplayName          string             `json:"displayName,omitempty"`
+	BusinessJustification string            `json:"businessJustification,omitempty"`
+	LifecycleProfile     string             `json:"lifecycleProfile"`
+	PipelineRef          string             `json:"pipelineRef,omitempty"`
+	Requirements         *ModelRequirements `json:"requirements,omitempty"`
+	Access               *ModelAccess       `json:"access,omitempty"`
+	RequestedBy          string             `json:"requestedBy,omitempty"`
 
 	EvalHubSecretName     string `json:"evalhubSecretName,omitempty"`
 	HuggingFaceSecretName string `json:"huggingfaceSecretName,omitempty"`
@@ -25,6 +27,7 @@ type ModelIdentity struct {
 	URI        string `json:"uri"`
 	Name       string `json:"name,omitempty"`
 	Version    string `json:"version,omitempty"`
+	Tokenizer  string `json:"tokenizer,omitempty"`
 }
 
 type ModelRequirements struct {
@@ -45,6 +48,9 @@ type ModelRequirements struct {
 	CustomBenchmarkData bool   `json:"customBenchmarkData,omitempty"`
 	CustomBenchmarkFile string `json:"customBenchmarkFile,omitempty"`
 	OpenShiftConsoleDomain string `json:"openshiftConsoleDomain,omitempty"`
+	RequestRate          string `json:"requestRate,omitempty"`
+	TargetTTFT           string `json:"targetTTFT,omitempty"`
+	TargetThroughput     string `json:"targetThroughput,omitempty"`
 }
 
 type ModelAccess struct {

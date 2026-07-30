@@ -68,6 +68,8 @@ def submit():
             "version": form_data.get("model-version", "v1"),
             "tokenizer": form_data.get("model-tokenizer", ""),
         },
+        "displayName": form_data.get("display-name", ""),
+        "businessJustification": form_data.get("business-justification", ""),
         "lifecycleProfile": form_data.get("lifecycle-profile", LIFECYCLE_PROFILE),
         "requestedBy": form_data.get("requested-by", ""),
     }
@@ -82,6 +84,15 @@ def submit():
     iso = form_data.get("gpu-isolation-policy", "")
     if iso:
         reqs["gpuIsolationPolicy"] = iso
+    rr = form_data.get("request-rate", "")
+    if rr:
+        reqs["requestRate"] = rr
+    ttft = form_data.get("target-ttft", "")
+    if ttft:
+        reqs["targetTTFT"] = ttft
+    tp = form_data.get("target-throughput", "")
+    if tp:
+        reqs["targetThroughput"] = tp
 
     promotion_namespaces = []
     for i in range(5):

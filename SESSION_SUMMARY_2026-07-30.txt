@@ -1,0 +1,100 @@
+# Session Summary — 2026-07-30
+# EvalHub Guidellm Provider Fix & Benchmark End-to-End Verification
+
+## Primary Objective
+Fix the guidellm benchmark failure in the promotion pipeline. The benchmark task submitted to EvalHub but got 404/401 because the `guidellm` provider was not registered in the EvalHub CR.
+
+## Root Causes (3 distinct issues fixed)
+
+### 1. EvalHub guidellm Provider Not Registered (CRITICAL)
+**Symptom:** `POST /api/v1/evaluations/jobs` → `404 "The provider resource 'guidellm' was not found"`
+**Cause:** The EvalHub CR `spec.providers` only listed `[garak, garak-kfp, lm-evaluation-harness]`. The TrustyAI operator created the provider ConfigMap (`trustyai-service-operator-evalhub-provider-guidellm`) but the EvalHub CR didn't activate it.
+**Fix:** Added `guidellm` to the EvalHub CR providers list via `oc patch`, then committed to GitOps (`gitops/components/evalhub/evalhub-cr.yaml`):
+```yaml
+spec:
+  providers:
+  - garak
+  - garak-kfp
+  - lm-evaluation-harness
+  - guidellm
+```
+Commit: `d8ad15e`
+
+### 2. Staging Namespace Missing EvalHub Tenant Label
+**Symptom:** EvalHub authorization maps `X-Tenant` header to namespace. Without the tenant label, EvalHub may reject requests.
+**Fix:** Labeled staging namespace: `oc label ns staging evalhub.trustyai.opendatahub.io/tenant=`
+GitOps already has `staging-namespace.yaml` with this label — it just wasn't applied to the cluster namespace.
+
+### 3. Guidellm Benchmark Rate Validation (ALREADY FIXED from July 28)
+**Symptom (if rate=1):** Guidellm sweep profile validation error: `sweep_size >= 2 required, got 1`
+**Confirmed working:** The controller already defaults to `guidellm-rate: 4.0`. Tested manually with rate=1 (fails) and rate=4.0 (succeeds). The `community-guidellm:v0.2.0` adapter always maps benchmark requests to `--profile sweep`. With rate=4.0, the sweep has multiple rate levels → works. With rate=1, single level → fails. This was fixed July 28 and confirmed still valid.
+
+## End-to-End Verification
+
+### Promotion Pipeline Run: `model-intake-833e8b954a-promotion-staging`
+**Result: SUCCESS**
+
+All 8 tasks completed:
+| Task | Status | Duration |
+|------|--------|----------|
+| gpu-advisor | ✅ True | ~60s |
+| wait-for-approval | ✅ True | ~15s |
+| apply-gpu-sharing | ✅ True | ~5s |
+| deploy-model | ✅ True | ~30s |
+| grant-model-access | ✅ True | ~5s |
+| benchmark | ✅ True | ~100s |
+| upload-guidellm-results | ✅ True | ~10s |
+| register-model-and-results | ✅ True | ~10s |
+
+### EvalHub Benchmark Results
+Job ID: `66bea7f2-11b2-4b46-81c4-4a82b5784426`
+```
+output_tokens_per_second: 44.57 ✅ PASS (threshold: 10.0)
+prompt_tokens_per_second:  141.01
+requests_per_second:       0.33
+mean_ttft_ms:              31.44
+mean_itl_ms:               22.41
+```
+
+### Benchmark Runtime Parameters
+- Profile: `constant` (mapped internally by adapter to `--profile sweep`)
+- Rate: `4.0`
+- Max seconds: `15`
+- Max requests: `2`
+- Actual duration: ~80 seconds (rate=4 with 6 requests requires ~72-80s on this setup)
+
+## Controller Defaults (Verified Working)
+File: `operator/internal/controller/modelrequest_controller.go`
+```go
+addParam(&p, "guidellm-profile", "constant")
+addParam(&p, "guidellm-rate", "4.0")          // MUST be >= 2
+addParam(&p, "guidellm-max-seconds", "15")
+addParam(&p, "guidellm-max-requests", "2")
+```
+
+## Completed from Previous Session
+All items from SESSION_SUMMARY_2026-07-29 carried over and resolved:
+- ✅ Configurable benchmark target URL (MaaS → `https://{model}-kserve-workload-svc.{ns}.svc:8000/v1`)
+- ✅ Fixed EvalHub URL to internal service DNS
+- ✅ Added REQUESTS_CA_BUNDLE for EvalHub TLS verification
+- ✅ Removed `--enable-ssl-refresh` from vLLM (cert rotation fix)
+- ✅ PlatformConfig `approvalApiUrl` for deployment plan UI
+
+## Remaining / Known Issues
+- **Gateway WASM:** Pod restart kills WASM plugin. Known Envoy V8 race condition. Passthrough Route is the workaround.
+- **granite-2b-kserve-599f9cb74c-l68d5:** Old replica stuck in Pending (0/2) from previous deployment. Needs manual cleanup.
+- **Controller aggressive reconciliation:** Deleting PipelineRuns triggers recreation. Expected behavior.
+- **benchmark.py polling:** Uses 30 attempts × 10s = 300s max. The benchmark with rate=4 took ~80s (completed in 10 polls). If EvalHub job is slow, it could exhaust the polls.
+
+## GitOps State
+All changes pushed to `feat/model-request-controller`:
+- `535022b` — fix EvalHub URL to internal service
+- `e93b2b0` — add REQUESTS_CA_BUNDLE to guidellm task
+- `d8ad15e` — add guidellm to EvalHub providers (today)
+
+## Key Learnings
+1. EvalHub `spec.providers` controls which benchmarks are available. Provider ConfigMaps from the TrustyAI operator are NOT sufficient — they must be listed in the EvalHub CR.
+2. The `community-guidellm:v0.2.0` adapter always generates `--profile sweep` internally. The benchmark `id` (constant, concurrent, etc.) influences parameters but not the profile selection.
+3. Guidellm sweep needs `sweep_size >= 2`. Rate=4 gives enough rate levels. Rate=1 fails. NEVER set rate below 2.
+4. EvalHub Kubernetes Jobs are created in the tenant namespace (staging), not the EvalHub namespace.
+5. The benchmark task (`quay.io/jhurlocker/guidellm-benchmark:v0.1.5`) submits via `/api/v1/evaluations/jobs`, polls for completion, and saves results to workspace.

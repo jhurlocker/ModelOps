@@ -1,0 +1,258 @@
+# Session Summary — 2026-07-29
+# Operator Auto-Token Generation, MaaS Deployment RBAC, and EvalHub 401 Fix
+
+## Primary Objective
+Fix the EvalHub 401 error in the security-scan step, ensure the MaaS deployment works end-to-end in the promotion pipeline, and eliminate all manual credential management. The operator must auto-generate tokens and set up all required RBAC automatically.
+
+## Key Accomplishments
+
+### 1. EvalHub Token Auto-Generation (CRITICAL)
+Replaced the static `evalhubToken` secret approach with dynamic SA token generation via the Kubernetes `TokenRequest` API.
+
+#### The Problem
+- The `evalhub-credentials` secret stored a manually created OAuth token.
+- The runtime-config GitOps component removed the `token` field from the secret (only `url` remained).
+- Operator code read `secret.Data["token"]` which was empty → `s.evalhubToken` stayed empty → pipeline received empty `evalhub-token` → security-scan got 401.
+
+#### The Solution
+File: `operator/internal/controller/modelrequest_controller.go`
+```go
+func (r *ModelRequestReconciler) generateServiceAccountToken(ctx context.Context, namespace, saName string) (string, error) {
+    tr := &authenticationv1.TokenRequest{
+        Spec: authenticationv1.TokenRequestSpec{
+            ExpirationSeconds: ptrInt64(86400),  // 24 hours (was 900 = 15 min)
+        },
+    }
+    sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: saName, Namespace: namespace}}
+    if err := r.SubResource("token").Create(ctx, sa, tr); err != nil {
+        return "", fmt.Errorf("failed to create token for %s/%s: %w", namespace, saName, err)
+    }
+    return tr.Status.Token, nil
+}
+```
+Called from `resolveSecrets()` when `s.evalhubToken == ""` (i.e., no token in the secret).
+
+#### Token Lifetime
+- **DO NOT set ExpirationSeconds below 86400 (24 hours)**. The sandbox pipeline runs compliance → GPU advisor → GPU sharing → deploy → security-scan, which can take 10+ minutes. The promotion pipeline takes even longer. A short-lived token will expire mid-pipeline.
+- The token is generated once per PipelineRun creation and passed as a param. It must outlast the entire pipeline run.
+
+#### RBAC Required
+Operator SA must have `serviceaccounts/token` create verb (in ClusterRole):
+```yaml
+- apiGroups: [""]
+  resources: ["serviceaccounts/token"]
+  verbs: ["create"]
+```
+
+#### Deployment Gotcha
+- When building the operator image, `podman` aggressively caches layers. A `COPY internal/` may hit cache even if source files changed. **Always use `--no-cache` or a unique timestamp tag** when the Go source changes.
+- Even with `imagePullPolicy: Always`, CRI-O on OpenShift nodes may cache images by tag. **Always use a unique version tag** (e.g., `v0.2.N-$(date +%s)`) after code changes to guarantee a fresh pull.
+- ArgoCD self-heal will revert any `oc set image` changes. **Update the GitOps `deployment.yaml` and let ArgoCD sync**, or disable auto-sync temporarily.
+
+### 2. EvalHub Tenant Namespace Label
+The sandbox namespace must have the evalhub tenant label for security-scan and guidellm-benchmark EvalHub API calls.
+
+File: `operator/internal/controller/modelrequest_controller.go`
+```go
+func (r *ModelRequestReconciler) ensureEvalHubTenantLabel(ctx context.Context, namespace string) error {
+    // Labels namespace with: evalhub.trustyai.opendatahub.io/tenant=""
+}
+```
+Called during sandbox pipeline reconciliation (before PipelineRun creation).
+
+### 3. Operator `edit` ClusterRoleBinding
+The operator creates `pipeline-edit` RoleBindings in promotion namespaces which delegate the `edit` ClusterRole. For this to work, the operator's own SA must hold the `edit` ClusterRole.
+
+File: `gitops/components/operator/clusterrolebinding-edit.yaml`
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: modelops-operator-edit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: edit
+subjects:
+  - kind: ServiceAccount
+    name: modelops-operator
+    namespace: modelops
+```
+Without this, promotion pipelines fail with `RBACSetupFailed` because the operator cannot create RoleBindings delegating `edit`.
+
+### 4. Deploy-Model Task Fixes
+
+#### Containerfile: maas_deploy.py import
+File: `model_onboarding_pipeline/tools/deploy-model-task/Containerfile`
+```dockerfile
+# WRONG (dash — Python cannot import files with dashes):
+COPY maas_deploy.py /usr/local/bin/maas-deploy
+
+# CORRECT (underscore — matches `from maas_deploy import deploy`):
+COPY maas_deploy.py /usr/local/bin/maas_deploy.py
+```
+Image: `quay.io/jhurlocker/deploy-model-task:v0.1.1`
+
+#### Task reference
+File: `model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-model-task.yaml`
+```yaml
+image: quay.io/jhurlocker/deploy-model-task:v0.1.1
+```
+
+#### maas_deploy.py: namespace operations removed
+The deploy-model task runs as `sandbox:pipeline` which lacks cluster-scoped namespace permissions. The operator now handles all namespace labeling via `ensureMaaSNamespaceLabels()`. Removed Step 1 (namespace get/create/label) from `maas_deploy.py`.
+
+### 5. MaaS Deployment Namespace Fix
+
+#### PlatformConfig cleanup
+File: `gitops/components/runtime-config/platformconfig.yaml`
+**REMOVED** the following fields (they were overriding the operator's `targetNamespace` default):
+```yaml
+# REMOVED — no longer in PlatformConfig:
+# maasServingNs: llm
+# maasPolicyNs: models-as-a-service
+```
+
+#### Operator defaults
+File: `operator/internal/controller/modelrequest_controller.go` (in `buildPromotionPipelineParams`)
+```go
+// maas-serving-ns defaults to targetNamespace (e.g., "staging"), not "llm"
+addParam(&p, "maas-serving-ns", strOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
+addParam(&p, "maas-policy-ns", strOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
+```
+
+#### MaaS namespace labels
+File: `operator/internal/controller/modelrequest_controller.go`
+```go
+func (r *ModelRequestReconciler) ensureMaaSNamespaceLabels(ctx context.Context, namespace string) error {
+    // Labels namespace with:
+    //   opendatahub.io/generated-namespace=true
+    //   maas.opendatahub.io/gateway-access=true
+    //   opendatahub.io/dashboard=true
+}
+```
+Called after `ensurePromotionNamespaceRBAC` during promotion flow.
+
+### 6. MaaS CRD RBAC (CRITICAL — avoid repeating this work)
+
+#### The Problem
+The pipeline SA (`sandbox:pipeline`) needs to create MaaS CRDs in the promotion namespace:
+- `serving.kserve.io/v1alpha2`: `llminferenceservices`, `llminferenceserviceconfigs`
+- `maas.opendatahub.io/v1alpha1`: `maasauthpolicies`, `maasmodelrefs`, `maassubscriptions`, `externalmodels`, `tenants`
+
+The `edit` ClusterRole only covers standard Kubernetes resources, not CRDs.
+
+#### The Solution
+
+**1. ClusterRole `pipeline-maas-deployer`**
+File: `gitops/components/operator/clusterrole-maas.yaml`
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pipeline-maas-deployer
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceservices", "llminferenceserviceconfigs"]
+    verbs: ["*"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasauthpolicies", "maasmodelrefs", "maassubscriptions", "externalmodels", "tenants"]
+    verbs: ["*"]
+```
+
+**2. Operator ClusterRole (must include MaaS CRDs for delegation)**
+File: `gitops/components/operator/clusterrole.yaml`
+The operator's own ClusterRole (`modelops-operator-controller`) must include the same CRD permissions. Kubernetes RBAC escalation prevention: an SA cannot delegate permissions it doesn't itself hold.
+```yaml
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["llminferenceservices", "llminferenceserviceconfigs"]
+    verbs: ["*"]
+  - apiGroups: ["maas.opendatahub.io"]
+    resources: ["maasauthpolicies", "maasmodelrefs", "maassubscriptions", "externalmodels", "tenants"]
+    verbs: ["*"]
+```
+
+**3. Operator creates RoleBinding in promotion namespace**
+File: `operator/internal/controller/modelrequest_controller.go` → `ensurePromotionNamespaceRBAC()`
+```go
+maasRb := &rbacv1.RoleBinding{
+    ObjectMeta: metav1.ObjectMeta{Name: "pipeline-maas-deployer", Namespace: targetNS},
+    RoleRef: rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "pipeline-maas-deployer"},
+    Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "pipeline", Namespace: sourceNS}},
+}
+```
+
+**4. RoleBinding subject namespace is SOURCE (sandbox), NOT target (staging)**
+The PipelineRun runs in the `sandbox` namespace. Its pods use the `sandbox:pipeline` SA, not `staging:pipeline`. The `ensurePromotionNamespaceRBAC` function signature was changed:
+```go
+// OLD: func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Context, namespace string) error
+// NEW: func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Context, targetNS, sourceNS string) error
+```
+All RoleBinding subjects reference `sourceNS:pipeline` (sandbox). This applies to `pipeline-edit`, `pipeline-maas-deployer`, and `pipeline-evalhub-submitter` ClusterRoleBindings.
+
+## PlatformConfig ArgoCD Auto-Sync Warning
+When removing fields from PlatformConfig via `kubectl apply`, Kubernetes **does not** delete fields that are not in the new spec. Use a JSON patch:
+```bash
+kubectl patch platformconfig -n sandbox default-modelops-platform --type json \
+  -p '[{"op":"remove","path":"/spec/maasServingNs"},{"op":"remove","path":"/spec/maasPolicyNs"}]'
+```
+If ArgoCD auto-sync is enabled for `modelops-runtime-config`, it will revert any direct cluster edits. Either disable auto-sync temporarily or commit the fix to Git.
+
+## DO NOT CHANGE / REGRESSION RISKS
+
+### EvalHub Token
+- **NEVER** set `ExpirationSeconds` below 86400 (24 hours). Pipelines exceed 15 minutes.
+- **NEVER** revert to static `evalhubToken` from secrets — use `generateServiceAccountToken`.
+- The `serviceaccounts/token` create verb must remain in the operator ClusterRole.
+- The `evalhub.trustyai.opendatahub.io/tenant` label must be on the sandbox namespace.
+
+### MaaS Deployment
+- **NEVER** add `maasServingNs` or `maasPolicyNs` back to PlatformConfig — they override the targetNamespace default.
+- **NEVER** revert RoleBinding subjects to `staging:pipeline` — PipelineRun pods run as `sandbox:pipeline`.
+- **NEVER** remove `pipeline-maas-deployer` ClusterRole or the MaaS CRD permissions from the operator ClusterRole.
+- **NEVER** add namespace get/create/label back to `maas_deploy.py` Step 1 — pipeline SA lacks cluster-scope permissions.
+
+### Build & Deploy
+- **ALWAYS** use `--no-cache` or a unique timestamp tag when Go source changes.
+- **ALWAYS** update `gitops/components/operator/deployment.yaml` with the new image tag.
+- If CRI-O caches an old image digest, bump to a completely new unique tag.
+
+## Files Changed
+- `operator/internal/controller/modelrequest_controller.go`
+  - `generateServiceAccountToken()` — token lifetime 86400s
+  - `resolveSecrets()` — auto-generate token when secret has none
+  - `ensureEvalHubTenantLabel()` — tenant label on sandbox ns
+  - `ensureMaaSNamespaceLabels()` — MaaS gateway/dashboard labels on promotion ns
+  - `ensurePromotionNamespaceRBAC(ctx, targetNS, sourceNS)` — RoleBindings reference sourceNS
+  - `buildPromotionPipelineParams()` — maas-serving-ns/maas-policy-ns default to targetNamespace
+- `gitops/components/operator/clusterrole.yaml` — added MaaS CRD permissions
+- `gitops/components/operator/clusterrole-maas.yaml` — NEW: pipeline-maas-deployer ClusterRole
+- `gitops/components/operator/clusterrolebinding-edit.yaml` — operator edit ClusterRoleBinding
+- `gitops/components/operator/deployment.yaml` — image tag updates
+- `gitops/components/operator/kustomization.yaml` — added clusterrole-maas.yaml
+- `gitops/components/runtime-config/platformconfig.yaml` — removed maasServingNs/maasPolicyNs
+- `model_onboarding_pipeline/tools/deploy-model-task/Containerfile` — fixed maas_deploy.py path
+- `model_onboarding_pipeline/tools/deploy-model-task/maas_deploy.py` — removed namespace prep step
+- `model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-model-task.yaml` — v0.1.1
+
+## Cluster State (must persist across sessions)
+- Operator image: `quay.io/jhurlocker/modelops-operator:v0.2.14-1785296455`
+- Deploy-model task image: `quay.io/jhurlocker/deploy-model-task:v0.1.1`
+- ClusterRole `pipeline-evalhub-submitter` (trustyai + mlflow)
+- ClusterRole `pipeline-maas-deployer` (serving.kserve.io + maas.opendatahub.io)
+- ClusterRole `modelops-operator-controller` (includes MaaS CRDs for delegation)
+- ClusterRoleBinding `modelops-operator-edit` (operator SA → edit)
+- ClusterRoleBinding `<namespace>-pipeline-evalhub` (per-promotion-ns, created by operator)
+- RoleBinding `pipeline-edit` in each promotion namespace (SA: sandbox:pipeline)
+- RoleBinding `pipeline-maas-deployer` in each promotion namespace (SA: sandbox:pipeline)
+- ArgoCD apps: `modelops-operator`, `modelops-runtime-config` (auto-sync enabled)
+- PlatformConfig in `sandbox` namespace (no maasServingNs/maasPolicyNs fields)
+
+## Testing Checklist
+1. Verify EvalHub token in PipelineRun params is a non-empty JWT
+2. Verify security-scan task runs without 401
+3. Verify deploy-model task (MaaS mode) creates LLMInferenceService, MaaSModelRef, MaaSAuthPolicy, MaaSSubscriptions in the promotion namespace
+4. Verify LLMInferenceService reaches Ready state
+5. Verify promotion PipelineRun completes successfully
+6. Verify EvalHub tenant label present on sandbox namespace
+7. Verify MaaS labels present on promotion namespace (opendatahub.io/dashboard, maas.opendatahub.io/gateway-access)

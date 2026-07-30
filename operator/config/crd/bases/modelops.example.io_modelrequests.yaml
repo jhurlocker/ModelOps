@@ -46,6 +46,15 @@ spec:
                     version:
                       type: string
                       description: Version label for this onboarding run
+                    tokenizer:
+                      type: string
+                      description: Hugging Face tokenizer ID for GuideLLM benchmarks
+                displayName:
+                  type: string
+                  description: Human-friendly display name for the model
+                businessJustification:
+                  type: string
+                  description: Business reason for onboarding this model
                 lifecycleProfile:
                   type: string
                   description: Name of the ModelLifecycleProfile defining workflow, policy, and platform config
@@ -88,6 +97,12 @@ spec:
                     customBenchmarkFile:
                       type: string
                     openshiftConsoleDomain:
+                      type: string
+                    requestRate:
+                      type: string
+                    targetTTFT:
+                      type: string
+                    targetThroughput:
                       type: string
                 access:
                   type: object

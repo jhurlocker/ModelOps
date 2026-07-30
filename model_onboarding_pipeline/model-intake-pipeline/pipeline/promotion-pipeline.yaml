@@ -20,6 +20,19 @@ spec:
     - name: model-version
       type: string
       default: "v1"
+    - name: model-tokenizer
+      type: string
+      default: ""
+      description: "Hugging Face tokenizer ID for GuideLLM benchmarks"
+    - name: model-source-type
+      type: string
+      default: "huggingface"
+    - name: display-name
+      type: string
+      default: ""
+    - name: business-justification
+      type: string
+      default: ""
     - name: requested-by
       type: string
       default: ""
@@ -52,6 +65,15 @@ spec:
     - name: gpu-isolation-policy
       type: string
       default: "dedicated"
+    - name: request-rate
+      type: string
+      default: ""
+    - name: target-ttft
+      type: string
+      default: ""
+    - name: target-throughput
+      type: string
+      default: ""
     - name: gpu-operator-namespace
       type: string
       default: "nvidia-gpu-operator"

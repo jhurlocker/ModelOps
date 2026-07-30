@@ -13,7 +13,7 @@ spec:
   params:
     - name: model-id
       type: string
-      description: "Hugging Face model ID"
+      description: "Model identifier (Hugging Face ID, S3 URI, or OCI image reference)"
     - name: model-name
       type: string
       description: "Model name identifier"
@@ -22,6 +22,22 @@ spec:
       type: string
       default: "v1"
       description: "Model Registry version name"
+    - name: model-tokenizer
+      type: string
+      default: ""
+      description: "Hugging Face tokenizer ID for GuideLLM benchmarks"
+    - name: model-source-type
+      type: string
+      default: "huggingface"
+      description: "Model source type (huggingface, s3, oci)"
+    - name: display-name
+      type: string
+      default: ""
+      description: "Human-friendly display name for the model"
+    - name: business-justification
+      type: string
+      default: ""
+      description: "Business reason for onboarding this model"
     - name: requested-by
       type: string
       default: ""
@@ -90,6 +106,18 @@ spec:
     - name: gpu-isolation-policy
       type: string
       default: "dedicated"
+    - name: request-rate
+      type: string
+      default: ""
+      description: "Expected request rate (req/s)"
+    - name: target-ttft
+      type: string
+      default: ""
+      description: "Target time-to-first-token (ms)"
+    - name: target-throughput
+      type: string
+      default: ""
+      description: "Target throughput (tokens/s)"
     - name: gpu-operator-namespace
       type: string
       default: "nvidia-gpu-operator"

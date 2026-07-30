@@ -11,6 +11,9 @@ spec:
     uri: ibm-granite/granite-3.3-2b-instruct
     name: granite-2b
     version: v1
+    tokenizer: ibm-granite/granite-3.3-2b-instruct
+  displayName: Granite 2B
+  businessJustification: Internal chatbot Q&A
   lifecycleProfile: standard-generative-onboarding
   requirements:
     contextLength: 32768
@@ -20,6 +23,9 @@ spec:
     gpuIsolationPolicy: dedicated
     cveThreshold: critical
     securityThreshold: block
+    requestRate: "10"
+    targetTTFT: "200"
+    targetThroughput: "100"
     sandboxNamespace: sandbox
     stagingNamespace: staging
   access:
