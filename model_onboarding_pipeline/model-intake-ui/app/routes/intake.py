@@ -53,15 +53,10 @@ def intake_form():
 def submit():
     form_data = request.form.to_dict()
 
-    model_source = form_data.get("model-source", "huggingface")
-    model_uri = form_data.get("model-id", "")
-    if model_source == "oci" and not model_uri:
-        model_uri = form_data.get("oci-url", "")
-
     spec = {
         "model": {
-            "sourceType": model_source,
-            "uri": model_uri,
+            "sourceType": form_data.get("model-source", "huggingface"),
+            "uri": form_data.get("model-id", ""),
             "name": form_data.get("model-name", ""),
             "version": form_data.get("model-version", "v1"),
         },
