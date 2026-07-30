@@ -12,11 +12,17 @@ def check_operators():
 
     subscriptions = [
         {"name": "OpenShift Pipelines", "ns": "openshift-pipelines", "deploy": ("openshift-pipelines", "tekton-pipelines-controller")},
-        {"name": "NVIDIA GPU Operator", "ns": "nvidia-gpu-operator", "deploy": ("nvidia-gpu-operator", "nvidia-gpu-operator")},
+        {"name": "NVIDIA GPU Operator", "ns": "nvidia-gpu-operator", "deploy": ("nvidia-gpu-operator", "gpu-operator")},
         {"name": "OpenShift AI", "ns": "redhat-ods-operator", "deploy": ("redhat-ods-operator", "rhods-operator")},
     ]
 
+    all_checks = []
     for name, (ns, deploy_name) in operator_deployments.items():
+        all_checks.append((name, ns, deploy_name))
+    for sub in subscriptions:
+        all_checks.append((sub["name"], sub["ns"], sub["deploy"][1]))
+
+    for name, ns, deploy_name in all_checks:
         try:
             dep = apps_api().read_namespaced_deployment(name=deploy_name, namespace=ns)
             available = dep.status.available_replicas or 0
