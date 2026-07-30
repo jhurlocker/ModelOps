@@ -54,10 +54,16 @@ def intake_form():
 def submit():
     form_data = request.form.to_dict()
 
+    model_source = form_data.get("model-source", "huggingface")
+    model_uri = form_data.get("model-id", "").strip()
+
+    if model_source == "oci":
+        model_uri = _sanitize_oci_url(model_uri)
+
     spec = {
         "model": {
-            "sourceType": form_data.get("model-source", "huggingface"),
-            "uri": form_data.get("model-id", ""),
+            "sourceType": model_source,
+            "uri": model_uri,
             "name": form_data.get("model-name", ""),
             "version": form_data.get("model-version", "v1"),
             "tokenizer": form_data.get("model-tokenizer", ""),
@@ -137,3 +143,13 @@ def submit():
     create_model_request(req_name, spec)
 
     return redirect(url_for("requests.request_detail", name=req_name))
+
+
+def _sanitize_oci_url(url):
+    for prefix in ("https://", "http://", "docker://"):
+        if url.startswith(prefix):
+            url = url[len(prefix):]
+    modelcar_prefix = "quay.io/redhat-ai-services/modelcar-catalog:"
+    if url.startswith(modelcar_prefix):
+        url = url[len(modelcar_prefix):]
+    return url
