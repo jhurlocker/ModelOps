@@ -125,6 +125,18 @@ spec:
                 resultS3SecretName:
                   type: string
                   description: "K8s Secret name containing benchmark/eval S3 credentials"
+                resultS3Endpoint:
+                  type: string
+                  description: "Override S3 endpoint for uploading results (e.g. http://minio-service.s3-storage.svc.cluster.local:9000)"
+                resultS3AccessKey:
+                  type: string
+                  description: "Override S3 access key ID"
+                resultS3SecretKey:
+                  type: string
+                  description: "Override S3 secret access key"
+                resultS3Bucket:
+                  type: string
+                  description: "Override S3 bucket name for scan/eval results"
                 maas:
                   type: object
                   properties:

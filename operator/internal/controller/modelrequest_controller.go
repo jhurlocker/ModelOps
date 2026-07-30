@@ -384,6 +384,16 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 		s.resultS3SecretKey = "minio123"
 	}
 
+	if mr.Spec.ResultS3Endpoint != "" {
+		s.resultS3Endpoint = mr.Spec.ResultS3Endpoint
+	}
+	if mr.Spec.ResultS3AccessKey != "" {
+		s.resultS3AccessKey = mr.Spec.ResultS3AccessKey
+	}
+	if mr.Spec.ResultS3SecretKey != "" {
+		s.resultS3SecretKey = mr.Spec.ResultS3SecretKey
+	}
+
 	return s, nil
 }
 
@@ -586,8 +596,10 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "scan-s3-endpoint", secrets.scanS3Endpoint)
 	addParam(&p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
 	addParam(&p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
-	addParam(&p, "compliance-s3-bucket", strOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
-	addParam(&p, "security-s3-bucket", strOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
+	compBucket := strOrDefault(spec.ResultS3Bucket, strOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
+	secBucket := strOrDefault(spec.ResultS3Bucket, strOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
+	addParam(&p, "compliance-s3-bucket", compBucket)
+	addParam(&p, "security-s3-bucket", secBucket)
 	addParam(&p, "s3-ui-route", "")
 
 	addParam(&p, "s3-api-endpoint", secrets.resultS3Endpoint)

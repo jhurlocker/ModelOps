@@ -46,6 +46,10 @@ def intake_form():
         "deploy-maas": "false",
         "authorized-viewers": "",
         "access-role": "view",
+        "s3-endpoint": "http://minio-service.s3-storage.svc.cluster.local:9000",
+        "s3-bucket": "compliance-artifact-results",
+        "s3-access-key": "minio",
+        "s3-secret-key": "minio123",
     }
     return render_template("intake/wizard.html", defaults=defaults, active_page="intake")
 
@@ -141,6 +145,13 @@ def submit():
             "runtimeImage": form_data.get("maas-runtime-image", ""),
             "authorizedGroup": form_data.get("maas-authorized-group", ""),
         }
+
+    # S3 connection overrides (expert)
+    for field, json_key in [("s3-endpoint", "resultS3Endpoint"), ("s3-access-key", "resultS3AccessKey"),
+                             ("s3-secret-key", "resultS3SecretKey"), ("s3-bucket", "resultS3Bucket")]:
+        val = form_data.get(field, "")
+        if val:
+            spec[json_key] = val
 
     # Expert secret references
     for key in ("evalhub-secret-name", "huggingface-secret-name", "scan-s3-secret-name", "result-s3-secret-name"):

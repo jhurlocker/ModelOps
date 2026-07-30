@@ -307,6 +307,30 @@
                 <label>MaaS Authorized Group</label>
                 <input type="text" name="maas-authorized-group" placeholder="Group allowed to access MaaS endpoint">
             </div>
+            <div class="form-group" style="margin-top:12px;padding-top:12px;border-top:1px solid #ccc">
+                <label style="font-weight:600">S3 Connection Override</label>
+                <p style="font-size:11px;color:#666;margin:0 0 8px 0">Defaults: MinIO at minio-service.s3-storage.svc.cluster.local:9000</p>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>S3 Endpoint</label>
+                    <input type="text" name="s3-endpoint" value="{{ defaults.get('s3-endpoint', 'http://minio-service.s3-storage.svc.cluster.local:9000') }}">
+                </div>
+                <div class="form-group">
+                    <label>S3 Bucket</label>
+                    <input type="text" name="s3-bucket" value="{{ defaults.get('s3-bucket', 'compliance-artifact-results') }}">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>S3 Access Key ID</label>
+                    <input type="text" name="s3-access-key" value="{{ defaults.get('s3-access-key', 'minio') }}">
+                </div>
+                <div class="form-group">
+                    <label>S3 Secret Access Key</label>
+                    <input type="password" name="s3-secret-key" value="{{ defaults.get('s3-secret-key', 'minio123') }}">
+                </div>
+            </div>
         </div>
 
         <div class="wizard-actions">
