@@ -175,6 +175,10 @@ spec:
     - name: maas-authorized-group
       type: string
       default: "system:authenticated"
+    - name: benchmark-target-url
+      type: string
+      default: ""
+      description: "Override the benchmark inference endpoint URL. When empty, the pipeline constructs http://{model}-predictor.{ns}.svc.cluster.local:8080/v1"
     - name: run-register
       type: string
       default: "false"
@@ -323,7 +327,7 @@ spec:
     - name: benchmark
       params:
         - name: target
-          value: "http://$(params.model-name)-predictor.$(params.target-namespace).svc.cluster.local:8080/v1"
+          value: $(params.benchmark-target-url)
         - name: model-name
           value: $(params.model-name)
         - name: evalhub-url

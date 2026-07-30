@@ -38,6 +38,7 @@ type PlatformConfigSpec struct {
 	BenchmarkRate                  float64 `json:"benchmarkRate,omitempty"`
 	BenchmarkMaxSeconds            int     `json:"benchmarkMaxSeconds,omitempty"`
 	BenchmarkMaxRequests           int     `json:"benchmarkMaxRequests,omitempty"`
+	BenchmarkTargetUrl             string  `json:"benchmarkTargetUrl,omitempty"`
 
 	MaaSServingNS       string `json:"maasServingNs,omitempty"`
 	MaaSPolicyNS        string `json:"maasPolicyNs,omitempty"`

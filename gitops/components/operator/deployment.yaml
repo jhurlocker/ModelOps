@@ -19,7 +19,7 @@ spec:
       serviceAccountName: modelops-operator
       containers:
         - name: manager
-          image: quay.io/jhurlocker/modelops-operator:v0.2.14-1785296455
+          image: quay.io/jhurlocker/modelops-operator:v0.2.15
           imagePullPolicy: Always
           command:
             - /usr/local/bin/manager

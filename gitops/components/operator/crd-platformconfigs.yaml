@@ -81,6 +81,8 @@ spec:
                   type: integer
                 benchmarkMaxRequests:
                   type: integer
+                benchmarkTargetUrl:
+                  type: string
                 maasServingNs:
                   type: string
                 maasPolicyNs:

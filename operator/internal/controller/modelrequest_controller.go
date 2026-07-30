@@ -773,6 +773,13 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	addParam(&p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
 	addParam(&p, "guidellm-max-seconds", strconv.Itoa(intOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
 	addParam(&p, "guidellm-max-requests", strconv.Itoa(intOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
+	if cfg.Spec.BenchmarkTargetUrl != "" {
+		addParam(&p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
+	} else if spec.MaaS != nil && spec.MaaS.Enabled {
+		addParam(&p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", strOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+	} else {
+		addParam(&p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", strOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+	}
 	addParam(&p, "custom-data", strconv.FormatBool(reqs.CustomBenchmarkData))
 	addParam(&p, "custom-filename", strOrDefault(reqs.CustomBenchmarkFile, "no-file"))
 	addParam(&p, "huggingface-token", secrets.huggingfaceToken)

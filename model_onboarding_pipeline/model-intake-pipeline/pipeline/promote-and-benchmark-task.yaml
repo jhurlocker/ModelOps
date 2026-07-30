@@ -353,7 +353,7 @@ spec:
             max_sec = int(os.environ.get("GLM_MAX_SECONDS", "15"))
             max_req = int(os.environ.get("GLM_MAX_REQUESTS", "2"))
 
-            target = f"http://{model_name}-predictor.{ns}.svc.cluster.local:8080/v1"
+            target = os.environ.get("TARGET", "") or f"http://{model_name}-predictor.{ns}.svc.cluster.local:8080/v1"
             payload = {
                 "name": f"{model_name}-guidellm-{ns}",
                 "target": target,
