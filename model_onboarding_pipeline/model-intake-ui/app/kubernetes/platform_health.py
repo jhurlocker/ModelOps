@@ -7,7 +7,7 @@ def check_operators():
     operators = []
 
     operator_deployments = {
-        "ModelOps Operator": ("modelops-system", "modelops-controller-manager"),
+        "ModelOps Operator": ("modelops", "modelops-operator"),
     }
 
     subscriptions = [

@@ -34,8 +34,9 @@
         </div>
         <div class="form-group">
             <label>Model Identifier *</label>
-            <p class="form-hint">Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct), S3 URI, or OCI image reference.</p>
-            <input type="text" name="model-id" value="{{ defaults['model-id'] }}" required>
+            <p class="form-hint" id="model-id-hint">Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct)</p>
+            <input type="text" name="model-id" value="{{ defaults['model-id'] }}" required
+                   placeholder="ibm-granite/granite-3.3-2b-instruct">
         </div>
         <div class="form-group">
             <label>Model Name *</label>
@@ -354,6 +355,26 @@
 
     setInterval(updateReview, 500);
     updateReview();
+
+    var sourceSelect = document.querySelector('[name="model-source"]');
+    var hintEl = document.getElementById('model-id-hint');
+    if (sourceSelect && hintEl) {
+        var hints = {
+            huggingface: 'Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct)',
+            s3: 'S3 URI (e.g., s3://bucket/path/to/model/)',
+            oci: 'OCI image reference (e.g., quay.io/org/model:v1.0)'
+        };
+        var placeholders = {
+            huggingface: 'ibm-granite/granite-3.3-2b-instruct',
+            s3: 's3://my-bucket/models/granite-2b',
+            oci: 'quay.io/myorg/granite-2b:v1.0'
+        };
+        sourceSelect.addEventListener('change', function() {
+            var v = this.value;
+            hintEl.textContent = hints[v] || hints.huggingface;
+            if (modelIdEl) modelIdEl.placeholder = placeholders[v] || placeholders.huggingface;
+        });
+    }
 })();
 </script>
 {% endblock %}
