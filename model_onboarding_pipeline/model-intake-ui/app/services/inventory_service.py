@@ -1,4 +1,5 @@
 from app.kubernetes.model_requests import list_model_requests, list_capacity_plans, list_pipeline_runs
+from app.kubernetes.gpu_inventory import list_gpu_nodes, get_node_gpu_info, list_gpu_pods
 from app.services.approval_service import list_plans
 from app.config import PIPELINE_NAMESPACE
 
@@ -19,6 +20,33 @@ def build_overview_metrics():
     succeeded = len([pr for pr in pipeline_runs if _get_pipelinerun_status(pr) == "Succeeded"])
     failed = len([pr for pr in pipeline_runs if _get_pipelinerun_status(pr) == "Failed"])
     running = len([pr for pr in pipeline_runs if _get_pipelinerun_status(pr) == "Running"])
+
+    models_deployed = 0
+    succeeded_phases = ("Succeeded", "Promoting", "Deploying")
+    for mr in model_requests:
+        phase = mr.get("status", {}).get("phase", "")
+        if phase in succeeded_phases:
+            models_deployed += 1
+
+    gpu_nodes = list_gpu_nodes()
+    total_gpus = 0
+    allocated_gpus = 0
+    for node in gpu_nodes:
+        info = get_node_gpu_info(node)
+        total_gpus += info["gpu_count"]
+
+    try:
+        gpu_pods = list_gpu_pods()
+        allocated_gpus = _count_allocated_gpus(gpu_pods)
+    except Exception:
+        allocated_gpus = 0
+
+    if total_gpus > 0:
+        gpu_capacity = f"{allocated_gpus} / {total_gpus} allocated"
+        gpu_utilization = f"{int(allocated_gpus / total_gpus * 100)}%"
+    else:
+        gpu_capacity = "0 / 0 allocated"
+        gpu_utilization = "N/A"
 
     attention_items = []
 
@@ -48,9 +76,9 @@ def build_overview_metrics():
     platform_health = "Degraded" if (has_unhealthy or failed > 0) else "Healthy"
 
     return {
-        "gpu_capacity": "12 / 16 allocated",
-        "gpu_utilization": "67%",
-        "models_deployed": 9,
+        "gpu_capacity": gpu_capacity,
+        "gpu_utilization": gpu_utilization,
+        "models_deployed": models_deployed,
         "active_requests": active_requests,
         "awaiting_approval": awaiting_approval,
         "platform_health": platform_health,
@@ -80,3 +108,16 @@ def _get_plan_phase(plan):
         if c.get("type") == "Ready" and c.get("status") == "False":
             return "Failed"
     return plan.get("status", {}).get("phase", "Unknown")
+
+
+def _count_allocated_gpus(pods):
+    count = 0
+    for pod in pods:
+        for container in pod.spec.containers:
+            requests = (container.resources.requests or {})
+            gpu_str = requests.get("nvidia.com/gpu", "0")
+            try:
+                count += int(gpu_str)
+            except (ValueError, TypeError):
+                pass
+    return count

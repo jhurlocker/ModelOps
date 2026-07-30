@@ -2,7 +2,7 @@ from app.kubernetes.client import core_api
 
 
 def list_gpu_nodes():
-    nodes = core_api().list_nodes(label_selector="nvidia.com/gpu.present=true")
+    nodes = core_api().list_node(label_selector="nvidia.com/gpu.present=true")
     return nodes.items
 
 

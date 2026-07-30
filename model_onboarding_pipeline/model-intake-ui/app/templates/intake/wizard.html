@@ -32,11 +32,16 @@
                 <option value="oci">OCI Container Registry</option>
             </select>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="hf-s3-field">
             <label>Model Identifier *</label>
             <p class="form-hint" id="model-id-hint">Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct)</p>
             <input type="text" name="model-id" value="{{ defaults['model-id'] }}" required
                    placeholder="ibm-granite/granite-3.3-2b-instruct">
+        </div>
+        <div class="form-group" id="oci-field" style="display:none">
+            <label>OCI Container Image *</label>
+            <p class="form-hint">Full OCI image reference for the model container.</p>
+            <input type="text" name="oci-url" placeholder="quay.io/myorg/granite-2b:v1.0">
         </div>
         <div class="form-group">
             <label>Model Name *</label>
@@ -358,21 +363,51 @@
 
     var sourceSelect = document.querySelector('[name="model-source"]');
     var hintEl = document.getElementById('model-id-hint');
-    if (sourceSelect && hintEl) {
-        var hints = {
-            huggingface: 'Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct)',
-            s3: 'S3 URI (e.g., s3://bucket/path/to/model/)',
-            oci: 'OCI image reference (e.g., quay.io/org/model:v1.0)'
-        };
-        var placeholders = {
-            huggingface: 'ibm-granite/granite-3.3-2b-instruct',
-            s3: 's3://my-bucket/models/granite-2b',
-            oci: 'quay.io/myorg/granite-2b:v1.0'
-        };
-        sourceSelect.addEventListener('change', function() {
-            var v = this.value;
-            hintEl.textContent = hints[v] || hints.huggingface;
-            if (modelIdEl) modelIdEl.placeholder = placeholders[v] || placeholders.huggingface;
+    var hfS3Field = document.getElementById('hf-s3-field');
+    var ociField = document.getElementById('oci-field');
+    var ociUrlInput = document.querySelector('[name="oci-url"]');
+
+    function switchModelSource() {
+        var v = sourceSelect ? sourceSelect.value : 'huggingface';
+        if (v === 'oci') {
+            if (hfS3Field) hfS3Field.style.display = 'none';
+            if (ociField) ociField.style.display = '';
+            if (ociUrlInput && modelIdEl) {
+                modelIdEl.removeAttribute('required');
+                modelIdEl.value = ociUrlInput.value;
+            }
+            if (ociUrlInput) ociUrlInput.setAttribute('required', '');
+        } else {
+            if (hfS3Field) hfS3Field.style.display = '';
+            if (ociField) ociField.style.display = 'none';
+            if (modelIdEl) modelIdEl.setAttribute('required', '');
+            if (ociUrlInput) {
+                ociUrlInput.removeAttribute('required');
+                ociUrlInput.value = '';
+            }
+            if (hintEl) {
+                var hints = {
+                    huggingface: 'Hugging Face model ID (e.g., ibm-granite/granite-3.3-2b-instruct)',
+                    s3: 'S3 URI (e.g., s3://bucket/path/to/model/)'
+                };
+                hintEl.textContent = hints[v] || hints.huggingface;
+            }
+            if (modelIdEl) {
+                var placeholders = {
+                    huggingface: 'ibm-granite/granite-3.3-2b-instruct',
+                    s3: 's3://my-bucket/models/granite-2b'
+                };
+                modelIdEl.placeholder = placeholders[v] || placeholders.huggingface;
+            }
+        }
+    }
+
+    if (sourceSelect) {
+        sourceSelect.addEventListener('change', switchModelSource);
+    }
+    if (ociUrlInput && modelIdEl) {
+        ociUrlInput.addEventListener('input', function() {
+            modelIdEl.value = this.value;
         });
     }
 })();
