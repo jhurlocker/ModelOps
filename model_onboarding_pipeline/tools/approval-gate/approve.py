@@ -62,7 +62,7 @@ def post_plan():
     except Exception:
         plan_status = "UNKNOWN"
 
-    url = os.environ["APPROVAL_API_URL"].rstrip("/") + "/api/plans"
+    url = os.environ["APPROVAL_API_URL"].rstrip("/") + "/approvals/api/plans"
     payload = {
         "plan_id": plan_id,
         "pipelinerun_name": pipelinerun_name,
@@ -88,7 +88,7 @@ def poll_approval():
     plan_id = os.environ["PLAN_ID"]
     poll_interval = int(os.environ.get("POLL_INTERVAL", "15"))
     timeout = int(os.environ.get("TIMEOUT_SECONDS", "3600"))
-    url = os.environ["APPROVAL_API_URL"].rstrip("/") + f"/api/plans/{plan_id}"
+    url = os.environ["APPROVAL_API_URL"].rstrip("/") + f"/approvals/api/plans/{plan_id}"
 
     start = time.time()
     while time.time() - start < timeout:
