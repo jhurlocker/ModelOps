@@ -31,7 +31,9 @@ def submit_garak():
     tenant_ns = os.environ["TENANT_NS"]
     model_name = os.environ["MODEL_NAME"]
 
-    base = f"https://{evalhub_url}"
+    base = evalhub_url.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "X-Tenant": tenant_ns}
 
     job_name = f"garak-{uuid.uuid4().hex[:8]}"
@@ -69,7 +71,9 @@ def poll_completion(job_id, max_attempts=60, poll_interval=15):
     token = os.environ["EVALHUB_TOKEN"]
     tenant_ns = os.environ["TENANT_NS"]
 
-    base = f"https://{evalhub_url}"
+    base = evalhub_url.rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        base = f"https://{base}"
     headers = {"Authorization": f"Bearer {token}", "X-Tenant": tenant_ns}
 
     for attempt in range(1, max_attempts + 1):

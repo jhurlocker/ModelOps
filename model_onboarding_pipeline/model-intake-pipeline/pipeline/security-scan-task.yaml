@@ -75,7 +75,7 @@ spec:
   steps:
     # Containerized garak security scan via EvalHub
     - name: security-scan
-      image: quay.io/jhurlocker/security-scanner:v0.1.8
+      image: quay.io/jhurlocker/security-scanner:v0.1.9
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: EVALHUB_URL
