@@ -129,7 +129,9 @@ def register_in_model_registry():
             model_format_version="1",
             metadata=props,
         )
-        print(f"  Registered model id={rm.id}, version id={rm.version_id}.", flush=True)
+        vid = getattr(rm, 'version_id', getattr(rm, 'model_version_id', '?'))
+        vid = vid if not hasattr(vid, 'id') else vid.id
+        print(f"  Registered model id={rm.id}, version id={vid}.", flush=True)
     except Exception as e:
         print(f"  WARNING: registration failed: {e}", flush=True)
 

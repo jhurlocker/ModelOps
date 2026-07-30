@@ -122,8 +122,8 @@ spec:
         set -euo pipefail
 
         echo "--- Step 1: Discover cluster GPU inventory (local, in-cluster creds required) ---"
-        oc whoami || true
-        oc cluster-info || true
+        oc whoami 2>/dev/null || true
+        oc cluster-info 2>/dev/null || true
         echo ""
 
         echo "Discovering GPU nodes..."
