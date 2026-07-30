@@ -6,3 +6,12 @@ metadata:
 spec:
   database:
     type: sqlite
+  providers:
+  - garak
+  - garak-kfp
+  - lm-evaluation-harness
+  - guidellm
+  collections:
+  - leaderboard-v2
+  - safety-and-fairness-v1
+  - toxicity-and-ethical-principles
