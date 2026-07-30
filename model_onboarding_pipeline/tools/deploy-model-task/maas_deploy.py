@@ -119,7 +119,6 @@ def deploy(model_name, model_id, modelcar_image, serving_ns, policy_ns,
                     "args": [
                         "--served-model-name={{.Name}}",
                         "--model=/mnt/models",
-                        "--enable-ssl-refresh",
                         "--ssl-certfile=/var/run/kserve/tls/tls.crt",
                         "--ssl-keyfile=/var/run/kserve/tls/tls.key",
                         "--enable-force-include-usage",

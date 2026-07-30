@@ -143,7 +143,7 @@ curl -sk -X POST "https://${model}-${namespace}.${CLUSTER_DOMAIN}/v1/chat/comple
 
 The LLMInferenceService `spec.router.route: {}` should auto-create this Route. If it doesn't, create it manually.
 
-**Important:** Do NOT remove `--enable-ssl-refresh` from the vLLM args. OpenShift AI auto-sets probes to HTTPS scheme even if the probe config specifies HTTP. The model must serve HTTPS to pass readiness probes.
+**Important:** vLLM serves HTTPS whenever `--ssl-certfile` and `--ssl-keyfile` are provided. Do NOT include `--enable-ssl-refresh` — KServe rotates certs via delete-then-recreate, which triggers the SSL refresher on every intermediate file event (including "deleted"). This causes brief SSL context invalidation and can fail probes. vLLM's static SSL context loaded at startup is sufficient for KServe's long-lived self-signed certs.
 
 ## MaaS Model Not Appearing in Dashboard
 
