@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 
 import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
 
 
 def safe_timestamp(env_key):
@@ -35,24 +34,6 @@ def safe_prefix(env_key):
     return val
 
 
-def ensure_bucket(s3, bucket):
-    try:
-        s3.head_bucket(Bucket=bucket)
-        return True
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
-        if code == "404" or code == "NoSuchBucket":
-            try:
-                s3.create_bucket(Bucket=bucket)
-                print(f"Created bucket '{bucket}'.")
-                return True
-            except ClientError as ce:
-                print(f"ERROR: cannot create bucket '{bucket}': {ce}", file=sys.stderr)
-                return False
-        print(f"ERROR: cannot access bucket '{bucket}': {e}", file=sys.stderr)
-        return False
-
-
 def main():
     endpoint = os.environ.get("S3_ENDPOINT_URL")
     access_key = os.environ.get("S3_ACCESS_KEY_ID")
@@ -62,13 +43,6 @@ def main():
     pattern = os.environ.get("PATTERN", "*")
     prefix_override = safe_prefix("PREFIX_OVERRIDE")
 
-    if not endpoint:
-        print("ERROR: S3_ENDPOINT_URL is required", file=sys.stderr)
-        sys.exit(1)
-    if not access_key or not secret_key:
-        print("ERROR: S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY are required", file=sys.stderr)
-        sys.exit(1)
-
     s3 = boto3.client(
         "s3", endpoint_url=endpoint,
         aws_access_key_id=access_key,
@@ -76,14 +50,19 @@ def main():
         config=Config(s3={"addressing_style": "path"}),
     )
 
-    if not ensure_bucket(s3, bucket):
-        sys.exit(1)
+    existing = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
+    if bucket not in existing:
+        s3.create_bucket(Bucket=bucket)
+        print(f"Created bucket '{bucket}'.")
 
-    pattern_parts = ["*"] if pattern == "*" else [p.strip() for p in pattern.split(",")]
-    uploaded = 0
+    pattern_parts = []
+    if pattern == "*":
+        pattern_parts = ["*"]
+    else:
+        pattern_parts = pattern.split(",")
 
-    for pat in pattern_parts:
-        for path in glob.glob(pat):
+    for p in pattern_parts:
+        for path in glob.glob(p.strip()):
             if not os.path.isfile(path):
                 continue
             prefix = prefix_override or timestamp
@@ -91,12 +70,8 @@ def main():
             try:
                 s3.upload_file(path, bucket, key)
                 print(f"Uploaded {path} -> s3://{bucket}/{key}")
-                uploaded += 1
             except Exception as e:
-                print(f"WARN: failed to upload {path}: {e}", file=sys.stderr)
-
-    if uploaded == 0:
-        print("WARN: no files matched the upload pattern", file=sys.stderr)
+                print(f"WARN: failed to upload {path}: {e}")
 
 
 if __name__ == "__main__":

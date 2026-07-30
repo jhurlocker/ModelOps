@@ -302,7 +302,7 @@ spec:
 
     # --- Upload reports to S3 via containerized tool ---
     - name: s3-upload
-      image: quay.io/jhurlocker/s3-upload:v0.2.0
+      image: quay.io/jhurlocker/s3-upload:v0.1.1
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: S3_ENDPOINT_URL
