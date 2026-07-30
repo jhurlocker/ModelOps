@@ -84,7 +84,7 @@ spec:
     - name: s3-access-key-id
       value: 'minio'
     - name: s3-secret-access-key
-      value: 'minio123'
+      value: 'minioadmin'
     # lm-eval
     - name: lm-eval-job-name
       value: 'mmlu-jurisprudence-eval-job'

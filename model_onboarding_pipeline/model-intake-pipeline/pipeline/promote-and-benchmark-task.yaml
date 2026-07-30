@@ -94,7 +94,7 @@ spec:
       default: "minio"
     - name: s3-secret-access-key
       type: string
-      default: "minio123"
+      default: "minioadmin"
   steps:
     - name: promote-and-benchmark
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest

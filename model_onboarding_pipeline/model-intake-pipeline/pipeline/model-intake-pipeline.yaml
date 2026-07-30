@@ -131,7 +131,7 @@ spec:
     - default: "minio"
       name: scan-s3-access-key-id
       type: string
-    - default: "minio123"
+    - default: "minioadmin"
       name: scan-s3-secret-access-key
       type: string
     - default: "compliance-artifact-results"

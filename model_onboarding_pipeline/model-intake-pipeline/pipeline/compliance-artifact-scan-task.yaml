@@ -87,10 +87,10 @@ spec:
       default: "http://minio-service.s3-storage.svc.cluster.local:9000"
     - name: s3-access-key-id
       type: string
-      default: "minio"
-    - name: s3-secret-access-key
-      type: string
-      default: "minio123"
+      default: "minioadmin"
+     - name: s3-secret-access-key
+       type: string
+       default: "minioadmin"
     - name: s3-bucket
       type: string
       default: "compliance-artifact-results"
@@ -222,39 +222,39 @@ spec:
     # Containerized compliance scanner - versioned, tested, auditable.
     # ----------------------------------------------------------------------
     - name: evaluate-and-upload
-      image: quay.io/jhurlocker/compliance-scanner:v0.1.1
-      workingDir: $(workspaces.shared-workspace.path)
-      env:
-        - name: MODEL_ID
-          value: $(params.model-id)
-        - name: MODEL_NAME
-          value: $(params.model-name)
-        - name: MODEL_VERSION
-          value: $(params.model-version)
-        - name: ARTIFACT_SCAN_IMAGE
-          value: $(params.artifact-scan-image)
-        - name: CVE_THRESHOLD
-          value: $(params.artifact-cve-threshold)
-        - name: ALLOWED_ARCHES
-          value: $(params.allowed-architectures)
-        - name: S3_ENDPOINT_URL
-          value: $(params.s3-api-endpoint)
-        - name: S3_ACCESS_KEY_ID
-          value: $(params.s3-access-key-id)
-        - name: S3_SECRET_ACCESS_KEY
-          value: $(params.s3-secret-access-key)
-        - name: S3_BUCKET
-          value: $(params.s3-bucket)
-        - name: S3_UI_ROUTE
-          value: $(params.s3-ui-route)
-        - name: WORKSPACE_PATH
-          value: $(workspaces.shared-workspace.path)
-        - name: TIMESTAMP
-          value: $(date +%Y%m%d_%H%M%S)
-        - name: S3_PREFIX
-          value: $(date +%Y%m%d_%H%M%S)_compliance_artifact
-      args:
-        - evaluate
+      image: quay.io/jhurlocker/compliance-scanner:v0.1.4
+       workingDir: $(workspaces.shared-workspace.path)
+       env:
+         - name: MODEL_ID
+           value: $(params.model-id)
+         - name: MODEL_NAME
+           value: $(params.model-name)
+         - name: MODEL_VERSION
+           value: $(params.model-version)
+         - name: ARTIFACT_SCAN_IMAGE
+           value: $(params.artifact-scan-image)
+         - name: CVE_THRESHOLD
+           value: $(params.artifact-cve-threshold)
+         - name: ALLOWED_ARCHES
+           value: $(params.allowed-architectures)
+         - name: S3_ENDPOINT_URL
+           value: $(params.s3-api-endpoint)
+         - name: S3_ACCESS_KEY_ID
+           value: $(params.s3-access-key-id)
+         - name: S3_SECRET_ACCESS_KEY
+           value: $(params.s3-secret-access-key)
+         - name: S3_BUCKET
+           value: $(params.s3-bucket)
+         - name: S3_UI_ROUTE
+           value: $(params.s3-ui-route)
+         - name: WORKSPACE_PATH
+           value: $(workspaces.shared-workspace.path)
+         - name: TIMESTAMP
+           value: $(date +%Y%m%d_%H%M%S)
+         - name: S3_PREFIX
+           value: $(date +%Y%m%d_%H%M%S)_compliance_artifact
+       args:
+         - evaluate
 
     # --- Compose S3 links from evaluation output ---
     - name: compose-links

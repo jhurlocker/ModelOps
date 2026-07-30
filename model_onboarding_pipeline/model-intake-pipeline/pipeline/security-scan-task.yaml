@@ -36,7 +36,7 @@ spec:
       description: "S3 access key ID."
     - name: s3-secret-access-key
       type: string
-      default: "minio123"
+      default: "minioadmin"
       description: "S3 secret access key."
     - name: s3-bucket
       type: string

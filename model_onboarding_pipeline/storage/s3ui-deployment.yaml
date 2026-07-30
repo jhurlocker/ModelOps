@@ -43,7 +43,7 @@ spec:
             - name: S3_ACCESS_KEY
               value: "minio"
             - name: S3_SECRET_KEY
-              value: "minio123"
+              value: "minioadmin"
             - name: S3_REGION
               value: "none"
           volumeMounts:

@@ -163,7 +163,7 @@ spec:
       default: "minio"
     - name: s3-secret-access-key
       type: string
-      default: "minio123"
+      default: "minioadmin"
     - name: huggingface-token
       type: string
       default: ""

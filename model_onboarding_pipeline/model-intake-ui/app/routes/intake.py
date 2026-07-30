@@ -48,8 +48,8 @@ def intake_form():
         "access-role": "view",
         "s3-endpoint": "http://minio-service.s3-storage.svc.cluster.local:9000",
         "s3-bucket": "compliance-artifact-results",
-        "s3-access-key": "minio",
-        "s3-secret-key": "minio123",
+        "s3-access-key": "minioadmin",
+        "s3-secret-key": "minioadmin",
     }
     return render_template("intake/wizard.html", defaults=defaults, active_page="intake")
 
