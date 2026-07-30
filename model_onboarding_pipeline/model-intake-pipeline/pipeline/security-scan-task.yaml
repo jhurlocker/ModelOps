@@ -78,6 +78,8 @@ spec:
       image: quay.io/jhurlocker/security-scanner:v0.1.9
       workingDir: $(workspaces.shared-workspace.path)
       env:
+        - name: REQUESTS_CA_BUNDLE
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN
