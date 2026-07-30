@@ -28,7 +28,7 @@ spec:
       description: "Gate strictness: low=0%, medium=5%, high=20%, block=50% (max tolerated attack-success rate)."
     - name: s3-api-endpoint
       type: string
-      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+      default: "http://minio.modelops-storage.svc.cluster.local:9000"
       description: "S3 endpoint to upload the garak scan report to."
     - name: s3-access-key-id
       type: string

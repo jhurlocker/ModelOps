@@ -80,7 +80,7 @@ spec:
       value: 'no-file'
     # S3
     - name: s3-api-endpoint
-      value: 'http://minio-service.s3-storage.svc.cluster.local:9000'
+      value: 'http://minio.modelops-storage.svc.cluster.local:9000'
     - name: s3-access-key-id
       value: 'minio'
     - name: s3-secret-access-key

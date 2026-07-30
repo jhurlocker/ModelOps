@@ -124,7 +124,7 @@ spec:
       name: model-reg-author
       type: string
     # Scan-result S3 (MinIO) - used by compliance-artifact-scan + security-scan
-    - default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - default: "http://minio.modelops-storage.svc.cluster.local:9000"
       description: S3 endpoint for compliance/artifact + garak scan reports
       name: scan-s3-endpoint
       type: string
@@ -290,7 +290,7 @@ spec:
       name: custom-filename
       type: string
     # Benchmark/eval upload S3 (existing plumbing)
-    - default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+    - default: "http://minio.modelops-storage.svc.cluster.local:9000"
       description: S3 endpoint for benchmark/eval result uploads
       name: s3-api-endpoint
       type: string

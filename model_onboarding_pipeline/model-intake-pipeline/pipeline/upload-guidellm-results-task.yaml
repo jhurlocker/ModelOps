@@ -5,7 +5,7 @@ metadata:
 spec:
   description: Upload guidellm benchmark results to s3 bucket
   params:
-    - default: 'http://minio-service.s3-storage.svc.cluster.local:9000'
+    - default: 'http://minio.modelops-storage.svc.cluster.local:9000'
       description: s3 API endpoint
       name: s3-api-endpoint
       type: string

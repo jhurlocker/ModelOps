@@ -33,7 +33,7 @@ data:
   MANIFESTS_CONFIGMAP: "mmlu-manifest"
   CUSTOM_MMLU_CONFIGMAP: "custom-mmlu"
   SELF_INTERNAL_URL: "http://model-intake.sandbox.svc.cluster.local:8080"
-  DEFAULT_S3_ENDPOINT: "http://minio-service.s3-storage.svc.cluster.local:9000"
+  DEFAULT_S3_ENDPOINT: "http://minio.modelops-storage.svc.cluster.local:9000"
   # Set to the same RunPod/agentic-skill endpoint used by the gpu-advisor
   # Task if you want it prefilled in the intake form (still overridable
   # per-submission).

@@ -75,7 +75,7 @@ spec:
       default: "ModelOps Platform Team"
     - name: scan-s3-endpoint
       type: string
-      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+      default: "http://minio.modelops-storage.svc.cluster.local:9000"
     - name: scan-s3-access-key-id
       type: string
       default: "minio"

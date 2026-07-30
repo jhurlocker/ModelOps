@@ -157,7 +157,7 @@ spec:
       default: "no-file"
     - name: s3-api-endpoint
       type: string
-      default: "http://minio-service.s3-storage.svc.cluster.local:9000"
+      default: "http://minio.modelops-storage.svc.cluster.local:9000"
     - name: s3-access-key-id
       type: string
       default: "minio"

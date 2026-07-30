@@ -16,7 +16,7 @@ stringData: # Use stringData for plain text. OpenShift will auto-encode.
   S3_BUCKET_NAME: "benchmark-results"
   S3_ACCESS_KEY: " "minioadmin"
   S3_SECRET_KEY: "minioadmin"
-  S3_ENDPOINT_URL: "http://minio-service.s3-storage.svc.cluster.local:9000"
+  S3_ENDPOINT_URL: "http://minio.modelops-storage.svc.cluster.local:9000"
 
 ---
 # ===================================================================

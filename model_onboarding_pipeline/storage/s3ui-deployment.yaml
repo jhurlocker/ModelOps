@@ -39,7 +39,7 @@ spec:
             - containerPort: 5001
           env:
             - name: S3_ENDPOINT_URL
-              value: "http://minio-service.s3-storage.svc.cluster.local:9000"
+              value: "http://minio.modelops-storage.svc.cluster.local:9000"
             - name: S3_ACCESS_KEY
               value: "minio"
             - name: S3_SECRET_KEY

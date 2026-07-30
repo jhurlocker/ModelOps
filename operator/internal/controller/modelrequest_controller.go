@@ -375,7 +375,7 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 	}
 
 	if s.resultS3Endpoint == "" {
-		s.resultS3Endpoint = "http://minio-service.s3-storage.svc.cluster.local:9000"
+		s.resultS3Endpoint = "http://minio.modelops-storage.svc.cluster.local:9000"
 	}
 	if s.resultS3AccessKey == "" {
 		s.resultS3AccessKey = "minioadmin"

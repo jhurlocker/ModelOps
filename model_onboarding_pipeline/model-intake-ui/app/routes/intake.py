@@ -46,7 +46,7 @@ def intake_form():
         "deploy-maas": "false",
         "authorized-viewers": "",
         "access-role": "view",
-        "s3-endpoint": "http://minio-service.s3-storage.svc.cluster.local:9000",
+        "s3-endpoint": "http://minio.modelops-storage.svc.cluster.local:9000",
         "s3-bucket": "compliance-artifact-results",
         "s3-access-key": "minioadmin",
         "s3-secret-key": "minioadmin",
