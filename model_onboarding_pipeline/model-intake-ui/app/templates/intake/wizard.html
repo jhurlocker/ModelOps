@@ -39,6 +39,11 @@
                    placeholder="ibm-granite/granite-3.3-2b-instruct / s3://bucket/path / quay.io/org/model:v1">
         </div>
         <div class="form-group">
+            <label>Tokenizer</label>
+            <p class="form-hint">Hugging Face tokenizer ID for GuideLLM (e.g., ibm-granite/granite-3.3-2b-instruct).</p>
+            <input type="text" name="model-tokenizer" value="{{ defaults['model-tokenizer'] }}" placeholder="ibm-granite/granite-3.3-2b-instruct">
+        </div>
+        <div class="form-group">
             <label>Model Name *</label>
             <p class="form-hint">Auto-generated from model identifier. Kubernetes-safe name for deployment.</p>
             <input type="text" name="model-name" value="{{ defaults['model-name'] }}" required>

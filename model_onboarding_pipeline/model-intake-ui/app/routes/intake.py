@@ -32,6 +32,7 @@ def intake_form():
     defaults = {
         "model-source": "huggingface",
         "model-id": "ibm-granite/granite-3.3-2b-instruct",
+        "model-tokenizer": "ibm-granite/granite-3.3-2b-instruct",
         "model-name": "granite-2b",
         "model-version": "v1",
         "lifecycle-profile": LIFECYCLE_PROFILE,
@@ -59,6 +60,7 @@ def submit():
             "uri": form_data.get("model-id", ""),
             "name": form_data.get("model-name", ""),
             "version": form_data.get("model-version", "v1"),
+            "tokenizer": form_data.get("model-tokenizer", ""),
         },
         "lifecycleProfile": form_data.get("lifecycle-profile", LIFECYCLE_PROFILE),
         "requestedBy": form_data.get("requested-by", ""),
