@@ -404,10 +404,12 @@
 
     if (sourceSelect) {
         sourceSelect.addEventListener('change', switchModelSource);
+        switchModelSource();
     }
     if (ociUrlInput && modelIdEl) {
         ociUrlInput.addEventListener('input', function() {
             modelIdEl.value = this.value;
+            modelIdEl.dataset.dirty = 'true';
         });
     }
 })();

@@ -12,8 +12,6 @@ function initWizard() {
 
     const steps = wizard.querySelectorAll('.wizard-step-panel');
     const stepButtons = document.querySelectorAll('.wizard-step');
-    const nextBtn = wizard.querySelector('.wizard-next');
-    const prevBtn = wizard.querySelector('.wizard-prev');
     let currentStep = 0;
 
     function showStep(n) {
@@ -23,15 +21,6 @@ function initWizard() {
             if (i < n) b.classList.add('completed');
             if (i === n) b.classList.add('active');
         });
-        if (prevBtn) prevBtn.style.display = n === 0 ? 'none' : 'inline-flex';
-        if (nextBtn) {
-            if (n === steps.length - 1) {
-                nextBtn.textContent = 'Submit Request';
-                nextBtn.classList.add('btn-primary');
-            } else {
-                nextBtn.textContent = 'Next';
-            }
-        }
     }
 
     stepButtons.forEach((btn, i) => {
@@ -43,23 +32,23 @@ function initWizard() {
         });
     });
 
-    if (nextBtn) {
-        nextBtn.addEventListener('click', () => {
+    wizard.addEventListener('click', (e) => {
+        const nextBtn = e.target.closest('.wizard-next');
+        if (nextBtn) {
             if (currentStep < steps.length - 1) {
                 currentStep++;
                 showStep(currentStep);
             }
-        });
-    }
-
-    if (prevBtn) {
-        prevBtn.addEventListener('click', () => {
+            return;
+        }
+        const prevBtn = e.target.closest('.wizard-prev');
+        if (prevBtn) {
             if (currentStep > 0) {
                 currentStep--;
                 showStep(currentStep);
             }
-        });
-    }
+        }
+    });
 
     showStep(0);
 }
