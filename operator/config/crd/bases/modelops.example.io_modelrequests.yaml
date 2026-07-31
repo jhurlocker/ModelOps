@@ -1,9 +1,10 @@
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: modelrequests.modelops.example.io
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.0
+    controller-gen.kubebuilder.io/version: v0.16.5
+  name: modelrequests.modelops.example.io
 spec:
   group: modelops.example.io
   names:
@@ -13,176 +14,222 @@ spec:
     singular: modelrequest
   scope: Namespaced
   versions:
-    - name: v1alpha1
-      served: true
-      storage: true
-      subresources:
-        status: {}
-      schema:
-        openAPIV3Schema:
-          type: object
-          properties:
-            spec:
-              type: object
-              required:
-                - model
-                - lifecycleProfile
-              properties:
-                model:
-                  type: object
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.pipelineRunName
+      name: PipelineRun
+      type: string
+    - jsonPath: .spec.model.uri
+      name: Model
+      type: string
+    - jsonPath: .spec.lifecycleProfile
+      name: Profile
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              access:
+                properties:
+                  accessRole:
+                    type: string
+                  authorizedViewers:
+                    type: string
+                type: object
+              businessJustification:
+                type: string
+              displayName:
+                type: string
+              evalhubSecretName:
+                type: string
+              huggingfaceSecretName:
+                type: string
+              lifecycleProfile:
+                type: string
+              maas:
+                properties:
+                  authorizedGroup:
+                    type: string
+                  enabled:
+                    type: boolean
+                  gpuCount:
+                    type: string
+                  runtimeImage:
+                    type: string
+                type: object
+              model:
+                properties:
+                  name:
+                    type: string
+                  sourceType:
+                    type: string
+                  tokenizer:
+                    type: string
+                  uri:
+                    type: string
+                  version:
+                    type: string
+                required:
+                - sourceType
+                - uri
+                type: object
+              pipelineRef:
+                type: string
+              requestedBy:
+                type: string
+              requirements:
+                properties:
+                  advisorEndpoint:
+                    type: string
+                  allowMIG:
+                    type: boolean
+                  allowTimeSlicing:
+                    type: boolean
+                  contextLength:
+                    type: integer
+                  customBenchmarkData:
+                    type: boolean
+                  customBenchmarkFile:
+                    type: string
+                  cveThreshold:
+                    type: string
+                  expectedConcurrency:
+                    type: integer
+                  gpuCountOverride:
+                    type: string
+                  gpuIsolationPolicy:
+                    type: string
+                  openshiftConsoleDomain:
+                    type: string
+                  promotionNamespaces:
+                    items:
+                      type: string
+                    type: array
+                  requestRate:
+                    type: string
+                  sandboxNamespace:
+                    type: string
+                  securityThreshold:
+                    type: string
+                  stagingNamespace:
+                    type: string
+                  targetEnvironment:
+                    type: string
+                  targetTTFT:
+                    type: string
+                  targetThroughput:
+                    type: string
+                  valuesContent:
+                    type: string
+                type: object
+              resultS3AccessKey:
+                type: string
+              resultS3Bucket:
+                type: string
+              resultS3Endpoint:
+                type: string
+              resultS3SecretKey:
+                type: string
+              resultS3SecretName:
+                type: string
+              scanS3SecretName:
+                type: string
+            required:
+            - lifecycleProfile
+            - model
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
                   required:
-                    - sourceType
-                    - uri
-                  properties:
-                    sourceType:
-                      type: string
-                      description: Source type (huggingface, oci, s3)
-                    uri:
-                      type: string
-                      description: Model URI (e.g. ibm-granite/granite-3.3-2b-instruct)
-                    name:
-                      type: string
-                      description: Kubernetes-safe model name identifier
-                    version:
-                      type: string
-                      description: Version label for this onboarding run
-                    tokenizer:
-                      type: string
-                      description: Hugging Face tokenizer ID for GuideLLM benchmarks
-                displayName:
-                  type: string
-                  description: Human-friendly display name for the model
-                businessJustification:
-                  type: string
-                  description: Business reason for onboarding this model
-                lifecycleProfile:
-                  type: string
-                  description: Name of the ModelLifecycleProfile defining workflow, policy, and platform config
-                pipelineRef:
-                  type: string
-                  description: Override the pipeline defined in the lifecycle profile
-                requirements:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
                   type: object
-                  properties:
-                    contextLength:
-                      type: integer
-                    expectedConcurrency:
-                      type: integer
-                    gpuIsolationPolicy:
-                      type: string
-                      enum: [dedicated, shared]
-                    allowTimeSlicing:
-                      type: boolean
-                    allowMIG:
-                      type: boolean
-                    cveThreshold:
-                      type: string
-                      enum: [none, critical, high]
-                    securityThreshold:
-                      type: string
-                    targetEnvironment:
-                      type: string
-                    sandboxNamespace:
-                      type: string
-                    stagingNamespace:
-                      type: string
-                    advisorEndpoint:
-                      type: string
-                    gpuCountOverride:
-                      type: string
-                    valuesContent:
-                      type: string
-                    customBenchmarkData:
-                      type: boolean
-                    customBenchmarkFile:
-                      type: string
-                    openshiftConsoleDomain:
-                      type: string
-                    requestRate:
-                      type: string
-                    targetTTFT:
-                      type: string
-                    targetThroughput:
-                      type: string
-                access:
-                  type: object
-                  properties:
-                    authorizedViewers:
-                      type: string
-                    accessRole:
-                      type: string
-                requestedBy:
-                  type: string
-                evalhubSecretName:
-                  type: string
-                  description: "K8s Secret name containing EvalHub credentials (keys: token, url)"
-                huggingfaceSecretName:
-                  type: string
-                  description: "K8s Secret name containing HuggingFace token (key: token)"
-                scanS3SecretName:
-                  type: string
-                  description: "K8s Secret name containing scan-result S3 credentials"
-                resultS3SecretName:
-                  type: string
-                  description: "K8s Secret name containing benchmark/eval S3 credentials"
-                resultS3Endpoint:
-                  type: string
-                  description: "Override S3 endpoint for uploading results (e.g. http://minio.modelops-storage.svc.cluster.local:9000)"
-                resultS3AccessKey:
-                  type: string
-                  description: "Override S3 access key ID"
-                resultS3SecretKey:
-                  type: string
-                  description: "Override S3 secret access key"
-                resultS3Bucket:
-                  type: string
-                  description: "Override S3 bucket name for scan/eval results"
-                maas:
-                  type: object
-                  properties:
-                    enabled:
-                      type: boolean
-                    gpuCount:
-                      type: string
-                    runtimeImage:
-                      type: string
-                    authorizedGroup:
-                      type: string
-            status:
-              type: object
-              properties:
-                phase:
-                  type: string
-                pipelineRunName:
-                  type: string
-                message:
-                  type: string
-                conditions:
-                  type: array
-                  items:
-                    type: object
-                    properties:
-                      type:
-                        type: string
-                      status:
-                        type: string
-                      reason:
-                        type: string
-                      message:
-                        type: string
-                      lastTransitionTime:
-                        type: string
-                        format: date-time
-      additionalPrinterColumns:
-        - name: Phase
-          type: string
-          jsonPath: .status.phase
-        - name: PipelineRun
-          type: string
-          jsonPath: .status.pipelineRunName
-        - name: Model
-          type: string
-          jsonPath: .spec.model.uri
-        - name: Profile
-          type: string
-          jsonPath: .spec.lifecycleProfile
+                type: array
+              message:
+                type: string
+              phase:
+                type: string
+              pipelineRunName:
+                type: string
+              promotionPipelineRunName:
+                type: string
+              sandboxPipelineRunName:
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

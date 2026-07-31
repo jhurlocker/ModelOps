@@ -1,138 +1,110 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: modelops-operator-controller
-  labels:
-    app.kubernetes.io/name: modelops-operator
 rules:
-  # ModelRequest CRD
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - modelrequests
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - modelrequests/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - modelrequests/status
-    verbs:
-      - get
-      - patch
-      - update
-  # ModelLifecycleProfile CRD (read-only for resolution)
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - modellifecycleprofiles
-    verbs:
-      - get
-      - list
-      - watch
-  # PlatformConfig CRD (read-only for resolution)
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - platformconfigs
-    verbs:
-      - get
-      - list
-      - watch
-  # CapacityPlan CRD
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - capacityplans
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - capacityplans/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - capacityplans/status
-    verbs:
-      - get
-      - patch
-      - update
-  # Tekton PipelineRuns
-  - apiGroups:
-      - tekton.dev
-    resources:
-      - pipelineruns
-    verbs:
-      - create
-      - delete
-      - get
-      - list
-      - patch
-      - update
-      - watch
-  # Secrets (read for credential resolution)
-  - apiGroups:
-      - ""
-    resources:
-      - secrets
-    verbs:
-      - get
-      - list
-      - watch
-  # ServiceAccounts (create pipeline SA, generate tokens)
-  - apiGroups:
-      - ""
-    resources:
-      - serviceaccounts
-    verbs:
-      - create
-      - get
-      - list
-      - watch
-      - patch
-      - update
-  - apiGroups:
-      - ""
-    resources:
-      - serviceaccounts/token
-    verbs:
-      - create
-  # Namespaces (label tenant namespaces for EvalHub)
-  - apiGroups:
-      - ""
-    resources:
-      - namespaces
-    verbs:
-      - get
-      - list
-      - watch
-      - update
-      - patch
-  # Events
-  - apiGroups:
-      - ""
-    resources:
-      - events
-    verbs:
-      - create
-      - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  verbs:
+  - create
+- apiGroups:
+  - modelops.example.io
+  resources:
+  - capacityplans
+  - modelrequests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - modelops.example.io
+  resources:
+  - capacityplans/finalizers
+  - modelrequests/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - modelops.example.io
+  resources:
+  - capacityplans/status
+  - modelrequests/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - modelops.example.io
+  resources:
+  - modellifecycleprofiles
+  - platformconfigs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  - rolebindings
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tekton.dev
+  resources:
+  - pipelineruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
