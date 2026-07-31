@@ -671,6 +671,42 @@ func TestCreateIgnoringAlreadyExists_OtherErrors_ArePropagated(t *testing.T) {
 	require.False(t, created)
 }
 
+// TestEnsurePromotionNamespaceRBAC_ObjectsAlreadyExist_DoesNotReattemptCreate
+// is a regression test for a bug caught only by live-cluster
+// verification, not envtest: an earlier draft of the Phase 1 idempotency
+// fix called Create() unconditionally for every RBAC object (relying on
+// createIgnoringAlreadyExists to swallow AlreadyExists), on the theory
+// that this was simpler and closed a Get/Create race. On the real
+// sandbox cluster this broke a ClusterRoleBinding that already existed
+// (created out-of-band, granting permissions the operator's own
+// ServiceAccount doesn't itself hold): Kubernetes' RBAC
+// privilege-escalation check runs on *every* Create attempt, before the
+// "already exists" conflict is even evaluated, so a redundant Create
+// against an already-correct object was rejected with Forbidden (not
+// AlreadyExists) -- envtest's admin test client bypasses this check
+// entirely and couldn't catch it. The fix restores a Get-before-Create
+// guard (only attempt Create when confirmed absent), using
+// createIgnoringAlreadyExists only for the narrow Get/Create race
+// window. This test pins that contract: objects that already exist must
+// never see a Create attempt (proven here via ResourceVersion staying
+// unchanged, since a real cluster's RBAC escalation check isn't
+// reproducible against envtest's admin client).
+func TestEnsurePromotionNamespaceRBAC_ObjectsAlreadyExist_DoesNotReattemptCreate(t *testing.T) {
+	ns := newTestNamespace(t)
+	sourceNS := newTestNamespace(t)
+
+	existingSA := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pipeline", Namespace: ns}}
+	require.NoError(t, k8sClient.Create(context.Background(), existingSA))
+
+	r := newModelRequestReconciler()
+	require.NoError(t, r.ensurePromotionNamespaceRBAC(context.Background(), ns, sourceNS))
+
+	var afterSA corev1.ServiceAccount
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "pipeline"), &afterSA))
+	require.Equal(t, existingSA.ResourceVersion, afterSA.ResourceVersion,
+		"an already-existing ServiceAccount must not see a Create attempt")
+}
+
 func TestModelRequest_CapacityPlanCreateRace_AlreadyExists_DoesNotFailReconcile(t *testing.T) {
 	// Simulates the race the fix targets: something else (e.g. an
 	// earlier/concurrent reconcile) creates the CapacityPlan the

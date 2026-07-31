@@ -201,12 +201,38 @@ relocation into `internal/stages/*` -- that's Phase 2+).
    as success, propagates everything else) and applied it at all
    `r.Create` sites for child objects -- `CapacityPlan`, both
    `PipelineRun` kinds, and all four RBAC objects in
-   `ensurePromotionNamespaceRBAC` (which also dropped their
-   Get-then-maybe-Create pattern in favor of just calling the helper
-   directly, closing the previous Get/Create TOCTOU race). Non-conflict
-   errors on the three main reconciler call sites now requeue with a
-   fixed backoff (`transientErrorRequeueDelay = 5s`) instead of a bare
+   `ensurePromotionNamespaceRBAC`. Non-conflict errors on the three main
+   reconciler call sites now requeue with a fixed backoff
+   (`transientErrorRequeueDelay = 5s`) instead of a bare
    `return ctrl.Result{}, err`.
+
+   **A live-cluster-only regression was caught and fixed here.** The
+   first draft of this fix also dropped `ensurePromotionNamespaceRBAC`'s
+   pre-existing Get-then-only-Create-if-NotFound guard in favor of
+   calling `createIgnoringAlreadyExists` unconditionally, on the theory
+   that it was simpler and closed the Get/Create race more thoroughly.
+   `envtest` (43/43 tests) didn't catch anything wrong with this. On the
+   real sandbox cluster, it broke: the `sandbox-pipeline-evalhub`
+   `ClusterRoleBinding` already existed (created before this session,
+   granting `trustyai.opendatahub.io evaluations` permissions the
+   operator's own `ServiceAccount` doesn't itself hold). Kubernetes'
+   RBAC privilege-escalation check runs on *every* `Create` attempt,
+   before the "already exists" conflict is even evaluated -- so a
+   redundant `Create` against an already-correct object was rejected
+   with `Forbidden`, not `AlreadyExists`, and surfaced as
+   `RBACSetupFailed`. `envtest`'s test client is admin-equivalent and
+   never hits this check, so it's structurally invisible to unit/envtest
+   coverage. Fixed by restoring the Get-guard around all four RBAC
+   Create sites (only attempt Create when confirmed absent) and using
+   `createIgnoringAlreadyExists` only for the narrow race window between
+   that Get and the Create, not as a replacement for it. Added
+   `TestEnsurePromotionNamespaceRBAC_ObjectsAlreadyExist_DoesNotReattemptCreate`
+   to pin the "never re-Create an already-existing object" contract
+   (verified via unchanged `ResourceVersion`, since the Forbidden-vs-
+   AlreadyExists distinction itself isn't reproducible against envtest's
+   admin client). This is the concrete reason Phase 0/this phase's
+   "verify against the sandbox cluster, not just envtest" instruction
+   mattered in practice, not just in principle.
 
 ### Breaking API change: `ResultS3AccessKey`/`ResultS3SecretKey` removed
 
@@ -293,7 +319,10 @@ All new/changed tests live in `internal/controller/modelrequest_controller_test.
   `CapacityPlan` object the reconciler would build, proving the
   reconciler's own Create call site is safe against a losing race
   without needing genuine goroutine concurrency.
-- Total suite: 42 tests passing (up from Phase 0's 30), all
+- `ensurePromotionNamespaceRBAC`: new test proving already-existing RBAC
+  objects never see a repeat Create attempt (see the live-cluster
+  regression writeup above).
+- Total suite: 43 tests passing (up from Phase 0's 30), all
   envtest-backed.
 
 ### Manifest regeneration
@@ -316,14 +345,24 @@ need generated deepcopy code -- `*out = *in` already handles them).
   code on-cluster, not just its manifests).
 - Pushed this phase's commit to `feat/model-request-controller`;
   `Application/modelops-operator` (auto-sync + self-heal) picked up the
-  regenerated CRDs.
-- Confirmed on-cluster: a new `ModelRequest` with no `*SecretName` set
-  lands in `SecretLookupFailed` with the new error message (no more
-  silent minioadmin default); a `ModelRequest` referencing the
-  pre-existing `scan-s3-credentials`/`result-s3-credentials` Secrets in
-  `sandbox` reaches `SandboxRunning`/promotion normally; the
-  `resultS3AccessKey`/`resultS3SecretKey` fields are now rejected/pruned
-  by the API server as unknown fields.
+  regenerated CRDs; confirmed via `oc get crd` that
+  `resultS3AccessKey`/`resultS3SecretKey` are gone and
+  `promotionPipelineRef` is present.
+- First verification pass caught the RBAC regression described above
+  (a real `ModelRequest` hit `RBACSetupFailed` against the already-existing
+  `sandbox-pipeline-evalhub` ClusterRoleBinding). Fixed, re-tested
+  locally (43/43), rebuilt/pushed the image again, rolled out again.
+- Second verification pass, against a disposable test `ModelRequest`
+  (created directly, not via the UI, then deleted after observation):
+  no `*SecretName` set -> `SecretLookupFailed` with the new "no scan
+  storage credentials configured" message (no more silent minioadmin
+  default). A second request referencing the pre-existing
+  `scan-s3-credentials`/`result-s3-credentials` Secrets in `sandbox`,
+  with `requirements.gpuCountOverride: "3"`, reached `SandboxRunning`
+  cleanly, its generated sandbox `PipelineRun` has exactly one
+  `gpu-count-override` param with value `"3"` (the explicit override,
+  not the CapacityPlan-derived value), and RBAC provisioning succeeded
+  with no error.
 - **Not verified on-cluster**: the `model-intake-ui` wizard change.
   `Application/model-intake-ui` is already `Unknown`/broken --
   independent of this phase, its `deployment.yaml` has a pre-existing

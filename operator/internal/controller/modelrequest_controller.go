@@ -665,10 +665,22 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			Namespace: targetNS,
 		},
 	}
-	if created, err := createIgnoringAlreadyExists(ctx, r.Client, sa); err != nil {
-		return fmt.Errorf("failed to create pipeline SA in %s: %w", targetNS, err)
-	} else if created {
-		logger.Info("created pipeline ServiceAccount", "namespace", targetNS)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sa), &corev1.ServiceAccount{}); apierrors.IsNotFound(err) {
+		// Only attempt Create when we've confirmed the object is absent:
+		// RBAC-granting objects like the RoleBindings/ClusterRoleBinding
+		// below can trip the API server's privilege-escalation check on
+		// *any* Create attempt (even a harmless no-op re-create of an
+		// object that already exists exactly as desired) if the
+		// controller's own ServiceAccount doesn't itself hold every
+		// permission being granted. createIgnoringAlreadyExists still
+		// guards the narrow race between this Get and the Create below.
+		if created, err := createIgnoringAlreadyExists(ctx, r.Client, sa); err != nil {
+			return fmt.Errorf("failed to create pipeline SA in %s: %w", targetNS, err)
+		} else if created {
+			logger.Info("created pipeline ServiceAccount", "namespace", targetNS)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to check for existing pipeline SA in %s: %w", targetNS, err)
 	}
 
 	rb := &rbacv1.RoleBinding{
@@ -689,10 +701,14 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if created, err := createIgnoringAlreadyExists(ctx, r.Client, rb); err != nil {
-		return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", targetNS, err)
-	} else if created {
-		logger.Info("created pipeline-edit RoleBinding", "namespace", targetNS)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(rb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
+		if created, err := createIgnoringAlreadyExists(ctx, r.Client, rb); err != nil {
+			return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", targetNS, err)
+		} else if created {
+			logger.Info("created pipeline-edit RoleBinding", "namespace", targetNS)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to check for existing pipeline-edit RoleBinding in %s: %w", targetNS, err)
 	}
 
 	maasRb := &rbacv1.RoleBinding{
@@ -713,10 +729,14 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if created, err := createIgnoringAlreadyExists(ctx, r.Client, maasRb); err != nil {
-		return fmt.Errorf("failed to create pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
-	} else if created {
-		logger.Info("created pipeline-maas-deployer RoleBinding", "namespace", targetNS)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(maasRb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
+		if created, err := createIgnoringAlreadyExists(ctx, r.Client, maasRb); err != nil {
+			return fmt.Errorf("failed to create pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
+		} else if created {
+			logger.Info("created pipeline-maas-deployer RoleBinding", "namespace", targetNS)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to check for existing pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
 	}
 
 	evalhubCrb := &rbacv1.ClusterRoleBinding{
@@ -740,10 +760,14 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if created, err := createIgnoringAlreadyExists(ctx, r.Client, evalhubCrb); err != nil {
-		return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", targetNS, err)
-	} else if created {
-		logger.Info("created evalhub ClusterRoleBinding", "namespace", targetNS)
+	if err := r.Get(ctx, client.ObjectKeyFromObject(evalhubCrb), &rbacv1.ClusterRoleBinding{}); apierrors.IsNotFound(err) {
+		if created, err := createIgnoringAlreadyExists(ctx, r.Client, evalhubCrb); err != nil {
+			return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", targetNS, err)
+		} else if created {
+			logger.Info("created evalhub ClusterRoleBinding", "namespace", targetNS)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to check for existing evalhub ClusterRoleBinding for %s: %w", targetNS, err)
 	}
 
 	return nil
