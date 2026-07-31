@@ -14,6 +14,11 @@ type ModelLifecycleProfileSpec struct {
 type WorkflowRef struct {
 	Engine      string `json:"engine"`
 	PipelineRef string `json:"pipelineRef"`
+	// PromotionPipelineRef selects the pipeline used for promotion runs.
+	// If empty, the controller falls back to a fixed default
+	// ("model-intake-promotion") rather than reusing PipelineRef, which
+	// names the sandbox stage's pipeline.
+	PromotionPipelineRef string `json:"promotionPipelineRef,omitempty"`
 }
 
 type ModelLifecycleProfileStatus struct {

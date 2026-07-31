@@ -48,8 +48,8 @@ def intake_form():
         "access-role": "view",
         "s3-endpoint": "http://minio.modelops-storage.svc.cluster.local:9000",
         "s3-bucket": "compliance-artifact-results",
-        "s3-access-key": "minioadmin",
-        "s3-secret-key": "minioadmin",
+        "scan-s3-secret-name": "scan-s3-credentials",
+        "result-s3-secret-name": "result-s3-credentials",
     }
     return render_template("intake/wizard.html", defaults=defaults, active_page="intake")
 
@@ -146,9 +146,11 @@ def submit():
             "authorizedGroup": form_data.get("maas-authorized-group", ""),
         }
 
-    # S3 connection overrides (expert)
-    for field, json_key in [("s3-endpoint", "resultS3Endpoint"), ("s3-access-key", "resultS3AccessKey"),
-                             ("s3-secret-key", "resultS3SecretKey"), ("s3-bucket", "resultS3Bucket")]:
+    # S3 connection overrides (expert). Credentials are never accepted as
+    # raw form values -- only a non-secret endpoint/bucket override here;
+    # actual credentials are always resolved via the *-secret-name fields
+    # below (a Kubernetes Secret reference), never inline.
+    for field, json_key in [("s3-endpoint", "resultS3Endpoint"), ("s3-bucket", "resultS3Bucket")]:
         val = form_data.get(field, "")
         if val:
             spec[json_key] = val

@@ -61,6 +61,13 @@ spec:
                     type: string
                   pipelineRef:
                     type: string
+                  promotionPipelineRef:
+                    description: |-
+                      PromotionPipelineRef selects the pipeline used for promotion runs.
+                      If empty, the controller falls back to a fixed default
+                      ("model-intake-promotion") rather than reusing PipelineRef, which
+                      names the sandbox stage's pipeline.
+                    type: string
                 required:
                 - engine
                 - pipelineRef

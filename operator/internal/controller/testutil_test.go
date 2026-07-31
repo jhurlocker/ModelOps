@@ -100,11 +100,41 @@ func newPlatformConfig(t *testing.T, ns, name string, spec modelopsv1alpha1.Plat
 	return c
 }
 
+// newS3CredentialsSecret creates a Secret shaped the way resolveSecrets
+// expects a ScanS3SecretName/ResultS3SecretName reference to look
+// (endpoint/accessKeyId/secretAccessKey keys), so tests can exercise the
+// real secretRef-resolution path instead of any hardcoded fallback.
+func newS3CredentialsSecret(t *testing.T, ns, name string) *corev1.Secret {
+	t.Helper()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data: map[string][]byte{
+			"endpoint":        []byte("http://test-minio.example.svc.cluster.local:9000"),
+			"accessKeyId":     []byte("test-access-key"),
+			"secretAccessKey": []byte("test-secret-key"),
+		},
+	}
+	if err := k8sClient.Create(context.Background(), secret); err != nil {
+		t.Fatalf("failed to create Secret %s/%s: %v", ns, name, err)
+	}
+	return secret
+}
+
 // newModelRequest creates a ModelRequest referencing profileName in ns,
 // with a minimal valid model identity, and returns it (with server-set
 // fields such as UID/ResourceVersion populated).
+//
+// It also provisions a real S3-credentials Secret and points
+// spec.scanS3SecretName/spec.resultS3SecretName at it by default, so
+// every test exercises the real secretRef-resolution path in
+// resolveSecrets rather than relying on a hardcoded credential fallback
+// (removed in Phase 1). Tests that specifically want to exercise the
+// "no secret configured" failure path should clear these fields via
+// mutate.
 func newModelRequest(t *testing.T, ns, name, profileName string, mutate func(*modelopsv1alpha1.ModelRequest)) *modelopsv1alpha1.ModelRequest {
 	t.Helper()
+	secretName := name + "-s3-credentials"
+	newS3CredentialsSecret(t, ns, secretName)
 	mr := &modelopsv1alpha1.ModelRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: modelopsv1alpha1.ModelRequestSpec{
@@ -114,8 +144,10 @@ func newModelRequest(t *testing.T, ns, name, profileName string, mutate func(*mo
 				Name:       name,
 				Version:    "v1",
 			},
-			LifecycleProfile: profileName,
-			RequestedBy:      "test-suite",
+			LifecycleProfile:  profileName,
+			RequestedBy:       "test-suite",
+			ScanS3SecretName:  secretName,
+			ResultS3SecretName: secretName,
 		},
 	}
 	if mutate != nil {

@@ -19,10 +19,11 @@ type ModelRequestSpec struct {
 	ScanS3SecretName      string `json:"scanS3SecretName,omitempty"`
 	ResultS3SecretName    string `json:"resultS3SecretName,omitempty"`
 
-	ResultS3Endpoint  string `json:"resultS3Endpoint,omitempty"`
-	ResultS3AccessKey string `json:"resultS3AccessKey,omitempty"`
-	ResultS3SecretKey string `json:"resultS3SecretKey,omitempty"`
-	ResultS3Bucket    string `json:"resultS3Bucket,omitempty"`
+	// ResultS3Endpoint overrides the S3-compatible endpoint used for
+	// scan/benchmark result storage. Credentials are never accepted here
+	// -- they must be resolved via ResultS3SecretName's secretRef.
+	ResultS3Endpoint string `json:"resultS3Endpoint,omitempty"`
+	ResultS3Bucket   string `json:"resultS3Bucket,omitempty"`
 
 	MaaS  *MaaSOverride `json:"maas,omitempty"`
 }

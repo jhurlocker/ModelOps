@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 
@@ -21,6 +22,29 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// transientErrorRequeueDelay backs off retries for Create calls that fail
+// with something other than AlreadyExists (e.g. a momentarily unavailable
+// API server), so the controller doesn't hot-loop as fast as the
+// workqueue allows against a persistent problem.
+const transientErrorRequeueDelay = 5 * time.Second
+
+// createIgnoringAlreadyExists creates obj, treating AlreadyExists as a
+// harmless no-op (created=false, err=nil) instead of a reconcile-failing
+// error. This makes Create calls for child objects idempotent against
+// races where a prior Get saw the object as missing but it was created
+// by a concurrent/earlier reconcile before this Create landed. Any other
+// error is returned as-is for the caller to handle (typically with a
+// backoff requeue).
+func createIgnoringAlreadyExists(ctx context.Context, c client.Client, obj client.Object) (created bool, err error) {
+	if err := c.Create(ctx, obj); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
 
 type ModelRequestReconciler struct {
 	client.Client
@@ -75,10 +99,11 @@ func (r *ModelRequestReconciler) Reconcile(
 		if err := controllerutil.SetControllerReference(&modelRequest, &capacityPlan, r.Scheme); err != nil {
 			return ctrl.Result{}, err
 		}
-		if err := r.Create(ctx, &capacityPlan); err != nil {
-			return ctrl.Result{}, err
+		if created, err := createIgnoringAlreadyExists(ctx, r.Client, &capacityPlan); err != nil {
+			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
+		} else if created {
+			logger.Info("created CapacityPlan", "name", capacityPlan.Name)
 		}
-		logger.Info("created CapacityPlan", "name", capacityPlan.Name)
 		modelRequest.Status.Phase = "CapacityPlanning"
 		modelRequest.Status.Message = "Capacity plan created, waiting for GPU advisor"
 		if err := r.Status().Update(ctx, &modelRequest); err != nil {
@@ -120,8 +145,9 @@ func (r *ModelRequestReconciler) Reconcile(
 			r.sandboxPipelineNameOrDefault(profile, &modelRequest),
 			r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
 			&modelRequest, r.Scheme)
-		if err := r.Create(ctx, &sandboxRun); err != nil {
-			return ctrl.Result{}, err
+		created, err := createIgnoringAlreadyExists(ctx, r.Client, &sandboxRun)
+		if err != nil {
+			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
 		}
 		modelRequest.Status.Phase = "SandboxRunning"
 		modelRequest.Status.SandboxPipelineRunName = sandboxRun.Name
@@ -130,7 +156,9 @@ func (r *ModelRequestReconciler) Reconcile(
 		if err := r.Status().Update(ctx, &modelRequest); err != nil {
 			return ctrl.Result{}, err
 		}
-		logger.Info("created sandbox PipelineRun", "pipelineRun", sandboxRun.Name)
+		if created {
+			logger.Info("created sandbox PipelineRun", "pipelineRun", sandboxRun.Name)
+		}
 		return ctrl.Result{}, nil
 	}
 	if err != nil {
@@ -171,10 +199,13 @@ func (r *ModelRequestReconciler) Reconcile(
 			isLast := i == len(promoNamespaces)-1
 			params := r.buildPromotionPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets, ns, planID, isFirst, isLast)
 			promotionRun = buildPipelineRun(prName, modelRequest.Namespace, pipelineName, params, &modelRequest, r.Scheme)
-			if err := r.Create(ctx, &promotionRun); err != nil {
-				return ctrl.Result{}, err
+			created, createErr := createIgnoringAlreadyExists(ctx, r.Client, &promotionRun)
+			if createErr != nil {
+				return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, createErr
 			}
-			logger.Info("created promotion PipelineRun", "pipelineRun", promotionRun.Name, "namespace", ns)
+			if created {
+				logger.Info("created promotion PipelineRun", "pipelineRun", promotionRun.Name, "namespace", ns)
+			}
 			allSucceeded = false
 			anyRunning = true
 			modelRequest.Status.PromotionPipelineRunName = prName
@@ -259,6 +290,9 @@ func (r *ModelRequestReconciler) sandboxPipelineNameOrDefault(profile *modelopsv
 }
 
 func (r *ModelRequestReconciler) promotionPipelineNameOrDefault(profile *modelopsv1alpha1.ModelLifecycleProfile, mr *modelopsv1alpha1.ModelRequest) string {
+	if profile != nil && profile.Spec.Workflow.PromotionPipelineRef != "" {
+		return profile.Spec.Workflow.PromotionPipelineRef
+	}
 	return "model-intake-promotion"
 }
 
@@ -364,14 +398,18 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 		s.scanS3SecretKey = string(secret.Data["secretAccessKey"])
 	}
 
+	// Endpoint is not a credential -- a hardcoded default cluster-local
+	// service address is fine to fall back to. Access/secret keys are
+	// credentials and must come from a real Secret; no hardcoded
+	// credential fallback is allowed (see AGENTS.md: "Never store
+	// plaintext credentials..."). If no *SecretName was configured (or
+	// the referenced Secret didn't populate these keys), fail loudly
+	// instead of silently defaulting to a known credential pair.
 	if s.scanS3Endpoint == "" {
 		s.scanS3Endpoint = "http://minio.modelops-storage.svc.cluster.local:9000"
 	}
-	if s.scanS3AccessKey == "" {
-		s.scanS3AccessKey = "minioadmin"
-	}
-	if s.scanS3SecretKey == "" {
-		s.scanS3SecretKey = "minioadmin"
+	if s.scanS3AccessKey == "" || s.scanS3SecretKey == "" {
+		return nil, fmt.Errorf("no scan storage credentials configured: set spec.scanS3SecretName to a Secret with accessKeyId/secretAccessKey keys")
 	}
 
 	if mr.Spec.ResultS3SecretName != "" {
@@ -387,21 +425,11 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 	if s.resultS3Endpoint == "" {
 		s.resultS3Endpoint = "http://minio.modelops-storage.svc.cluster.local:9000"
 	}
-	if s.resultS3AccessKey == "" {
-		s.resultS3AccessKey = "minioadmin"
-	}
-	if s.resultS3SecretKey == "" {
-		s.resultS3SecretKey = "minioadmin"
-	}
-
 	if mr.Spec.ResultS3Endpoint != "" {
 		s.resultS3Endpoint = mr.Spec.ResultS3Endpoint
 	}
-	if mr.Spec.ResultS3AccessKey != "" {
-		s.resultS3AccessKey = mr.Spec.ResultS3AccessKey
-	}
-	if mr.Spec.ResultS3SecretKey != "" {
-		s.resultS3SecretKey = mr.Spec.ResultS3SecretKey
+	if s.resultS3AccessKey == "" || s.resultS3SecretKey == "" {
+		return nil, fmt.Errorf("no result storage credentials configured: set spec.resultS3SecretName to a Secret with accessKeyId/secretAccessKey keys")
 	}
 
 	return s, nil
@@ -568,7 +596,13 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "ignore-unfixed", strOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
 	addParam(&p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
 
-	if plan != nil && plan.Status.GPUsNeeded > 0 {
+	// Exactly one gpu-count-override param: an explicit
+	// reqs.GPUCountOverride always wins over the CapacityPlan-derived
+	// value; the plan-derived value is only used as a fallback when no
+	// override was set.
+	if reqs.GPUCountOverride != "" {
+		addParam(&p, "gpu-count-override", reqs.GPUCountOverride)
+	} else if plan != nil && plan.Status.GPUsNeeded > 0 {
 		addParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
 	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.ContextLength, 32768)))
@@ -591,7 +625,6 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "chart-url", strOrDefault(cfg.Spec.ChartURL, "https://redhat-ai-services.github.io/helm-charts/"))
 	addParam(&p, "chart-version", strOrDefault(cfg.Spec.ChartVersion, "0.7.1"))
 	addParam(&p, "values-content", reqs.ValuesContent)
-	addParam(&p, "gpu-count-override", reqs.GPUCountOverride)
 	addParam(&p, "hardware-profile-name", strOrDefault(cfg.Spec.HardwareProfileName, "gpu-profile"))
 	addParam(&p, "hardware-profile-namespace", strOrDefault(cfg.Spec.HardwareProfileNamespace, "redhat-ods-applications"))
 
@@ -632,10 +665,9 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			Namespace: targetNS,
 		},
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(sa), &corev1.ServiceAccount{}); apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, sa); err != nil {
-			return fmt.Errorf("failed to create pipeline SA in %s: %w", targetNS, err)
-		}
+	if created, err := createIgnoringAlreadyExists(ctx, r.Client, sa); err != nil {
+		return fmt.Errorf("failed to create pipeline SA in %s: %w", targetNS, err)
+	} else if created {
 		logger.Info("created pipeline ServiceAccount", "namespace", targetNS)
 	}
 
@@ -657,10 +689,9 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(rb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, rb); err != nil {
-			return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", targetNS, err)
-		}
+	if created, err := createIgnoringAlreadyExists(ctx, r.Client, rb); err != nil {
+		return fmt.Errorf("failed to create pipeline-edit RoleBinding in %s: %w", targetNS, err)
+	} else if created {
 		logger.Info("created pipeline-edit RoleBinding", "namespace", targetNS)
 	}
 
@@ -682,10 +713,9 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(maasRb), &rbacv1.RoleBinding{}); apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, maasRb); err != nil {
-			return fmt.Errorf("failed to create pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
-		}
+	if created, err := createIgnoringAlreadyExists(ctx, r.Client, maasRb); err != nil {
+		return fmt.Errorf("failed to create pipeline-maas-deployer RoleBinding in %s: %w", targetNS, err)
+	} else if created {
 		logger.Info("created pipeline-maas-deployer RoleBinding", "namespace", targetNS)
 	}
 
@@ -710,10 +740,9 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 			},
 		},
 	}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(evalhubCrb), &rbacv1.ClusterRoleBinding{}); apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, evalhubCrb); err != nil {
-			return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", targetNS, err)
-		}
+	if created, err := createIgnoringAlreadyExists(ctx, r.Client, evalhubCrb); err != nil {
+		return fmt.Errorf("failed to create evalhub ClusterRoleBinding for %s: %w", targetNS, err)
+	} else if created {
 		logger.Info("created evalhub ClusterRoleBinding", "namespace", targetNS)
 	}
 

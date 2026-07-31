@@ -6,14 +6,17 @@ package controller
 // status transitions as tests, so Phases 2-6 (which relocate this logic
 // without intending to change it) have a regression net.
 //
-// Several tests below are explicitly labeled "KnownBehavior" or
-// "KnownBug": they pin something Phase 1 of REFACTOR_PLAN.md is already
-// scoped to change (the duplicate gpu-count-override param, the ignored
-// `profile` argument in promotionPipelineNameOrDefault, the hardcoded
-// minioadmin credential fallback, and promotion namespaces not being
-// gated on the previous namespace's success). These are captured as-is,
-// not treated as behavior to preserve forever -- expect these specific
-// tests to be intentionally updated when Phase 1 lands.
+// Several tests below are explicitly labeled "KnownBehavior": they pin
+// something not yet fixed (promotion namespaces not being gated on the
+// previous namespace's success -- a later-phase target). These are
+// captured as-is, not treated as behavior to preserve forever.
+//
+// Phase 1 of REFACTOR_PLAN.md landed the fixes for the *other* items this
+// comment used to describe (the duplicate gpu-count-override param, the
+// ignored `profile` argument in promotionPipelineNameOrDefault, the
+// hardcoded minioadmin credential fallback, and Create-call idempotency)
+// -- see the tests below without a "KnownBug"/"KnownBehavior" prefix for
+// the new, corrected behavior.
 
 import (
 	"context"
@@ -395,43 +398,62 @@ func TestModelRequest_AllPromotionsSucceeded_SetsSucceededPhase(t *testing.T) {
 
 // --- resolveSecrets ---
 
-func TestResolveSecrets_NoSecretsConfigured_KnownBehavior_DefaultsToHardcodedMinioCredentials(t *testing.T) {
-	// KNOWN BEHAVIOR (Phase 1 target): with no *SecretName fields set on
-	// the ModelRequest, resolveSecrets silently falls back to a
-	// hardcoded minioadmin/minioadmin credential pair rather than
-	// failing the reconcile. Captured as-is.
+func TestResolveSecrets_SecretNamesConfigured_ReturnsSecretDerivedCredentials(t *testing.T) {
+	// Phase 1 fix: with ScanS3SecretName/ResultS3SecretName set (the
+	// newModelRequest default), resolveSecrets returns the values from
+	// the referenced Secret -- never a hardcoded credential pair.
 	ns := newTestNamespace(t)
 	mr := newModelRequest(t, ns, "mr-1", "unused-profile", nil)
 
 	r := newModelRequestReconciler()
 	secrets, err := r.resolveSecrets(context.Background(), mr)
 	require.NoError(t, err)
-	require.Equal(t, "http://minio.modelops-storage.svc.cluster.local:9000", secrets.scanS3Endpoint)
-	require.Equal(t, "minioadmin", secrets.scanS3AccessKey)
-	require.Equal(t, "minioadmin", secrets.scanS3SecretKey)
-	require.Equal(t, "http://minio.modelops-storage.svc.cluster.local:9000", secrets.resultS3Endpoint)
-	require.Equal(t, "minioadmin", secrets.resultS3AccessKey)
-	require.Equal(t, "minioadmin", secrets.resultS3SecretKey)
+	require.Equal(t, "test-access-key", secrets.scanS3AccessKey)
+	require.Equal(t, "test-secret-key", secrets.scanS3SecretKey)
+	require.Equal(t, "test-access-key", secrets.resultS3AccessKey)
+	require.Equal(t, "test-secret-key", secrets.resultS3SecretKey)
 }
 
-func TestResolveSecrets_DeprecatedPlaintextSpecFields_KnownBehavior_OverrideDefaults(t *testing.T) {
-	// KNOWN BEHAVIOR (Phase 1 removes these fields entirely): today,
-	// mr.Spec.ResultS3Endpoint/AccessKey/SecretKey -- plaintext spec
-	// fields -- take precedence over both the secretRef-derived value
-	// and the hardcoded default.
+func TestResolveSecrets_ResultS3EndpointOverride_StillHonored(t *testing.T) {
+	// ResultS3Endpoint (a non-credential URL override) was intentionally
+	// NOT removed in Phase 1 -- only the plaintext
+	// ResultS3AccessKey/ResultS3SecretKey fields were.
 	ns := newTestNamespace(t)
 	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
 		mr.Spec.ResultS3Endpoint = "http://custom-s3:9000"
-		mr.Spec.ResultS3AccessKey = "custom-key"
-		mr.Spec.ResultS3SecretKey = "custom-secret"
 	})
 
 	r := newModelRequestReconciler()
 	secrets, err := r.resolveSecrets(context.Background(), mr)
 	require.NoError(t, err)
 	require.Equal(t, "http://custom-s3:9000", secrets.resultS3Endpoint)
-	require.Equal(t, "custom-key", secrets.resultS3AccessKey)
-	require.Equal(t, "custom-secret", secrets.resultS3SecretKey)
+	require.Equal(t, "test-access-key", secrets.resultS3AccessKey, "credentials still come only from the Secret")
+}
+
+func TestResolveSecrets_NoScanS3SecretNameConfigured_FailsWithClearError(t *testing.T) {
+	// Phase 1 fix: no hardcoded minioadmin/minioadmin credential
+	// fallback -- resolveSecrets must fail loudly instead.
+	ns := newTestNamespace(t)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.ScanS3SecretName = ""
+	})
+
+	r := newModelRequestReconciler()
+	_, err := r.resolveSecrets(context.Background(), mr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no scan storage credentials configured")
+}
+
+func TestResolveSecrets_NoResultS3SecretNameConfigured_FailsWithClearError(t *testing.T) {
+	ns := newTestNamespace(t)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.ResultS3SecretName = ""
+	})
+
+	r := newModelRequestReconciler()
+	_, err := r.resolveSecrets(context.Background(), mr)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no result storage credentials configured")
 }
 
 func TestResolveSecrets_MissingReferencedSecret_ReturnsError(t *testing.T) {
@@ -445,14 +467,31 @@ func TestResolveSecrets_MissingReferencedSecret_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestModelRequest_NoS3CredentialsConfigured_SetsSecretLookupFailedPhase(t *testing.T) {
+	// Reconciler-level proof that the resolveSecrets fix actually stops
+	// the request, via the existing SecretLookupFailed status path,
+	// instead of silently proceeding with a guessed credential pair.
+	ns := newTestNamespace(t)
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
+	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.ScanS3SecretName = ""
+		mr.Spec.ResultS3SecretName = ""
+	})
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "SecretLookupFailed", mr.Status.Phase)
+	require.Contains(t, mr.Status.Message, "no scan storage credentials configured")
+}
+
 // --- Param builder golden tests (regression net for Phase 3's dedup) ---
 
-func TestBuildSandboxPipelineParams_KnownBug_GPUCountOverrideAddedTwice(t *testing.T) {
-	// KNOWN BUG (Phase 1 item 3 target): when both the CapacityPlan's
-	// derived GPU count and an explicit reqs.GPUCountOverride are set,
-	// buildSandboxPipelineParams appends TWO params both named
-	// "gpu-count-override" instead of having the override take
-	// precedence. Captured as-is.
+func TestBuildSandboxPipelineParams_ExplicitOverride_TakesPrecedenceAndAppearsExactlyOnce(t *testing.T) {
+	// Phase 1 fix: when both the CapacityPlan's derived GPU count and an
+	// explicit reqs.GPUCountOverride are set, exactly ONE
+	// "gpu-count-override" param must be added, using the override.
 	r := newModelRequestReconciler()
 	mr := &modelopsv1alpha1.ModelRequest{
 		Spec: modelopsv1alpha1.ModelRequestSpec{
@@ -469,22 +508,103 @@ func TestBuildSandboxPipelineParams_KnownBug_GPUCountOverrideAddedTwice(t *testi
 	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
 
 	values := findAllParams(params, "gpu-count-override")
-	require.Equal(t, []string{"4", "7"}, values, "two gpu-count-override params: plan-derived first, then the explicit override")
+	require.Equal(t, []string{"7"}, values, "explicit override must win and the plan-derived value must not also be added")
 }
 
-func TestPromotionPipelineNameOrDefault_KnownBug_IgnoresProfileArgument(t *testing.T) {
-	// KNOWN BUG (Phase 1 item 4 target): promotionPipelineNameOrDefault
-	// always returns the same hardcoded name, regardless of what the
-	// profile says. Captured as-is.
+func TestBuildSandboxPipelineParams_NoOverride_FallsBackToPlanDerivedGPUCount(t *testing.T) {
+	r := newModelRequestReconciler()
+	mr := &modelopsv1alpha1.ModelRequest{
+		Spec: modelopsv1alpha1.ModelRequestSpec{
+			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
+		},
+	}
+	cfg := &modelopsv1alpha1.PlatformConfig{}
+	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
+	secrets := &resolvedSecrets{}
+
+	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
+
+	values := findAllParams(params, "gpu-count-override")
+	require.Equal(t, []string{"4"}, values)
+}
+
+func TestBuildSandboxPipelineParams_NoOverrideAndNoPlan_OmitsParam(t *testing.T) {
+	r := newModelRequestReconciler()
+	mr := &modelopsv1alpha1.ModelRequest{
+		Spec: modelopsv1alpha1.ModelRequestSpec{
+			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
+		},
+	}
+	cfg := &modelopsv1alpha1.PlatformConfig{}
+	secrets := &resolvedSecrets{}
+
+	params := r.buildSandboxPipelineParams(mr, nil, cfg, nil, secrets)
+
+	values := findAllParams(params, "gpu-count-override")
+	require.Empty(t, values)
+}
+
+func TestPromotionPipelineNameOrDefault_UsesProfileOverrideWhenSet(t *testing.T) {
+	// Phase 1 fix: promotionPipelineNameOrDefault must actually select a
+	// per-profile promotion pipeline name via
+	// profile.Spec.Workflow.PromotionPipelineRef, rather than ignoring
+	// the profile argument entirely.
 	r := newModelRequestReconciler()
 	profile := &modelopsv1alpha1.ModelLifecycleProfile{
 		Spec: modelopsv1alpha1.ModelLifecycleProfileSpec{
-			Workflow: modelopsv1alpha1.WorkflowRef{Engine: "tekton", PipelineRef: "a-totally-different-promotion-pipeline"},
+			Workflow: modelopsv1alpha1.WorkflowRef{
+				Engine:               "tekton",
+				PipelineRef:          "some-sandbox-pipeline",
+				PromotionPipelineRef: "a-totally-different-promotion-pipeline",
+			},
+		},
+	}
+	mr := &modelopsv1alpha1.ModelRequest{}
+
+	require.Equal(t, "a-totally-different-promotion-pipeline", r.promotionPipelineNameOrDefault(profile, mr))
+}
+
+func TestPromotionPipelineNameOrDefault_DefaultsWhenProfileHasNoOverride(t *testing.T) {
+	r := newModelRequestReconciler()
+	profile := &modelopsv1alpha1.ModelLifecycleProfile{
+		Spec: modelopsv1alpha1.ModelLifecycleProfileSpec{
+			Workflow: modelopsv1alpha1.WorkflowRef{Engine: "tekton", PipelineRef: "some-sandbox-pipeline"},
 		},
 	}
 	mr := &modelopsv1alpha1.ModelRequest{}
 
 	require.Equal(t, "model-intake-promotion", r.promotionPipelineNameOrDefault(profile, mr))
+}
+
+func TestPromotionPipelineNameOrDefault_NilProfile_Defaults(t *testing.T) {
+	r := newModelRequestReconciler()
+	mr := &modelopsv1alpha1.ModelRequest{}
+
+	require.Equal(t, "model-intake-promotion", r.promotionPipelineNameOrDefault(nil, mr))
+}
+
+func TestModelRequest_PromotionUsesProfilePromotionPipelineRef_EndToEnd(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, "staging")
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	newProfile(t, ns, "profile-1", modelopsv1alpha1.ModelLifecycleProfileSpec{
+		Workflow: modelopsv1alpha1.WorkflowRef{
+			Engine:               "tekton",
+			PipelineRef:          "model-intake-sandbox",
+			PromotionPipelineRef: "profile-promotion-pipeline",
+		},
+		PlatformConfigRef: "cfg-1",
+	})
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+	setupSucceededSandbox(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+
+	var pr tektonv1.PipelineRun
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "mr-1-promotion-staging"), &pr))
+	require.Equal(t, "profile-promotion-pipeline", pr.Spec.PipelineRef.Name)
 }
 
 // --- Status update no-op guard ---
@@ -507,4 +627,75 @@ func TestModelRequest_UpdateStatus_NoOpWhenPhaseAndMessageUnchanged(t *testing.T
 	_, err = r.updateStatus(ctx, mr, "DifferentPhase", "some message")
 	require.NoError(t, err)
 	require.NotEqual(t, rv1, mr.ResourceVersion, "a real phase change must still be persisted")
+}
+
+// --- createIgnoringAlreadyExists idempotency helper ---
+//
+// Phase 1 fix: anywhere the controller calls r.Create(...) for a child
+// object (CapacityPlan, PipelineRun, RBAC objects), an AlreadyExists
+// error (e.g. from a race between a prior Get-not-found and this Create)
+// must be treated as a harmless no-op, not surfaced as a raw reconcile
+// error.
+
+func TestCreateIgnoringAlreadyExists_ObjectAbsent_CreatesAndReportsCreated(t *testing.T) {
+	ns := newTestNamespace(t)
+	obj := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-absent", Namespace: ns}}
+
+	created, err := createIgnoringAlreadyExists(context.Background(), k8sClient, obj)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	var got corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "cm-absent"), &got))
+}
+
+func TestCreateIgnoringAlreadyExists_ObjectAlreadyExists_TreatsAsSuccessNotError(t *testing.T) {
+	ns := newTestNamespace(t)
+	existing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-existing", Namespace: ns}}
+	require.NoError(t, k8sClient.Create(context.Background(), existing))
+
+	dup := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-existing", Namespace: ns}}
+	created, err := createIgnoringAlreadyExists(context.Background(), k8sClient, dup)
+	require.NoError(t, err, "AlreadyExists must not be surfaced as an error")
+	require.False(t, created, "an object that already existed must be reported as not newly created")
+}
+
+func TestCreateIgnoringAlreadyExists_OtherErrors_ArePropagated(t *testing.T) {
+	// A Namespace that doesn't exist produces a real (non-AlreadyExists)
+	// error from the API server, which must still be surfaced so the
+	// caller can back off/retry rather than silently swallowing it.
+	obj := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-no-ns", Namespace: "does-not-exist-ns-xyz"}}
+
+	created, err := createIgnoringAlreadyExists(context.Background(), k8sClient, obj)
+	require.Error(t, err)
+	require.False(t, created)
+}
+
+func TestModelRequest_CapacityPlanCreateRace_AlreadyExists_DoesNotFailReconcile(t *testing.T) {
+	// Simulates the race the fix targets: something else (e.g. an
+	// earlier/concurrent reconcile) creates the CapacityPlan the
+	// controller is about to create, between the controller's Get
+	// (NotFound) and its Create call. Exercised directly against the
+	// idempotency helper using the exact object the reconciler would
+	// build, proving the reconciler's own Create call site is safe
+	// against this race without needing genuine goroutine concurrency.
+	ns := newTestNamespace(t)
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	profile := newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
+	mr := newModelRequest(t, ns, "mr-1", "profile-1", nil)
+
+	r := newModelRequestReconciler()
+	var cfg modelopsv1alpha1.PlatformConfig
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "cfg-1"), &cfg))
+
+	plan := r.buildCapacityPlan(mr, "mr-1-capacity", profile, &cfg)
+	// Someone else creates it first.
+	winner := plan
+	require.NoError(t, k8sClient.Create(context.Background(), &winner))
+
+	// The reconciler's own attempt now loses the race.
+	loser := plan
+	created, err := createIgnoringAlreadyExists(context.Background(), r.Client, &loser)
+	require.NoError(t, err, "losing a Create race to an equivalent object must not fail the reconcile")
+	require.False(t, created)
 }

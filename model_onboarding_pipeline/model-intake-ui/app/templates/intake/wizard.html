@@ -309,7 +309,7 @@
             </div>
             <div class="form-group" style="margin-top:12px;padding-top:12px;border-top:1px solid #ccc">
                 <label style="font-weight:600">S3 Connection Override</label>
-                <p style="font-size:11px;color:#666;margin:0 0 8px 0">Defaults: MinIO at minio.modelops-storage.svc.cluster.local:9000</p>
+                <p style="font-size:11px;color:#666;margin:0 0 8px 0">Credentials are never entered here -- reference a Kubernetes Secret (in this namespace) containing accessKeyId/secretAccessKey keys instead.</p>
             </div>
             <div class="form-row">
                 <div class="form-group">
@@ -323,12 +323,12 @@
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label>S3 Access Key ID</label>
-                    <input type="text" name="s3-access-key" value="{{ defaults.get('s3-access-key', 'minioadmin') }}">
+                    <label>Scan S3 Secret Name</label>
+                    <input type="text" name="scan-s3-secret-name" value="{{ defaults.get('scan-s3-secret-name', 'scan-s3-credentials') }}">
                 </div>
                 <div class="form-group">
-                    <label>S3 Secret Access Key</label>
-                    <input type="password" name="s3-secret-key" value="{{ defaults.get('s3-secret-key', 'minioadmin') }}">
+                    <label>Result S3 Secret Name</label>
+                    <input type="text" name="result-s3-secret-name" value="{{ defaults.get('result-s3-secret-name', 'result-s3-credentials') }}">
                 </div>
             </div>
         </div>
