@@ -8,6 +8,7 @@ import (
 	"time"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
+	"github.com/jhurlocker/modelops-operator/internal/stagecommon"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -545,18 +546,18 @@ func (r *ModelRequestReconciler) buildCapacityPlan(
 			ModelRef: modelopsv1alpha1.CapacityPlanModelRef{
 				ModelRequestName: mr.Name,
 			},
-			ContextLength:         intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768),
-			Concurrency:           intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4),
-			AllowTimeSlicing:      boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true),
-			AllowMIG:              boolOrDefault(reqs.GPUConfig.AllowMIG, false),
-			IsolationPolicy:       strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"),
+			ContextLength:         stagecommon.IntOrDefault(reqs.BenchmarkTargets.ContextLength, 32768),
+			Concurrency:           stagecommon.IntOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4),
+			AllowTimeSlicing:      stagecommon.BoolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true),
+			AllowMIG:              stagecommon.BoolOrDefault(reqs.GPUConfig.AllowMIG, false),
+			IsolationPolicy:       stagecommon.StrOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"),
 			AdvisorEndpoint:       reqs.AdvisorEndpoint,
 			AdvisorSecretName:     cfg.Spec.AdvisorSecretName,
 			AdvisorTimeoutSeconds: cfg.Spec.AdvisorTimeoutSeconds,
 			GPUOperatorNamespace:  cfg.Spec.GPUOperatorNamespace,
 			ClusterPolicyName:     cfg.Spec.ClusterPolicyName,
 			TimeSlicingConfigMap:  cfg.Spec.TimeSlicingConfigMap,
-			MaxTimeSlices:         intOrDefault(cfg.Spec.MaxTimeSlices, 8),
+			MaxTimeSlices:         stagecommon.IntOrDefault(cfg.Spec.MaxTimeSlices, 8),
 		},
 	}
 
@@ -570,88 +571,51 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	plan *modelopsv1alpha1.CapacityPlan,
 	secrets *resolvedSecrets,
 ) tektonv1.Params {
-	p := tektonv1.Params{}
 	spec := mr.Spec
 	reqs := spec.Requirements
 	if reqs == nil {
 		reqs = &modelopsv1alpha1.ModelRequirements{}
 	}
 
-	addParam(&p, "model-id", spec.Model.URI)
-	addParam(&p, "model-name", strOrDefault(spec.Model.Name, "unknown"))
-	addParam(&p, "model-version", strOrDefault(spec.Model.Version, "v1"))
-	addParam(&p, "model-tokenizer", spec.Model.Tokenizer)
-	addParam(&p, "model-source-type", spec.Model.SourceType)
-	addParam(&p, "display-name", spec.DisplayName)
-	addParam(&p, "business-justification", spec.BusinessJustification)
-	addParam(&p, "requested-by", spec.RequestedBy)
+	p := stagecommon.BuildCommonModelParams(spec, reqs, cfg, stagecommon.Secrets{
+		EvalHubToken:      secrets.evalhubToken,
+		HuggingFaceToken:  secrets.huggingfaceToken,
+		ResultS3Endpoint:  secrets.resultS3Endpoint,
+		ResultS3AccessKey: secrets.resultS3AccessKey,
+		ResultS3SecretKey: secrets.resultS3SecretKey,
+	})
 
-	addParam(&p, "target-namespace", strOrDefault(reqs.SandboxNamespace, "sandbox"))
+	stagecommon.AddParam(&p, "target-namespace", stagecommon.StrOrDefault(reqs.SandboxNamespace, "sandbox"))
 
-	addParam(&p, "modelcar-repo", strOrDefault(cfg.Spec.ModelCarRepo, "redhat-ai-services/modelcar-catalog"))
-	addParam(&p, "modelcar-image", "")
-
-	addParam(&p, "artifact-scan-image", strOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
-	addParam(&p, "artifact-cve-threshold", strOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
-	addParam(&p, "ignore-unfixed", strOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
-	addParam(&p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
+	stagecommon.AddParam(&p, "artifact-scan-image", stagecommon.StrOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
+	stagecommon.AddParam(&p, "artifact-cve-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
+	stagecommon.AddParam(&p, "ignore-unfixed", stagecommon.StrOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
+	stagecommon.AddParam(&p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
 
 	// Exactly one gpu-count-override param: an explicit
 	// reqs.GPUConfig.GPUCountOverride always wins over the
 	// CapacityPlan-derived value; the plan-derived value is only used as
-	// a fallback when no override was set.
+	// a fallback when no override was set. This stays here (not in
+	// stagecommon.BuildCommonModelParams) because buildPromotionPipelineParams
+	// computes this param differently -- see stagecommon/params.go's doc
+	// comment for why folding it into the shared helper isn't safe.
 	if reqs.GPUConfig.GPUCountOverride != "" {
-		addParam(&p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
+		stagecommon.AddParam(&p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
 	} else if plan != nil && plan.Status.GPUsNeeded > 0 {
-		addParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
+		stagecommon.AddParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
-	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768)))
-	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4)))
-	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true)))
-	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowMIG, false)))
-	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"))
-	addParam(&p, "request-rate", reqs.BenchmarkTargets.RequestRate)
-	addParam(&p, "target-ttft", reqs.BenchmarkTargets.TargetTTFT)
-	addParam(&p, "target-throughput", reqs.BenchmarkTargets.TargetThroughput)
-	addParam(&p, "gpu-operator-namespace", strOrDefault(cfg.Spec.GPUOperatorNamespace, "nvidia-gpu-operator"))
-	addParam(&p, "clusterpolicy-name", strOrDefault(cfg.Spec.ClusterPolicyName, "gpu-cluster-policy"))
-	addParam(&p, "time-slicing-configmap", strOrDefault(cfg.Spec.TimeSlicingConfigMap, "modelops-time-slicing"))
-	addParam(&p, "max-time-slices", strconv.Itoa(intOrDefault(cfg.Spec.MaxTimeSlices, 8)))
-	addParam(&p, "advisor-endpoint", reqs.AdvisorEndpoint)
-	addParam(&p, "advisor-secret-name", strOrDefault(cfg.Spec.AdvisorSecretName, "gpu-advisor-credentials"))
-	addParam(&p, "advisor-timeout-seconds", strconv.Itoa(intOrDefault(cfg.Spec.AdvisorTimeoutSeconds, 300)))
 
-	addParam(&p, "release-name", strOrDefault(spec.Model.Name, "unknown"))
-	addParam(&p, "chart-url", strOrDefault(cfg.Spec.ChartURL, "https://redhat-ai-services.github.io/helm-charts/"))
-	addParam(&p, "chart-version", strOrDefault(cfg.Spec.ChartVersion, "0.7.1"))
-	addParam(&p, "values-content", reqs.DeploymentConfig.ValuesContent)
-	addParam(&p, "hardware-profile-name", strOrDefault(cfg.Spec.HardwareProfileName, "gpu-profile"))
-	addParam(&p, "hardware-profile-namespace", strOrDefault(cfg.Spec.HardwareProfileNamespace, "redhat-ods-applications"))
+	stagecommon.AddParam(&p, "severity-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
+	stagecommon.AddParam(&p, "tenant-ns", stagecommon.StrOrDefault(reqs.SandboxNamespace, "vllm"))
 
-	addParam(&p, "severity-threshold", strOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
-	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", secrets.evalhubToken)
-	addParam(&p, "tenant-ns", strOrDefault(reqs.SandboxNamespace, "vllm"))
-	addParam(&p, "openshift-console-domain", reqs.DeploymentConfig.OpenShiftConsoleDomain)
-
-	addParam(&p, "huggingface-token", secrets.huggingfaceToken)
-
-	addParam(&p, "scan-s3-endpoint", secrets.scanS3Endpoint)
-	addParam(&p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
-	addParam(&p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
-	compBucket := strOrDefault(spec.ResultS3Bucket, strOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
-	secBucket := strOrDefault(spec.ResultS3Bucket, strOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
-	addParam(&p, "compliance-s3-bucket", compBucket)
-	addParam(&p, "security-s3-bucket", secBucket)
-	addParam(&p, "s3-ui-route", "")
-
-	addParam(&p, "s3-api-endpoint", secrets.resultS3Endpoint)
-	addParam(&p, "s3-access-key-id", secrets.resultS3AccessKey)
-	addParam(&p, "s3-secret-access-key", secrets.resultS3SecretKey)
-
-	addParam(&p, "mr-server", strOrDefault(cfg.Spec.RegistryServer, "http://modelops-registry.rhoai-model-registries.svc.cluster.local"))
-	addParam(&p, "mr-port", strOrDefault(cfg.Spec.RegistryPort, "8080"))
-	addParam(&p, "model-reg-author", strOrDefault(cfg.Spec.RegistryAuthor, "ModelOps Platform Team"))
+	stagecommon.AddParam(&p, "scan-s3-endpoint", secrets.scanS3Endpoint)
+	stagecommon.AddParam(&p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
+	stagecommon.AddParam(&p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
+	compBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
+	secBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
+	stagecommon.AddParam(&p, "compliance-s3-bucket", compBucket)
+	stagecommon.AddParam(&p, "security-s3-bucket", secBucket)
+	stagecommon.AddParam(&p, "s3-ui-route", "")
 
 	return p
 }
@@ -743,8 +707,8 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 		ObjectMeta: metav1.ObjectMeta{
 			Name: fmt.Sprintf("%s-pipeline-evalhub", sourceNS),
 			Labels: map[string]string{
-				"app.kubernetes.io/part-of":     "modelops",
-				"app.kubernetes.io/managed-by":  "modelops-operator",
+				"app.kubernetes.io/part-of":    "modelops",
+				"app.kubernetes.io/managed-by": "modelops-operator",
 			},
 		},
 		RoleRef: rbacv1.RoleRef{
@@ -798,108 +762,75 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	isFirst bool,
 	isLast bool,
 ) tektonv1.Params {
-	p := tektonv1.Params{}
 	spec := mr.Spec
 	reqs := spec.Requirements
 	if reqs == nil {
 		reqs = &modelopsv1alpha1.ModelRequirements{}
 	}
 
-	addParam(&p, "model-id", spec.Model.URI)
-	addParam(&p, "model-name", strOrDefault(spec.Model.Name, "unknown"))
-	addParam(&p, "model-version", strOrDefault(spec.Model.Version, "v1"))
-	addParam(&p, "model-tokenizer", spec.Model.Tokenizer)
-	addParam(&p, "model-source-type", spec.Model.SourceType)
-	addParam(&p, "display-name", spec.DisplayName)
-	addParam(&p, "business-justification", spec.BusinessJustification)
-	addParam(&p, "requested-by", spec.RequestedBy)
+	p := stagecommon.BuildCommonModelParams(spec, reqs, cfg, stagecommon.Secrets{
+		EvalHubToken:      secrets.evalhubToken,
+		HuggingFaceToken:  secrets.huggingfaceToken,
+		ResultS3Endpoint:  secrets.resultS3Endpoint,
+		ResultS3AccessKey: secrets.resultS3AccessKey,
+		ResultS3SecretKey: secrets.resultS3SecretKey,
+	})
 
-	addParam(&p, "target-namespace", targetNamespace)
-	addParam(&p, "plan-id", planID)
+	stagecommon.AddParam(&p, "target-namespace", targetNamespace)
+	stagecommon.AddParam(&p, "plan-id", planID)
 
-	addParam(&p, "modelcar-repo", strOrDefault(cfg.Spec.ModelCarRepo, "redhat-ai-services/modelcar-catalog"))
-	addParam(&p, "modelcar-image", "")
-
+	// KNOWN BEHAVIOR, unchanged by this refactor: unlike
+	// buildSandboxPipelineParams, this never checks
+	// reqs.GPUConfig.GPUCountOverride -- only the CapacityPlan-derived
+	// value is ever used here. See stagecommon/params.go's doc comment
+	// for why gpu-count-override is deliberately kept out of the shared
+	// helper instead of being unified with sandbox's override-aware
+	// logic.
 	if plan != nil && plan.Status.GPUsNeeded > 0 {
-		addParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
+		stagecommon.AddParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
-	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768)))
-	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4)))
-	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true)))
-	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowMIG, false)))
-	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"))
-	addParam(&p, "request-rate", reqs.BenchmarkTargets.RequestRate)
-	addParam(&p, "target-ttft", reqs.BenchmarkTargets.TargetTTFT)
-	addParam(&p, "target-throughput", reqs.BenchmarkTargets.TargetThroughput)
-	addParam(&p, "gpu-operator-namespace", strOrDefault(cfg.Spec.GPUOperatorNamespace, "nvidia-gpu-operator"))
-	addParam(&p, "clusterpolicy-name", strOrDefault(cfg.Spec.ClusterPolicyName, "gpu-cluster-policy"))
-	addParam(&p, "time-slicing-configmap", strOrDefault(cfg.Spec.TimeSlicingConfigMap, "modelops-time-slicing"))
-	addParam(&p, "max-time-slices", strconv.Itoa(intOrDefault(cfg.Spec.MaxTimeSlices, 8)))
-	addParam(&p, "advisor-endpoint", reqs.AdvisorEndpoint)
-	addParam(&p, "advisor-secret-name", strOrDefault(cfg.Spec.AdvisorSecretName, "gpu-advisor-credentials"))
-	addParam(&p, "advisor-timeout-seconds", strconv.Itoa(intOrDefault(cfg.Spec.AdvisorTimeoutSeconds, 300)))
 
-	addParam(&p, "release-name", strOrDefault(spec.Model.Name, "unknown"))
-	addParam(&p, "chart-url", strOrDefault(cfg.Spec.ChartURL, "https://redhat-ai-services.github.io/helm-charts/"))
-	addParam(&p, "chart-version", strOrDefault(cfg.Spec.ChartVersion, "0.7.1"))
-	addParam(&p, "values-content", reqs.DeploymentConfig.ValuesContent)
-	addParam(&p, "hardware-profile-name", strOrDefault(cfg.Spec.HardwareProfileName, "gpu-profile"))
-	addParam(&p, "hardware-profile-namespace", strOrDefault(cfg.Spec.HardwareProfileNamespace, "redhat-ods-applications"))
-
-	approvalURL := strOrDefault(cfg.Spec.ApprovalApiUrl, "")
+	approvalURL := stagecommon.StrOrDefault(cfg.Spec.ApprovalApiUrl, "")
 	if !isFirst {
 		approvalURL = ""
 	}
-	addParam(&p, "approval-api-url", approvalURL)
-	addParam(&p, "approval-poll-interval-seconds", strconv.Itoa(intOrDefault(cfg.Spec.ApprovalPollIntervalSeconds, 15)))
-	addParam(&p, "approval-timeout-seconds", strconv.Itoa(intOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
+	stagecommon.AddParam(&p, "approval-api-url", approvalURL)
+	stagecommon.AddParam(&p, "approval-poll-interval-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalPollIntervalSeconds, 15)))
+	stagecommon.AddParam(&p, "approval-timeout-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
 
-	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
-	addParam(&p, "evalhub-token", secrets.evalhubToken)
-	addParam(&p, "openshift-console-domain", reqs.DeploymentConfig.OpenShiftConsoleDomain)
-
-	addParam(&p, "guidellm-profile", strOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
-	addParam(&p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
-	addParam(&p, "guidellm-max-seconds", strconv.Itoa(intOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
-	addParam(&p, "guidellm-max-requests", strconv.Itoa(intOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
+	stagecommon.AddParam(&p, "guidellm-profile", stagecommon.StrOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
+	stagecommon.AddParam(&p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
+	stagecommon.AddParam(&p, "guidellm-max-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
+	stagecommon.AddParam(&p, "guidellm-max-requests", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
 	if cfg.Spec.BenchmarkTargetUrl != "" {
-		addParam(&p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
+		stagecommon.AddParam(&p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
 	} else if spec.MaaS != nil && spec.MaaS.Enabled {
-		addParam(&p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", strOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+		stagecommon.AddParam(&p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
 	} else {
-		addParam(&p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", strOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+		stagecommon.AddParam(&p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
 	}
-	addParam(&p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
-	addParam(&p, "custom-filename", strOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
-	addParam(&p, "huggingface-token", secrets.huggingfaceToken)
-
-	addParam(&p, "s3-api-endpoint", secrets.resultS3Endpoint)
-	addParam(&p, "s3-access-key-id", secrets.resultS3AccessKey)
-	addParam(&p, "s3-secret-access-key", secrets.resultS3SecretKey)
-
-	addParam(&p, "mr-server", strOrDefault(cfg.Spec.RegistryServer, "http://modelops-registry.rhoai-model-registries.svc.cluster.local"))
-	addParam(&p, "mr-port", strOrDefault(cfg.Spec.RegistryPort, "8080"))
-	addParam(&p, "model-reg-author", strOrDefault(cfg.Spec.RegistryAuthor, "ModelOps Platform Team"))
+	stagecommon.AddParam(&p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
+	stagecommon.AddParam(&p, "custom-filename", stagecommon.StrOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
 
 	if spec.Access != nil {
-		addParam(&p, "authorized-viewers", spec.Access.AuthorizedViewers)
-		addParam(&p, "access-role", strOrDefault(spec.Access.AccessRole, "view"))
+		stagecommon.AddParam(&p, "authorized-viewers", spec.Access.AuthorizedViewers)
+		stagecommon.AddParam(&p, "access-role", stagecommon.StrOrDefault(spec.Access.AccessRole, "view"))
 	}
 
-	maasGPU := strOrDefault(cfg.Spec.MaaSGPUCount, "1")
+	maasGPU := stagecommon.StrOrDefault(cfg.Spec.MaaSGPUCount, "1")
 	if spec.MaaS != nil {
-		addParam(&p, "deploy-maas", strconv.FormatBool(spec.MaaS.Enabled))
-		maasGPU = strOrDefault(spec.MaaS.GPUCount, maasGPU)
+		stagecommon.AddParam(&p, "deploy-maas", strconv.FormatBool(spec.MaaS.Enabled))
+		maasGPU = stagecommon.StrOrDefault(spec.MaaS.GPUCount, maasGPU)
 	} else {
-		addParam(&p, "deploy-maas", "false")
+		stagecommon.AddParam(&p, "deploy-maas", "false")
 	}
-	addParam(&p, "maas-serving-ns", strOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
-	addParam(&p, "maas-policy-ns", strOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
-	addParam(&p, "maas-gpu-count", maasGPU)
-	addParam(&p, "maas-runtime-image", strOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
-	addParam(&p, "maas-authorized-group", strOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
+	stagecommon.AddParam(&p, "maas-serving-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
+	stagecommon.AddParam(&p, "maas-policy-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
+	stagecommon.AddParam(&p, "maas-gpu-count", maasGPU)
+	stagecommon.AddParam(&p, "maas-runtime-image", stagecommon.StrOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
+	stagecommon.AddParam(&p, "maas-authorized-group", stagecommon.StrOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
 
-	addParam(&p, "run-register", strconv.FormatBool(isLast))
+	stagecommon.AddParam(&p, "run-register", strconv.FormatBool(isLast))
 
 	return p
 }
@@ -928,42 +859,16 @@ func (r *ModelRequestReconciler) updateStatus(ctx context.Context, request *mode
 	return ctrl.Result{}, nil
 }
 
-func addParam(params *tektonv1.Params, name, value string) {
-	if value != "" {
-		*params = append(*params, tektonv1.Param{
-			Name: name,
-			Value: tektonv1.ParamValue{
-				Type:      tektonv1.ParamTypeString,
-				StringVal: value,
-			},
-		})
-	}
-}
-
-func strOrDefault(val, def string) string {
-	if val == "" {
-		return def
-	}
-	return val
-}
-
-func intOrDefault(val, def int) int {
-	if val == 0 {
-		return def
-	}
-	return val
-}
-
+// addParam, strOrDefault, intOrDefault, and boolOrDefault used to be
+// defined here. Phase 3 moved them to internal/stagecommon (exported as
+// AddParam/StrOrDefault/IntOrDefault/BoolOrDefault) as the single source
+// of truth, since buildSandboxPipelineParams, buildPromotionPipelineParams,
+// and buildCapacityPlan all need them. floatOrDefault stays here: it's
+// only used by buildPromotionPipelineParams's guidellm-rate formatting,
+// never part of the sandbox/promotion-shared param set.
 func floatOrDefault(val, def float64) float64 {
 	if val == 0.0 {
 		return def
 	}
 	return val
-}
-
-func boolOrDefault(val *bool, def bool) bool {
-	if val == nil {
-		return def
-	}
-	return *val
 }
