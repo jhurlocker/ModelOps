@@ -545,11 +545,11 @@ func (r *ModelRequestReconciler) buildCapacityPlan(
 			ModelRef: modelopsv1alpha1.CapacityPlanModelRef{
 				ModelRequestName: mr.Name,
 			},
-			ContextLength:         intOrDefault(reqs.ContextLength, 32768),
-			Concurrency:           intOrDefault(reqs.ExpectedConcurrency, 4),
-			AllowTimeSlicing:      boolOrDefault(reqs.AllowTimeSlicing, true),
-			AllowMIG:              boolOrDefault(reqs.AllowMIG, false),
-			IsolationPolicy:       strOrDefault(reqs.GPUIsolationPolicy, "dedicated"),
+			ContextLength:         intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768),
+			Concurrency:           intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4),
+			AllowTimeSlicing:      boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true),
+			AllowMIG:              boolOrDefault(reqs.GPUConfig.AllowMIG, false),
+			IsolationPolicy:       strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"),
 			AdvisorEndpoint:       reqs.AdvisorEndpoint,
 			AdvisorSecretName:     cfg.Spec.AdvisorSecretName,
 			AdvisorTimeoutSeconds: cfg.Spec.AdvisorTimeoutSeconds,
@@ -592,27 +592,27 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "modelcar-image", "")
 
 	addParam(&p, "artifact-scan-image", strOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
-	addParam(&p, "artifact-cve-threshold", strOrDefault(reqs.CVEThreshold, "critical"))
+	addParam(&p, "artifact-cve-threshold", strOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
 	addParam(&p, "ignore-unfixed", strOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
 	addParam(&p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
 
 	// Exactly one gpu-count-override param: an explicit
-	// reqs.GPUCountOverride always wins over the CapacityPlan-derived
-	// value; the plan-derived value is only used as a fallback when no
-	// override was set.
-	if reqs.GPUCountOverride != "" {
-		addParam(&p, "gpu-count-override", reqs.GPUCountOverride)
+	// reqs.GPUConfig.GPUCountOverride always wins over the
+	// CapacityPlan-derived value; the plan-derived value is only used as
+	// a fallback when no override was set.
+	if reqs.GPUConfig.GPUCountOverride != "" {
+		addParam(&p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
 	} else if plan != nil && plan.Status.GPUsNeeded > 0 {
 		addParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
-	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.ContextLength, 32768)))
-	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.ExpectedConcurrency, 4)))
-	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.AllowTimeSlicing, true)))
-	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.AllowMIG, false)))
-	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUIsolationPolicy, "dedicated"))
-	addParam(&p, "request-rate", reqs.RequestRate)
-	addParam(&p, "target-ttft", reqs.TargetTTFT)
-	addParam(&p, "target-throughput", reqs.TargetThroughput)
+	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768)))
+	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4)))
+	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true)))
+	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowMIG, false)))
+	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"))
+	addParam(&p, "request-rate", reqs.BenchmarkTargets.RequestRate)
+	addParam(&p, "target-ttft", reqs.BenchmarkTargets.TargetTTFT)
+	addParam(&p, "target-throughput", reqs.BenchmarkTargets.TargetThroughput)
 	addParam(&p, "gpu-operator-namespace", strOrDefault(cfg.Spec.GPUOperatorNamespace, "nvidia-gpu-operator"))
 	addParam(&p, "clusterpolicy-name", strOrDefault(cfg.Spec.ClusterPolicyName, "gpu-cluster-policy"))
 	addParam(&p, "time-slicing-configmap", strOrDefault(cfg.Spec.TimeSlicingConfigMap, "modelops-time-slicing"))
@@ -624,15 +624,15 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	addParam(&p, "release-name", strOrDefault(spec.Model.Name, "unknown"))
 	addParam(&p, "chart-url", strOrDefault(cfg.Spec.ChartURL, "https://redhat-ai-services.github.io/helm-charts/"))
 	addParam(&p, "chart-version", strOrDefault(cfg.Spec.ChartVersion, "0.7.1"))
-	addParam(&p, "values-content", reqs.ValuesContent)
+	addParam(&p, "values-content", reqs.DeploymentConfig.ValuesContent)
 	addParam(&p, "hardware-profile-name", strOrDefault(cfg.Spec.HardwareProfileName, "gpu-profile"))
 	addParam(&p, "hardware-profile-namespace", strOrDefault(cfg.Spec.HardwareProfileNamespace, "redhat-ods-applications"))
 
-	addParam(&p, "severity-threshold", strOrDefault(reqs.SecurityThreshold, "block"))
+	addParam(&p, "severity-threshold", strOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
 	addParam(&p, "evalhub-token", secrets.evalhubToken)
 	addParam(&p, "tenant-ns", strOrDefault(reqs.SandboxNamespace, "vllm"))
-	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
+	addParam(&p, "openshift-console-domain", reqs.DeploymentConfig.OpenShiftConsoleDomain)
 
 	addParam(&p, "huggingface-token", secrets.huggingfaceToken)
 
@@ -823,14 +823,14 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	if plan != nil && plan.Status.GPUsNeeded > 0 {
 		addParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
-	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.ContextLength, 32768)))
-	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.ExpectedConcurrency, 4)))
-	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.AllowTimeSlicing, true)))
-	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.AllowMIG, false)))
-	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUIsolationPolicy, "dedicated"))
-	addParam(&p, "request-rate", reqs.RequestRate)
-	addParam(&p, "target-ttft", reqs.TargetTTFT)
-	addParam(&p, "target-throughput", reqs.TargetThroughput)
+	addParam(&p, "context-length", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ContextLength, 32768)))
+	addParam(&p, "concurrency", strconv.Itoa(intOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4)))
+	addParam(&p, "allow-time-slicing", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true)))
+	addParam(&p, "allow-mig", strconv.FormatBool(boolOrDefault(reqs.GPUConfig.AllowMIG, false)))
+	addParam(&p, "gpu-isolation-policy", strOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"))
+	addParam(&p, "request-rate", reqs.BenchmarkTargets.RequestRate)
+	addParam(&p, "target-ttft", reqs.BenchmarkTargets.TargetTTFT)
+	addParam(&p, "target-throughput", reqs.BenchmarkTargets.TargetThroughput)
 	addParam(&p, "gpu-operator-namespace", strOrDefault(cfg.Spec.GPUOperatorNamespace, "nvidia-gpu-operator"))
 	addParam(&p, "clusterpolicy-name", strOrDefault(cfg.Spec.ClusterPolicyName, "gpu-cluster-policy"))
 	addParam(&p, "time-slicing-configmap", strOrDefault(cfg.Spec.TimeSlicingConfigMap, "modelops-time-slicing"))
@@ -842,7 +842,7 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	addParam(&p, "release-name", strOrDefault(spec.Model.Name, "unknown"))
 	addParam(&p, "chart-url", strOrDefault(cfg.Spec.ChartURL, "https://redhat-ai-services.github.io/helm-charts/"))
 	addParam(&p, "chart-version", strOrDefault(cfg.Spec.ChartVersion, "0.7.1"))
-	addParam(&p, "values-content", reqs.ValuesContent)
+	addParam(&p, "values-content", reqs.DeploymentConfig.ValuesContent)
 	addParam(&p, "hardware-profile-name", strOrDefault(cfg.Spec.HardwareProfileName, "gpu-profile"))
 	addParam(&p, "hardware-profile-namespace", strOrDefault(cfg.Spec.HardwareProfileNamespace, "redhat-ods-applications"))
 
@@ -856,7 +856,7 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 
 	addParam(&p, "evalhub-url", cfg.Spec.EvalHubURL)
 	addParam(&p, "evalhub-token", secrets.evalhubToken)
-	addParam(&p, "openshift-console-domain", reqs.OpenShiftConsoleDomain)
+	addParam(&p, "openshift-console-domain", reqs.DeploymentConfig.OpenShiftConsoleDomain)
 
 	addParam(&p, "guidellm-profile", strOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
 	addParam(&p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
@@ -869,8 +869,8 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	} else {
 		addParam(&p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", strOrDefault(spec.Model.Name, "unknown"), targetNamespace))
 	}
-	addParam(&p, "custom-data", strconv.FormatBool(reqs.CustomBenchmarkData))
-	addParam(&p, "custom-filename", strOrDefault(reqs.CustomBenchmarkFile, "no-file"))
+	addParam(&p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
+	addParam(&p, "custom-filename", strOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
 	addParam(&p, "huggingface-token", secrets.huggingfaceToken)
 
 	addParam(&p, "s3-api-endpoint", secrets.resultS3Endpoint)

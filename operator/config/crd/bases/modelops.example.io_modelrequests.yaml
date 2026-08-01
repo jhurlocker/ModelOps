@@ -99,6 +99,19 @@ spec:
               requestedBy:
                 type: string
               requirements:
+                description: |-
+                  ModelRequirements is composed of logical sub-structs grouping related
+                  concerns (GPU/hardware, benchmark targets, security, deployment). Each
+                  sub-struct is embedded anonymously with `json:",inline"` so its fields
+                  remain flat, top-level siblings on the wire -- this is what keeps an
+                  existing ModelRequest CR's `requirements:` YAML shape unchanged (e.g.
+                  `gpuCountOverride: ...` stays `gpuCountOverride: ...`, it does not
+                  become `gpuConfig.gpuCountOverride: ...`). See docs/REFACTOR_PLAN.md
+                  Phase 2 and docs/PHASE_LOG.md for the rationale.
+
+                  A handful of fields (target environment and namespace selection) don't
+                  fit any of the four grouped concerns cleanly and are left flat directly
+                  on ModelRequirements, matching their pre-Phase-2 shape.
                 properties:
                   advisorEndpoint:
                     type: string

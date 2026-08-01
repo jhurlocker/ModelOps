@@ -36,27 +36,68 @@ type ModelIdentity struct {
 	Tokenizer  string `json:"tokenizer,omitempty"`
 }
 
+// ModelRequirements is composed of logical sub-structs grouping related
+// concerns (GPU/hardware, benchmark targets, security, deployment). Each
+// sub-struct is embedded anonymously with `json:",inline"` so its fields
+// remain flat, top-level siblings on the wire -- this is what keeps an
+// existing ModelRequest CR's `requirements:` YAML shape unchanged (e.g.
+// `gpuCountOverride: ...` stays `gpuCountOverride: ...`, it does not
+// become `gpuConfig.gpuCountOverride: ...`). See docs/REFACTOR_PLAN.md
+// Phase 2 and docs/PHASE_LOG.md for the rationale.
+//
+// A handful of fields (target environment and namespace selection) don't
+// fit any of the four grouped concerns cleanly and are left flat directly
+// on ModelRequirements, matching their pre-Phase-2 shape.
 type ModelRequirements struct {
+	GPUConfig        `json:",inline"`
+	BenchmarkTargets `json:",inline"`
+	SecurityConfig   `json:",inline"`
+	DeploymentConfig `json:",inline"`
+
+	TargetEnvironment   string   `json:"targetEnvironment,omitempty"`
+	SandboxNamespace    string   `json:"sandboxNamespace,omitempty"`
+	StagingNamespace    string   `json:"stagingNamespace,omitempty"`
+	PromotionNamespaces []string `json:"promotionNamespaces,omitempty"`
+	AdvisorEndpoint     string   `json:"advisorEndpoint,omitempty"`
+}
+
+// GPUConfig groups GPU/hardware-related requirements: the explicit GPU
+// count override, MIG/time-slicing allowance, and the isolation policy
+// (hardware profile) governing them.
+type GPUConfig struct {
+	GPUIsolationPolicy string `json:"gpuIsolationPolicy,omitempty"`
+	AllowTimeSlicing   *bool  `json:"allowTimeSlicing,omitempty"`
+	AllowMIG           *bool  `json:"allowMIG,omitempty"`
+	GPUCountOverride   string `json:"gpuCountOverride,omitempty"`
+}
+
+// BenchmarkTargets groups the benchmark/performance targets used to size
+// capacity and validate sandbox/promotion runs: latency (TTFT), target
+// throughput, expected concurrency, context length, and the GuideLLM
+// request rate.
+type BenchmarkTargets struct {
 	ContextLength       int    `json:"contextLength,omitempty"`
 	ExpectedConcurrency int    `json:"expectedConcurrency,omitempty"`
-	GPUIsolationPolicy  string `json:"gpuIsolationPolicy,omitempty"`
-	AllowTimeSlicing    *bool  `json:"allowTimeSlicing,omitempty"`
-	AllowMIG            *bool  `json:"allowMIG,omitempty"`
+	RequestRate         string `json:"requestRate,omitempty"`
+	TargetTTFT          string `json:"targetTTFT,omitempty"`
+	TargetThroughput    string `json:"targetThroughput,omitempty"`
+}
+
+// SecurityConfig groups security/compliance-scan requirements: the CVE
+// and general security severity thresholds, and an optional custom
+// benchmark/scan file override.
+type SecurityConfig struct {
 	CVEThreshold        string `json:"cveThreshold,omitempty"`
 	SecurityThreshold   string `json:"securityThreshold,omitempty"`
-	TargetEnvironment      string   `json:"targetEnvironment,omitempty"`
-	SandboxNamespace       string   `json:"sandboxNamespace,omitempty"`
-	StagingNamespace       string   `json:"stagingNamespace,omitempty"`
-	PromotionNamespaces    []string `json:"promotionNamespaces,omitempty"`
-	AdvisorEndpoint        string   `json:"advisorEndpoint,omitempty"`
-	GPUCountOverride    string `json:"gpuCountOverride,omitempty"`
-	ValuesContent       string `json:"valuesContent,omitempty"`
 	CustomBenchmarkData bool   `json:"customBenchmarkData,omitempty"`
 	CustomBenchmarkFile string `json:"customBenchmarkFile,omitempty"`
+}
+
+// DeploymentConfig groups deployment-shape requirements: raw Helm values
+// content and the OpenShift console domain used to build UI links.
+type DeploymentConfig struct {
+	ValuesContent          string `json:"valuesContent,omitempty"`
 	OpenShiftConsoleDomain string `json:"openshiftConsoleDomain,omitempty"`
-	RequestRate          string `json:"requestRate,omitempty"`
-	TargetTTFT           string `json:"targetTTFT,omitempty"`
-	TargetThroughput     string `json:"targetThroughput,omitempty"`
 }
 
 type ModelAccess struct {

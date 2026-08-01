@@ -113,7 +113,9 @@ func TestModelRequest_FirstReconcile_CreatesCapacityPlan(t *testing.T) {
 	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
 	newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
 	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
-		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{ContextLength: 8192, ExpectedConcurrency: 4}
+		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{
+			BenchmarkTargets: modelopsv1alpha1.BenchmarkTargets{ContextLength: 8192, ExpectedConcurrency: 4},
+		}
 	})
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
@@ -497,7 +499,7 @@ func TestBuildSandboxPipelineParams_ExplicitOverride_TakesPrecedenceAndAppearsEx
 		Spec: modelopsv1alpha1.ModelRequestSpec{
 			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
 			Requirements: &modelopsv1alpha1.ModelRequirements{
-				GPUCountOverride: "7",
+				GPUConfig: modelopsv1alpha1.GPUConfig{GPUCountOverride: "7"},
 			},
 		},
 	}
