@@ -578,3 +578,252 @@ carried forward).
   indirect to a direct dependency (the new test file imports it
   directly for the CR-level round-trip test). `go.sum` unchanged --
   the module was already present, just re-flagged as direct.
+
+---
+
+## Phase 3 — De-duplicate the pipeline param builders
+
+**Commit:** `de3b93c` on `feat/model-request-controller` — "Phase 3:
+de-duplicate buildSandboxPipelineParams and
+buildPromotionPipelineParams". Not a breaking API/CRD change -- no
+`_types.go` file touched.
+
+### TDD: characterization tests written first
+
+Per the guiding principle ("a refactor is not done until there's a test
+proving the behavior is unchanged"), before touching either function:
+
+- Added `TestBuildSandboxPipelineParams_FullFixture_CharacterizesCurrentOutput`
+  and `TestBuildPromotionPipelineParams_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput`
+  / `..._MiddleNamespace_OmitsApprovalURL_AndRunRegisterFalse` in
+  `modelrequest_controller_test.go`, each against a single shared fixture
+  (`fullCharacterizationFixture`) with **every** field the two functions
+  read from populated with a distinct, non-empty/non-zero value, so no
+  `addParam` call is silently skipped for being empty. `paramsToMap`
+  fails the test outright if any param name appears more than once --
+  the exact shape of the Phase 1 `gpu-count-override` duplicate-param
+  bug -- so a regression there would be caught immediately, not just a
+  wrong value.
+- Ran these against the **pre-refactor** code first and confirmed they
+  passed (the actual TDD starting point: capture today's real behavior,
+  don't hand-derive an "expected" one and hope it matches). Only then
+  extracted `internal/stagecommon.BuildCommonModelParams` and rewired
+  both functions to call it. All three tests, and the two direct
+  `internal/stagecommon` unit tests added alongside the new function,
+  pass unmodified after the extraction -- proving it strictly
+  output-preserving: same param sets in, same params out.
+- Param comparison is by `map[string]string` (name -> value), not by
+  slice order -- confirmed order doesn't matter to Tekton (`PipelineRun`
+  binds params by name) and the pre-existing test helpers
+  (`findParam`/`findAllParams`) already searched by name, not position.
+
+### What changed
+
+`buildSandboxPipelineParams` and `buildPromotionPipelineParams`
+(`operator/internal/controller/modelrequest_controller.go`) had 41
+params that were byte-for-byte identical between them: model identity
+(8), modelcar reference (2, though `modelcar-image` is always `""` and
+so never actually emitted -- `addParam` skips empty values), the
+GPU/benchmark config block excluding `gpu-count-override` (15),
+deployment/chart config (6), EvalHub config (2), `openshift-console-domain`
+(1), `huggingface-token` (1), result-S3 config (3), and model-registry
+config (3). Extracted into `internal/stagecommon.BuildCommonModelParams(spec
+modelopsv1alpha1.ModelRequestSpec, reqs *modelopsv1alpha1.ModelRequirements,
+cfg *modelopsv1alpha1.PlatformConfig, secrets stagecommon.Secrets)
+tektonv1.Params`. Both functions now call it first, then layer their own
+stage-specific params on top (sandbox: `target-namespace`,
+`gpu-count-override`, the artifact-scan/severity-threshold/tenant-ns
+block, scan-S3 credentials and compliance/security buckets; promotion:
+`target-namespace`/`plan-id`, `gpu-count-override`, the approval-gate
+block, the GuideLLM benchmark block, access/MaaS config, `run-register`).
+
+`stagecommon.Secrets` is a small struct (`EvalHubToken`,
+`HuggingFaceToken`, `ResultS3Endpoint`, `ResultS3AccessKey`,
+`ResultS3SecretKey`) holding only the fields `BuildCommonModelParams`
+needs -- deliberately not the scan-specific S3 credentials, which stay
+sandbox-only. Each caller builds one from its own `resolvedSecrets`
+(an internal/controller-private type that stays private; `stagecommon`
+never needs to know it exists).
+
+### The Phase 1 `gpu-count-override` fix: confirmed correctly scoped, not reintroduced as a duplicate
+
+This was called out explicitly as something to verify, and it surfaced a
+real pre-existing behavioral divergence that's easy to miss:
+
+- **`buildSandboxPipelineParams`** (Phase 1's fix): an explicit
+  `reqs.GPUConfig.GPUCountOverride` wins over the `CapacityPlan`-derived
+  value; the plan-derived value is only used as a fallback. Exactly one
+  `gpu-count-override` param is ever added.
+- **`buildPromotionPipelineParams`**: always uses only the
+  `CapacityPlan`-derived value (`plan.Status.GPUsNeeded`) and never looks
+  at `reqs.GPUConfig.GPUCountOverride` at all. This was true **before**
+  this phase too (Phase 1's fix, per `REFACTOR_PLAN.md`, was explicitly
+  scoped to `buildSandboxPipelineParams` only) -- this phase did not
+  introduce this divergence, it only had to decide what to do with it
+  during extraction.
+- **Decision: `gpu-count-override` stays out of `BuildCommonModelParams`
+  entirely**, and each function keeps its own single `AddParam` call for
+  it, now with an explicit comment cross-referencing the other
+  function's different behavior. Folding it into the shared helper would
+  have forced a choice between two bad outcomes: (a) silently giving
+  promotion the override-aware behavior too, changing real behavior
+  outside this phase's stated scope ("relocate, don't change"), or (b)
+  re-implementing the same sandbox-vs-promotion if/else split *inside*
+  the shared helper, which duplicates the exact decision logic this
+  refactor exists to remove -- just relocated, not eliminated.
+- Verified both on `envtest` (new characterization tests, and the
+  pre-existing Phase 1 golden tests for sandbox's override precedence)
+  and live on the sandbox cluster: a disposable `ModelRequest` with
+  `gpuCountOverride: "3"` produced `gpu-count-override=3` (exactly one
+  instance) on the sandbox `PipelineRun`, and `gpu-count-override=1`
+  (the `CapacityPlan`-derived value for that request's small
+  context-length/concurrency, ignoring the override) on the promotion
+  `PipelineRun` -- confirming the documented divergence is real,
+  unchanged, and not a duplicate-param bug of any kind.
+
+### Single source of truth for the tiny param-building helpers too
+
+`addParam`, `strOrDefault`, `intOrDefault`, and `boolOrDefault` (used by
+`BuildCommonModelParams` and, before this phase, duplicated as private
+functions in `internal/controller`) were moved to `internal/stagecommon`
+and exported (`AddParam`/`StrOrDefault`/`IntOrDefault`/`BoolOrDefault`).
+`buildCapacityPlan`'s six call sites and the remaining stage-specific
+calls in both builder functions were updated to the `stagecommon.`-
+qualified versions; the private copies in `internal/controller` were
+deleted. `floatOrDefault` stays private in `internal/controller` --
+it's only ever used by `buildPromotionPipelineParams`'s
+`guidellm-rate` formatting, never part of the sandbox/promotion-shared
+param set, so exporting it would have been scope creep with no
+de-duplication benefit.
+
+### Net lines of code: an honest accounting, not just a headline number
+
+`REFACTOR_PLAN.md` asks for "a net reduction in lines of code" from this
+phase. The two functions this phase specifically targets did shrink
+substantially: `buildSandboxPipelineParams` went from 92 to 55 lines,
+`buildPromotionPipelineParams` from 116 to 83 -- a combined 208 -> 138
+lines, **-70 lines (-34%)** in the exact functions named in the task.
+`operator/internal/controller/modelrequest_controller.go` as a whole
+shrank by 95 lines (969 -> 874).
+
+That said, **total production code across the repo grew by roughly +44
+lines**, because the duplicated logic didn't disappear, it moved to a
+new shared home that needed its own package/import boilerplate,
+`Secrets` struct, and -- per this phase's own explicit instruction to
+confirm the Phase 1 fix's scoping -- a fairly detailed rationale comment
+explaining exactly why `gpu-count-override` is deliberately excluded
+from the shared helper (see above). `internal/stagecommon/params.go` is
+133 lines; `doc.go`'s update added 6. Test code grew substantially more
+(+322 lines in `modelrequest_controller_test.go`, +186 in the new
+`internal/stagecommon/params_test.go`) -- expected and welcomed under
+the TDD guiding principle, not counted against the "net reduction"
+goal, which reads as being about production/duplicated logic, not test
+coverage.
+
+Flagging this discrepancy explicitly rather than letting a stat like
+"742 insertions, 192 deletions" stand unexplained: the qualitative goal
+Phase 3 actually cares about -- "a single source of truth for any param
+that's shared between sandbox and promotion" -- was met without
+exception (0 params still hand-duplicated between the two functions,
+confirmed by the characterization tests' exact-map comparison), and the
+two named functions did get smaller. The repo-wide total line count
+went up slightly because eliminating duplication of substantial logic
+(41 params' worth) still costs a small, fixed amount of shared-package
+scaffolding that doesn't scale with how much duplication it removes --
+that scaffolding cost is what tipped the total slightly positive here.
+
+### Cross-stage import check
+
+`internal/stagecommon` imports only `api/v1alpha1` and the Tekton API
+types (`go list -deps` confirmed) -- never `internal/controller` or any
+`internal/stages/*` package. No package under `internal/stages/*`
+imports another; all three (`sandbox`, `promotion`, `capacityplanning`)
+are still Phase 0's empty `doc.go` stubs, since this phase (per
+`REFACTOR_PLAN.md`'s own phrasing, "extract...into a common helper...
+have both functions call it") only extracts the shared logic out of the
+two `internal/controller` functions -- it does not relocate
+`buildSandboxPipelineParams`/`buildPromotionPipelineParams` themselves
+into `internal/stages/sandbox`/`internal/stages/promotion`. That
+relocation, per the Phase 0/2 `doc.go` comments, is later phases' job
+(Phase 4's `StageRunner` work is the natural point to do it, since it's
+already moving stage-specific logic into these packages).
+
+### Manifest regeneration
+
+No `_types.go` file was touched. `make manifests generate` run anyway
+per this phase's instructions to confirm; `git status` showed zero diff
+under `operator/config/` or `operator/api/` -- confirmed a no-op, as
+expected.
+
+### Test coverage added
+
+- `operator/internal/controller/modelrequest_controller_test.go`: three
+  new characterization tests (see "TDD" section above), plus a local
+  `boolPtr` helper and the shared `fullCharacterizationFixture`/
+  `paramsToMap` fixtures reused by all three.
+- `operator/internal/stagecommon/params_test.go` (new file): two direct
+  unit tests for `BuildCommonModelParams` --
+  `TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams`
+  (full fixture, plus an explicit assertion that `gpu-count-override`
+  never appears in this function's output) and
+  `TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty` (every
+  default value, plus confirming fields with no default -- tokenizer,
+  advisor-endpoint, evalhub-url -- are omitted rather than emitted
+  empty). These test `internal/stagecommon` in complete isolation from
+  `internal/controller`, proving the extraction is independently usable
+  by a future stage package without needing the controller's test
+  scaffolding.
+- Total suite: 52 tests passing (49 from Phase 2 + 3 new
+  characterization tests in `internal/controller`, none removed) plus 2
+  new in `internal/stagecommon` (previously `[no test files]`). All
+  `internal/controller` tests remain `envtest`-backed;
+  `internal/stagecommon`'s are plain `go test` (no `envtest` needed --
+  pure function, no Kubernetes client involved).
+
+### Sandbox cluster verification
+
+- Rebuilt and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image from this phase's code (same pattern as Phases 1-2 -- the
+  `Deployment` runs from this pre-built tag with `imagePullPolicy:
+  Always`, so a `kubectl rollout restart` after the push is what
+  actually picks up new code; `Application/modelops-operator` itself
+  had nothing new to sync since no manifest changed).
+- Confirmed `Application/modelops-operator` stayed `Synced`/`Healthy`
+  throughout (expected: this phase touched no file under
+  `gitops/components/operator/*`).
+- Created a disposable `ModelRequest` (`phase3-verify`, `sandbox`
+  namespace, referencing the pre-existing `scan-s3-credentials`/
+  `result-s3-credentials` secrets and the `standard-generative-onboarding`
+  profile, `requirements.gpuCountOverride: "3"`,
+  `contextLength: 4096`, `expectedConcurrency: 2`). Reconciled cleanly to
+  `SandboxRunning`; the sandbox `PipelineRun`'s params matched the
+  characterization tests exactly, including `gpu-count-override=3`
+  (the explicit override, exactly once) and every `BuildCommonModelParams`
+  param (`model-id`, `evalhub-url`/`evalhub-token`, `s3-api-endpoint`,
+  `mr-server`, `chart-url`, `hardware-profile-name`, etc.) present with
+  the expected values.
+- Manually flipped the sandbox `PipelineRun`'s `Succeeded` condition to
+  `True` (no real Tekton pipeline execution needed for this check) to
+  drive the request into `PromotionRunning`, then confirmed the
+  promotion `PipelineRun`'s params: `gpu-count-override=1` (the
+  `CapacityPlan`-derived value for this request's small context-length/
+  concurrency, correctly **ignoring** the `"3"` override -- confirming
+  the documented sandbox/promotion divergence live, not just in tests),
+  plus every `BuildCommonModelParams` param present with matching
+  values, and promotion-only params (`approval-api-url`,
+  `guidellm-rate=4.0`, `run-register=true`, etc.) all correct for a
+  single-namespace, first-and-last promotion.
+- Deleted the test `ModelRequest` and its two `PipelineRun`s afterward --
+  disposable verification, not a permanent cluster change.
+
+### Known follow-up NOT done in this phase
+
+- The net-LOC discrepancy above (net +44 production lines despite the
+  two target functions shrinking by 70) is fully explained, not a loose
+  end needing more work -- flagging it as documentation, not a TODO.
+- `buildSandboxPipelineParams`/`buildPromotionPipelineParams` still live
+  in `internal/controller`, not `internal/stages/sandbox`/
+  `internal/stages/promotion`. Confirmed intentional (see "Cross-stage
+  import check" above) and expected to happen as part of Phase 4's
+  `StageRunner` relocation work, not silently deferred without
+  explanation.
