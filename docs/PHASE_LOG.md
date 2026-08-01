@@ -386,3 +386,195 @@ need generated deepcopy code -- `*out = *in` already handles them).
   decision this wasn't needed for this environment, but a real
   multi-tenant deployment removing these fields would want a
   migration/deprecation window.
+
+---
+
+## Phase 2 — Split the `ModelRequirements` kitchen-sink struct
+
+**Commit:** `bf40ade` on `feat/model-request-controller` — "Phase 2: split
+ModelRequirements into GPUConfig/BenchmarkTargets/SecurityConfig/
+DeploymentConfig". **Not a breaking API change** -- see below.
+
+### What changed
+
+`ModelRequirements` (`operator/api/v1alpha1/modelrequest_types.go`) had
+~20 flat fields with no internal organization. Grouped them into four
+sub-structs matching `REFACTOR_PLAN.md`'s suggested grouping:
+
+- **`GPUConfig`**: `GPUIsolationPolicy`, `AllowTimeSlicing`, `AllowMIG`,
+  `GPUCountOverride`.
+- **`BenchmarkTargets`**: `ContextLength`, `ExpectedConcurrency`,
+  `RequestRate`, `TargetTTFT`, `TargetThroughput`.
+- **`SecurityConfig`**: `CVEThreshold`, `SecurityThreshold`,
+  `CustomBenchmarkData`, `CustomBenchmarkFile`.
+- **`DeploymentConfig`**: `ValuesContent`, `OpenShiftConsoleDomain`.
+
+`TargetEnvironment`, `SandboxNamespace`, `StagingNamespace`,
+`PromotionNamespaces`, and `AdvisorEndpoint` don't fit any of the four
+named groups cleanly (they're environment/promotion-target selection,
+not GPU/benchmark/security/deployment concerns) and were left flat
+directly on `ModelRequirements`, unchanged from before this phase.
+
+**Not moved: `MaaSOverride`.** The plan's example text lists "MaaS
+override" under `DeploymentConfig`, but `MaaSOverride` (`spec.maas`) is
+actually a field on `ModelRequestSpec`, not `ModelRequirements` -- it
+was never one of the ~20 flattened fields in the struct being split.
+Left it where it is; flagging this discrepancy between the plan's
+prose and the actual code rather than silently moving a field across
+structs that wasn't asked for.
+
+### Not a breaking API change: wire format preserved via anonymous embedding
+
+Each sub-struct is embedded **anonymously** (`GPUConfig` as a bare
+embedded field, not `GPUConfig GPUConfig \`json:"gpuConfig,omitempty"\`\`)
+with a `json:",inline"` tag. Go's `encoding/json` (and `sigs.k8s.io/yaml`,
+which round-trips through it) promotes an anonymous field's exported
+members to the parent struct's level by default; the `,inline` tag is
+documentation of that intent (matching the existing
+`metav1.TypeMeta \`json:",inline"\`` pattern already used elsewhere in
+this API package), not what actually causes the flattening. Verified
+this holds, not just assumed it:
+
+- New tests in `operator/api/v1alpha1/modelrequest_types_test.go`
+  (written first, before touching the struct) pin a golden flat
+  JSON/YAML shape -- one at the `ModelRequirements` level, one at the
+  full `ModelRequest` CR spec level (`requirements:` nested inside a
+  complete spec) -- and assert unmarshal-then-remarshal reproduces the
+  identical decoded shape, plus a explicit check that no field ends up
+  nested under a wrapper key (`gpuConfig`, etc). Ran these against the
+  **pre-refactor** flat struct first to confirm they pass (the TDD
+  starting point), then again after the struct split with the test
+  file itself unchanged -- both pass.
+- `make manifests` regenerated
+  `operator/config/crd/bases/modelops.example.io_modelrequests.yaml`;
+  diffed field-by-field against the pre-Phase-2 version. The only diff
+  is an added `description:` block (from the new Go doc comment on
+  `ModelRequirements`) -- the `requirements.properties` field list
+  itself is byte-identical, still 20 flat sibling properties, no
+  `gpuConfig`/`benchmarkTargets`/etc. wrapper object appeared.
+  Confirmed `make manifests` is idempotent (second run, no diff).
+- Verified live on the sandbox cluster (see below): a real
+  `ModelRequest` submitted with the exact same flat `requirements:`
+  YAML shape as before this phase reconciled to `SandboxRunning`
+  cleanly, and the resulting `PipelineRun`'s params (`gpu-count-override`,
+  `context-length`, `allow-time-slicing`, `artifact-cve-threshold`,
+  `values-content`, `openshift-console-domain`, etc. -- one field from
+  each of the four new sub-structs) carried the correct submitted
+  values through.
+
+If a future field genuinely can't be inlined this way (e.g. two
+sub-structs sharing a field name, which would create ambiguous
+selectors), that would need to be flagged before proceeding -- it
+didn't come up here since the four groups' fields are disjoint.
+
+### Call site updates
+
+`buildCapacityPlan`, `buildSandboxPipelineParams`, and
+`buildPromotionPipelineParams` in
+`operator/internal/controller/modelrequest_controller.go` were updated
+to use the explicit nested path (e.g. `reqs.GPUConfig.GPUCountOverride`,
+`reqs.BenchmarkTargets.ContextLength`, `reqs.SecurityConfig.CVEThreshold`,
+`reqs.DeploymentConfig.ValuesContent`) rather than relying on Go's
+field-promotion to keep accessing them unqualified as `reqs.GPUCountOverride`
+etc. Promotion would have compiled either way (confirmed: `go build ./...`
+succeeds with zero call-site changes, before this cleanup pass) -- the
+explicit path was chosen only so the sub-struct grouping is visible in
+the code that consumes it, per the plan's stated goal ("internal
+organization should make it obvious which fields belong to which
+concern"), not because it was functionally required.
+
+### Cross-stage import check
+
+No package under `internal/stages/*` needed a new import as a result of
+this change. `ModelRequirements` stays in `api/v1alpha1`, where it
+already lived -- Phase 2 doesn't relocate any logic into
+`internal/stages/*` (those packages are still Phase 0's `doc.go` stubs
+with no real code; that relocation is Phase 4+'s job). The instruction
+to put this in `internal/stagecommon` "if that's where the type
+currently lives" didn't apply since it doesn't.
+
+### Test coverage added
+
+- `operator/api/v1alpha1/modelrequest_types_test.go` (new file, 3
+  tests): `TestModelRequirements_WireFormatUnchanged_RoundTrip`,
+  `TestModelRequirements_WireFormatUnchanged_NoWrapperKeys`,
+  `TestModelRequest_WireFormatUnchanged_FullCRRoundTrip`.
+- `operator/internal/controller/modelrequest_controller_test.go`:
+  updated the two pre-existing `ModelRequirements{...}` struct literals
+  that set now-relocated fields directly (`ContextLength`/
+  `ExpectedConcurrency` at line ~116, `GPUCountOverride` at line ~501)
+  to use the new nested sub-struct literal form. No test *behavior*
+  changed, only the literal syntax needed to compile against the new
+  struct shape. All other existing `ModelRequirements{...}` literals in
+  this file only set unmoved fields (`PromotionNamespaces`) or are
+  empty (`&ModelRequirements{}`) and needed no change.
+- Total suite: 46 tests passing (43 from Phase 1 + 3 new), all
+  envtest-backed except the 3 new ones (plain `go test`, no envtest
+  needed for pure marshal/unmarshal).
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) run. CRD diff
+described above (description-only). `zz_generated.deepcopy.go` gained
+`DeepCopyInto`/`DeepCopy` for the four new sub-struct types;
+`ModelRequirements.DeepCopyInto` now delegates
+`in.GPUConfig.DeepCopyInto(&out.GPUConfig)` (needed, since `GPUConfig`
+holds the two `*bool` pointer fields that need a real deep copy) and
+plain-assigns the other three sub-structs (`out.BenchmarkTargets =
+in.BenchmarkTargets`, etc. -- correct, since none of those three hold
+pointer/slice/map fields). No other CRD (`capacityplans`,
+`platformconfigs`, `lifecycleprofiles`) changed --
+`CapacityPlanSpec` coincidentally shares 4 field *names*
+(`ContextLength`, `AllowTimeSlicing`, `AllowMIG`, `AdvisorEndpoint`)
+with `ModelRequirements` but is a distinct, unrelated struct not
+touched by this phase.
+`gitops/components/operator/crd-modelrequests.yaml` was synced from the
+regenerated `config/crd/bases/*` output, same as the Phase 1 pattern
+(confirmed the pre-Phase-2 copy was still byte-identical to the
+pre-Phase-2 base before overwriting it, so no undetected drift was
+carried forward).
+
+### Sandbox cluster verification
+
+- Rebuilt and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image from this phase's code (same as Phase 1 -- the deployment runs
+  from this pre-built tag, ArgoCD only manages the surrounding
+  manifests) and rolled the `Deployment` in `modelops` to pick it up.
+- Pushed this phase's commit to `feat/model-request-controller`;
+  `Application/modelops-operator` (branch-tracked, auto-sync +
+  self-heal, confirmed still pointed at this branch/path from Phase
+  0/1) synced to `bf40ade` after a manual hard-refresh nudge (routine
+  ArgoCD polling would have picked it up on its own within its normal
+  interval; the refresh was only to avoid waiting in this session).
+  Confirmed via `oc get crd modelrequests.modelops.example.io` that the
+  live schema's `requirements.properties` is still 20 flat sibling
+  properties with no wrapper object, matching the Git-committed CRD.
+- Created a disposable `ModelRequest` (`phase2-verify`, `sandbox`
+  namespace, referencing the pre-existing `scan-s3-credentials`/
+  `result-s3-credentials` secrets and the `standard-generative-onboarding`
+  profile) with a `requirements:` block touching one field from each of
+  the four new sub-structs plus `gpuCountOverride`. Reconciled cleanly
+  to `SandboxRunning`; the generated `PipelineRun`'s params
+  (`gpu-count-override=3`, `context-length=4096`, `concurrency=2`,
+  `allow-time-slicing=true`, `allow-mig=false`,
+  `gpu-isolation-policy=dedicated`, `artifact-cve-threshold=high`,
+  `severity-threshold=block`, `values-content=replicaCount: 1`,
+  `openshift-console-domain=apps.example.com`, `request-rate=4.0`,
+  `target-ttft=500ms`, `target-throughput=100`) all carried the
+  submitted values correctly. Deleted the test `ModelRequest` and its
+  `PipelineRun` afterward -- disposable verification, not a permanent
+  cluster change.
+
+### Known follow-up NOT done in this phase
+
+- The plan's example grouping mentions "MaaS override" under
+  `DeploymentConfig`, but no such field exists on `ModelRequirements`
+  today (`MaaSOverride` lives on `ModelRequestSpec` as `spec.maas`,
+  entirely separate from `spec.requirements`). Flagged above; no code
+  change made since moving `spec.maas` into `requirements` isn't
+  something this phase was asked to do and would itself be a breaking
+  API change (a different top-level key) if done without care.
+- `operator/go.mod` picked up `sigs.k8s.io/yaml` moving from an
+  indirect to a direct dependency (the new test file imports it
+  directly for the CR-level round-trip test). `go.sum` unchanged --
+  the module was already present, just re-flagged as direct.
