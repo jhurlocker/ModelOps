@@ -5,7 +5,20 @@
     <p>Submit a new model for onboarding. Complete all four steps to create a ModelRequest.</p>
 </div>
 
-<form method="POST" action="/intake/submit" class="wizard-form wizard-container">
+{% if errors %}
+<div class="card" style="border:1px solid var(--color-danger);margin-bottom:16px">
+    <div class="card-body" style="color:var(--color-danger);font-size:13px">
+        <strong>This request was not created -- fix the following and resubmit:</strong>
+        <ul style="margin:8px 0 0 18px">
+            {% for err in errors %}
+            <li>{{ err }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+{% endif %}
+
+<form method="POST" action="/intake/submit" class="wizard-form wizard-container" data-start-step="{{ 3 if errors else 0 }}">
     <div class="wizard-steps">
         <div class="wizard-step active">
             <span class="step-number">1</span> Model
@@ -233,11 +246,11 @@
         <!-- Expert Overrides Toggle -->
         <div class="expert-toggle" style="margin-top:16px">
             <label style="font-size:13px;font-weight:600">
-                <input type="checkbox"> Show expert overrides
+                <input type="checkbox" {% if errors %}checked{% endif %}> Show expert overrides
             </label>
         </div>
 
-        <div class="expert-section">
+        <div class="expert-section{{ ' visible' if errors }}">
             <div class="form-row">
                 <div class="form-group">
                     <label>Pipeline Override</label>
@@ -323,12 +336,14 @@
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label>Scan S3 Secret Name</label>
-                    <input type="text" name="scan-s3-secret-name" value="{{ defaults.get('scan-s3-secret-name', 'scan-s3-credentials') }}">
+                    <label>Scan S3 Secret Name *</label>
+                    <input type="text" name="scan-s3-secret-name" value="{{ defaults.get('scan-s3-secret-name', 'scan-s3-credentials') }}"
+                           {% if errors and not defaults.get('scan-s3-secret-name') %}style="border-color:var(--color-danger)"{% endif %}>
                 </div>
                 <div class="form-group">
-                    <label>Result S3 Secret Name</label>
-                    <input type="text" name="result-s3-secret-name" value="{{ defaults.get('result-s3-secret-name', 'result-s3-credentials') }}">
+                    <label>Result S3 Secret Name *</label>
+                    <input type="text" name="result-s3-secret-name" value="{{ defaults.get('result-s3-secret-name', 'result-s3-credentials') }}"
+                           {% if errors and not defaults.get('result-s3-secret-name') %}style="border-color:var(--color-danger)"{% endif %}>
                 </div>
             </div>
         </div>

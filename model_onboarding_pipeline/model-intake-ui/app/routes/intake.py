@@ -27,9 +27,8 @@ FORM_STEP3_FIELDS = [
 FORM_STEP4_FIELDS = []  # review only
 
 
-@intake_bp.route("/")
-def intake_form():
-    defaults = {
+def _base_form_defaults():
+    return {
         "model-source": "huggingface",
         "model-id": "ibm-granite/granite-3.3-2b-instruct",
         "model-tokenizer": "ibm-granite/granite-3.3-2b-instruct",
@@ -51,12 +50,55 @@ def intake_form():
         "scan-s3-secret-name": "scan-s3-credentials",
         "result-s3-secret-name": "result-s3-credentials",
     }
-    return render_template("intake/wizard.html", defaults=defaults, active_page="intake")
+
+
+# These two fields have no server-side credential fallback:
+# internal/controller.resolveSecrets (Phase 1 of REFACTOR_PLAN.md)
+# removed the old hardcoded minioadmin default, so a ModelRequest
+# submitted with either one blank is guaranteed to reach
+# SecretLookupFailed once the sandbox stage's secrets are resolved --
+# it will never succeed on its own. Validated here so the wizard blocks
+# submission instead of creating a request that's already doomed.
+REQUIRED_SECRET_FIELDS = [
+    ("scan-s3-secret-name", "Scan S3 Secret Name"),
+    ("result-s3-secret-name", "Result S3 Secret Name"),
+]
+
+
+def _validate_required_secrets(form_data):
+    errors = []
+    for field, label in REQUIRED_SECRET_FIELDS:
+        if not form_data.get(field, "").strip():
+            errors.append(
+                f"{label} is required (Governance step -> Show expert overrides -> "
+                "S3 Connection Override). No default credential is used if this is "
+                "left blank -- the request will fail once it reaches the sandbox stage."
+            )
+    return errors
+
+
+@intake_bp.route("/")
+def intake_form():
+    return render_template(
+        "intake/wizard.html", defaults=_base_form_defaults(), errors=[], active_page="intake",
+    )
 
 
 @intake_bp.route("/submit", methods=["POST"])
 def submit():
     form_data = request.form.to_dict()
+
+    errors = _validate_required_secrets(form_data)
+    if errors:
+        # Re-render with exactly what was submitted (not silently
+        # repopulated with defaults) so the user can see which field(s)
+        # are actually empty, rather than just being told "something is
+        # wrong" -- overlaying onto _base_form_defaults() only fills in
+        # keys the form itself never sends (e.g. an unchecked checkbox).
+        defaults = {**_base_form_defaults(), **form_data}
+        return render_template(
+            "intake/wizard.html", defaults=defaults, errors=errors, active_page="intake",
+        ), 400
 
     model_source = form_data.get("model-source", "huggingface")
     model_uri = form_data.get("model-id", "").strip()
@@ -160,11 +202,27 @@ def submit():
         if val:
             spec[json_key] = val
 
-    # Expert secret references
-    for key in ("evalhub-secret-name", "huggingface-secret-name", "scan-s3-secret-name", "result-s3-secret-name"):
+    # Expert secret references. An explicit map, not a generic
+    # "-secret-name" -> "SecretName" string replace: the latter silently
+    # produced the wrong key for the two S3 fields (e.g.
+    # "scan-s3-secret-name" -> "scan-s3SecretName", not the CRD's actual
+    # "scanS3SecretName", because ".replace()" only strips the literal
+    # "-secret-name" suffix and leaves the embedded "-s3" hyphen alone).
+    # The API server silently pruned the resulting unrecognized field on
+    # every write -- confirmed live: a request submitted with both S3
+    # secret-name fields correctly filled in still ended up with
+    # spec.scanS3SecretName/resultS3SecretName unset, every time,
+    # regardless of what was typed into the form.
+    SECRET_NAME_FIELD_MAP = {
+        "evalhub-secret-name": "evalhubSecretName",
+        "huggingface-secret-name": "huggingfaceSecretName",
+        "scan-s3-secret-name": "scanS3SecretName",
+        "result-s3-secret-name": "resultS3SecretName",
+    }
+    for key, json_key in SECRET_NAME_FIELD_MAP.items():
         val = form_data.get(key, "")
         if val:
-            spec[key.replace("-secret-name", "SecretName")] = val
+            spec[json_key] = val
 
     name_suffix = hashlib.sha256(f"{form_data.get('model-id','')}{time.time()}".encode()).hexdigest()[:10]
     req_name = f"model-intake-{name_suffix}"

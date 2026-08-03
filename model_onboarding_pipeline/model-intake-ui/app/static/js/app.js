@@ -12,7 +12,12 @@ function initWizard() {
 
     const steps = wizard.querySelectorAll('.wizard-step-panel');
     const stepButtons = document.querySelectorAll('.wizard-step');
-    let currentStep = 0;
+    // data-start-step lets a server-rendered validation-error re-render
+    // land the user directly on the step containing the problem field
+    // (e.g. the Review step's expert overrides) instead of always
+    // starting over at step 1.
+    let currentStep = parseInt(wizard.dataset.startStep || '0', 10);
+    if (!(currentStep >= 0 && currentStep < steps.length)) currentStep = 0;
 
     function showStep(n) {
         steps.forEach((s, i) => { s.style.display = i === n ? 'block' : 'none'; });
@@ -50,7 +55,7 @@ function initWizard() {
         }
     });
 
-    showStep(0);
+    showStep(currentStep);
 }
 
 function initTabs() {
