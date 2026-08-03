@@ -1995,3 +1995,463 @@ generically by the walker for *any* stage whose declared
 `ProfileStageSpec.NamespaceSetup` requests them, driven by data rather
 than by checking a stage's name, so they're shared walker-glue code, not
 promotion-specific logic.
+
+---
+
+## Phase 7 — RBAC scoping, plus four Phase 5/6 backlog items
+
+**Commits:** `f978549` ("Phase 7: RBAC scoping, ProviderConfigLookupFailed,
+Phase/Message shim removal, CapacityPlan Failed path") and `cdf4643`
+("Fix Phase 7 modelrequests/finalizers RBAC regression caught by sandbox
+cluster testing") on `feat/model-request-controller`. This phase went
+through an explicit design-review pass first (per the user's request,
+same as Phases 4/5/6), covering all six numbered items below; the
+approved design is what's implemented. Additive CRD change for
+`MaxGPUsPerRequest`; a real, deliberate breaking behavior change for the
+`Phase`/`Message` shim removal (see item 5 below) and RBAC tightening.
+
+### What changed
+
+**1. RBAC split by package.** The combined marker list was attributed to
+the package that actually needs each permission, grounded in what Phase
+4-6 actually built (`StageHandlers`/`StageRunners` registries):
+
+- `internal/stages/tekton/stagerunner.go` gained the `tekton.dev/pipelineruns`
+  marker (moved from `ModelRequestReconciler`, joining the
+  `intakeproviderconfigs` marker already there from Phase 5) -- the only
+  place in the codebase that Gets/Creates a `PipelineRun`.
+- `internal/stages/capacityplanning/stagerunner.go` gained its own
+  `capacityplans` marker, narrowed to `get;list;watch;create` (its
+  `EnsureRun` only ever Get-or-Creates, never mutates an existing one).
+- `internal/controller/capacityplan_controller.go`'s (`CapacityPlanReconciler`)
+  own `capacityplans` marker was tightened from full CRUD to
+  `get;list;watch` (+ `capacityplans/status: get;update;patch`) -- it
+  never creates/updates/deletes a `CapacityPlan`'s spec, only reads it and
+  later writes its status.
+- `capacityplans/finalizers` marker removed (confirmed dead: nothing in
+  this codebase ever creates a child object owned by a `CapacityPlan`).
+- **`modelrequests/finalizers` was ALSO removed in the first draft, and
+  this was wrong** -- see "A real regression caught only by live-cluster
+  verification," below. Restored in the follow-up commit.
+- New `stagecommon.OwnedTypesProvider` interface (`OwnedTypes()
+  []client.Object`), implemented only by `tekton.StageRunner` (returning
+  `[]client.Object{&tektonv1.PipelineRun{}}`). `ModelRequestReconciler.SetupWithManager`
+  now iterates `r.StageRunners` (via a new, deterministically-sorted
+  `sortedStageRunnerKeys` helper) and calls `.Owns(t)` generically for any
+  registered runner implementing this interface, instead of a hardcoded
+  `.Owns(&tektonv1.PipelineRun{})` -- this is what lets
+  `internal/controller/modelrequest_controller.go` drop its last
+  `tektonv1` import entirely, closing the exact residual Phase 4's log
+  flagged ("a natural candidate for Phase 5/7... a provider-agnostic
+  'which child types does this StageRunner own' hook").
+  `capacityplanning.StageRunner`/`noop.StageRunner` deliberately do NOT
+  implement this interface: `CapacityPlan` ownership stays an explicit,
+  unconditional `.Owns(&modelopsv1alpha1.CapacityPlan{})` call in
+  `SetupWithManager` (a core lifecycle CRD, not provider-specific), and
+  `noop.StageRunner` creates nothing.
+- New `docs/RBAC.md` documents the resulting split package-by-package,
+  including an explicit caveat that this is currently RBAC-marker
+  *attribution* (correct `make manifests` shrinkage if a stage package is
+  deleted), not runtime privilege *isolation* -- one `ClusterRole`/one
+  `ServiceAccount` still backs the whole manager process; genuinely
+  separate least-privilege service accounts per `StageRunner` would need
+  separate manager processes, out of scope for this pass.
+- Namespace-provisioning RBAC (`ensurePromotionNamespaceRBAC`/
+  `ensureNamespaceLabels`, invoked generically via
+  `ProfileStageSpec.NamespaceSetup`) stays on the core reconciler, per
+  the design review: it's driven by stage *data*, not a specific
+  execution engine -- a future non-Tekton `StageRunner` would need the
+  identical RBAC bootstrap.
+
+**A real regression caught only by live-cluster verification, not
+envtest.** The first draft removed `modelrequests/finalizers` as a
+believed-dead marker (no finalizer is registered on `ModelRequest`
+anywhere in Go code). This broke every `CapacityPlan`/`PipelineRun`
+creation on the sandbox cluster:
+
+```
+error: stage "capacity": capacityplans.modelops.example.io "phase7-verify-capacity"
+is forbidden: cannot set blockOwnerDeletion if an ownerReference refers to
+a resource you can't set finalizers on: , <nil>
+```
+
+Root cause: both `tekton.StageRunner.buildPipelineRun` and
+`capacityplanning.StageRunner.EnsureRun` call
+`controllerutil.SetControllerReference(modelRequest, child, scheme)`,
+which sets `OwnerReference.BlockOwnerDeletion = true` by default. The API
+server's admission control requires `update` permission on
+`modelrequests/finalizers` to set `blockOwnerDeletion: true` on *any*
+owner reference pointing at a `ModelRequest` object -- a generic
+Kubernetes owner-reference safety check, completely independent of
+whether the owning controller (`ModelRequestReconciler`) itself ever
+registers a finalizer. `envtest`'s admin-equivalent client bypasses this
+admission check entirely (structurally invisible to the 124-test unit
+suite), so nothing caught it until a real `ModelRequest` was created on
+the sandbox cluster and its `CapacityPlan` creation failed. **This is the
+same shape of gap Phase 1's RBAC-escalation incident already
+demonstrated** -- flagging again, as a pattern: real RBAC-enforcement
+behavior in this codebase has now twice been invisible to `envtest` and
+only caught by live-cluster testing, exactly why `REFACTOR_PLAN.md`'s
+guiding principles require it. Fixed by restoring the marker (kept
+`capacityplans/finalizers` removed -- confirmed genuinely unused, since
+nothing ever creates a child object owned by a `CapacityPlan`); rebuilt,
+redeployed, re-verified (see "Sandbox cluster verification," below).
+
+**2. Namespace-provisioning RBAC**: confirmed staying on the core
+reconciler, no code change (see design review above).
+
+**3. `WorkflowRef.Engine` vs. `IntakeProviderConfigSpec.ProviderType`.**
+`Engine` gets a field-level deprecation doc comment (previously only the
+*type*-level comment implied it) confirming it's non-functional --
+verified by grep that no Go code outside its own declaration and the
+printcolumn marker ever reads it; routing has gone through
+`ProfileStageSpec.Kind` + the `StageRunners` registry since Phase 6.
+`ProviderType` is the field that actually carries functional weight (the
+Go-level guard in `resolveProviderDetails`). `Engine` is left in place,
+non-functional -- removing a field outright is a breaking CRD change not
+needed for this pass. `ModelLifecycleProfile`'s printcolumn repointed
+from `.spec.workflow.engine` to `.spec.providerConfigRef.name`, renamed
+`"Engine"` -> `"Provider"`.
+
+**A wrinkle discovered while implementing item 5 (below), not
+anticipated in the design review**: once `Spec.Stages` became mandatory
+and each `ProfileStageSpec` carries its own `ProviderConfigRef`, the
+top-level `ModelLifecycleProfileSpec.ProviderConfigRef` field the new
+printcolumn reads is now **also** non-functional (nothing reads it once
+`defaultStages()` -- its only consumer -- was removed). Its doc comment
+was updated with the same DEPRECATED treatment as `Engine`. The
+printcolumn still shows a generally-useful value in practice (profiles
+are expected to keep the top-level field in sync with what their stages
+actually reference, as the live profile does), but it's worth being
+explicit that it's now reading an inert field, same as `Engine` was.
+
+**4. `ProviderConfigLookupFailed` status reason.** New
+`stagecommon.ProviderConfigError{Err error}` (in `stagecommon`, not
+`internal/stages/tekton`, since the error must be recognizable from
+`internal/controller`, which never imports `internal/stages/tekton`
+directly). `tekton.StageRunner.EnsureRun` now wraps every
+`resolveProviderDetails` failure in this type. `ModelRequestReconciler.Reconcile`
+recognizes it via `errors.As` (alongside the existing
+`namespaceSetupError`/`secretLookupError` checks) and calls a new
+`failRequestWithRequeue` helper (`failRequest`'s counterpart that always
+returns a bounded `RequeueAfter`, even on the "nothing changed" no-op
+branch) with a new, dedicated `providerConfigLookupRequeueDelay = 30 *
+time.Second` -- distinct from the existing 5s `transientErrorRequeueDelay`,
+long enough to tolerate the referenced `IntakeProviderConfig` being
+created moments later by a separate GitOps sync without masking the
+failure as permanent. Per the design review's explicit scope: the
+`Watches()`-based immediate-re-trigger mechanism (for this and the three
+older `*LookupFailed` reasons) was deliberately NOT built this pass --
+added as a new backlog bullet under `REFACTOR_PLAN.md`'s Phase 7 section
+instead, scoped to all four reasons together.
+
+**5. Deprecating the Phase 6 `Phase`/`Message` compatibility shim.**
+`internal/controller/stages_default.go` (`defaultStages()`,
+`defaultCapacityStageName`/`defaultSandboxStageName`/`defaultPromotionStageName`)
+deleted outright. `Reconcile` now returns a new `"NoStagesConfigured"`
+status reason (via the existing `failRequest`) if
+`profile.Spec.Stages` is empty, instead of silently synthesizing the old
+3-stage default -- **an addition beyond exactly what was asked, made
+deliberately to avoid a silent no-op walk-of-zero-stages footgun once the
+implicit fallback was removed; flagged here rather than silently
+expanding scope.** `computeWalkStatus` lost its `usingDefaultStages`
+parameter and the `switch result.CurrentStage { case
+defaultCapacityStageName: ... }` branch entirely -- every profile now
+gets the fully generic `Phase` values
+(`"<CurrentStage>Running"`/`"Succeeded"`/`"Failed"`, `result.Message`
+passed through verbatim) the `!usingDefaultStages` branch already
+produced for custom-`Stages` profiles since Phase 6.
+`sandboxStageName`/`promotionStageName` (renamed from
+`defaultSandboxStageName`/`defaultPromotionStageName`, `defaultCapacityStageName`
+dropped as fully dead) survive in `modelrequest_controller.go` itself,
+now serving only `lastProgressNamed`/`lastPromotionProgress`'s
+population of the three legacy singular RunName fields
+(`PipelineRunName`/`SandboxPipelineRunName`/`PromotionPipelineRunName`,
+which predate Phase 6 entirely) -- a known, narrower limitation flagged
+in code comments: these three fields only populate for a stage literally
+named `"sandbox"`/`"promotion"`, unlike `Status.Stages[]`/`CurrentStage`,
+which are fully generic regardless of naming. Out of scope for this
+phase (only the `Phase`/`Message` shim was asked to be deprecated).
+
+**The live migration, per the design review's explicit staging
+decision** (gate by per-profile `Spec.Stages` opt-in, not a global
+flag-day cutover): `gitops/components/runtime-config/lifecycleprofile.yaml`
+(the only `ModelLifecycleProfile` in this repo) now declares its 3 stages
+explicitly, a mechanical field-for-field copy of what `defaultStages()`
+used to synthesize in Go (same stage names, same `NamespaceSetup`
+blocks, each stage's own `providerConfigRef` pointing at
+`standard-generative-onboarding-provider`). `operator/config/samples/lifecycleprofile-sample.yaml`
+(the kubebuilder convention sample, not GitOps-tracked) was updated the
+same way, but relying on the deprecated `workflow.pipelineRef` fallback
+(no `providerConfigRef` set on its stages), to keep exercising that path
+too.
+
+**13 test assertions updated** (`"CapacityPlanning"` ->
+`"capacityRunning"`, `"SandboxRunning"` -> `"sandboxRunning"`,
+`"PromotionRunning"` -> `"promotionRunning"`, across
+`modelrequest_controller_test.go`, `modelrequest_stagerunner_test.go`,
+`providerconfig_test.go` -- exactly the count predicted in the design
+review). **A materially larger test-fixture migration beyond those 13**,
+not fully anticipated in the design review's scope estimate: every
+characterization test that previously relied on `defaultStages()`'s
+implicit synthesis needed its fixture profile to declare `Stages`
+explicitly too, since `Reconcile` now hard-fails with
+`"NoStagesConfigured"` otherwise. Handled with one new
+test-only helper, `testDefaultStages(providerConfigRef
+*modelopsv1alpha1.ProviderConfigRef) []modelopsv1alpha1.ProfileStageSpec`
+(`testutil_test.go`) -- a test-side mirror of the deleted production
+`defaultStages()`, wired into `defaultProfileSpec()` (fixing the ~20 call
+sites that use it in one place) plus 4 standalone
+`ModelLifecycleProfileSpec{...}` literals updated individually
+(`TestModelRequest_SandboxPipelineNameOrDefault_PrecedenceOrder`,
+`TestModelRequest_PromotionUsesProfilePromotionPipelineRef_EndToEnd`,
+`newProfileWithProviderConfigRef` in `providerconfig_test.go`, and the
+new `TestModelRequest_ProviderConfigRef_UnsupportedKind_SetsProviderConfigLookupFailed`).
+
+**Verified live on the sandbox cluster specifically via the
+branch-tracked `Application`s**, per the user's explicit instruction that
+this be checked live, not just against `envtest`, given the real,
+visible behavior change:
+
+- `Application/modelops-runtime-config` synced the migrated
+  `lifecycleprofile.yaml` (`kubectl get modellifecycleprofile` showed the
+  new `Provider` printcolumn correctly resolving
+  `standard-generative-onboarding-provider`, confirming item 3's
+  printcolumn repoint live).
+- A disposable `ModelRequest` (`phase7-verify`, `sandbox` namespace,
+  referencing the live, now-migrated `standard-generative-onboarding`
+  profile) reconciled through a REAL sandbox Tekton pipeline execution
+  (not immediately flipped) to `Status.Phase: sandboxRunning`,
+  `Status.CurrentStage: sandbox` -- confirmed fully generic, lowercase,
+  no `"SandboxRunning"` special-casing. Manually flipped the sandbox
+  `PipelineRun`'s condition via a `--subresource=status` merge patch to
+  advance to `Status.Phase: promotionRunning`, then flipped the
+  promotion `PipelineRun`'s condition to reach `Status.Phase: Succeeded`,
+  `Status.Message: "Model onboarding completed successfully"`, with
+  `Status.Stages[]` showing all three stages `Succeeded` with correct
+  `RunRef`s and namespaces. `pipeline` `ServiceAccount`s confirmed
+  present in both `sandbox` and `staging`. Deleted the disposable
+  `ModelRequest` afterward; its `CapacityPlan` and both `PipelineRun`s
+  were garbage-collected automatically via owner references (confirmed
+  gone on a follow-up `get`) -- disposable verification, not a permanent
+  cluster change.
+
+**6. `CapacityPlan` real `Failed` path.** New
+`PlatformConfigSpec.MaxGPUsPerRequest`/`CapacityPlanSpec.MaxGPUsPerRequest`
+(`int`, populated from `PlatformConfig` into each `CapacityPlan` by
+`capacityplanning.Handler.BuildSpec`, the same pattern as
+`GPUOperatorNamespace`/`ClusterPolicyName`). `CapacityPlanReconciler`
+computes an unclamped `rawGPUs` value (mathematically equivalent to the
+old per-branch-clamped `baseGPUs` computation for every case where no
+ceiling is configured -- proven both by a dedicated characterization
+test and by re-running the pre-existing golden-value tests unmodified);
+if `Spec.MaxGPUsPerRequest > 0 && rawGPUs > Spec.MaxGPUsPerRequest`, sets
+`Status.Phase = "Failed"` with message `"requested capacity (%d GPUs)
+exceeds configured maximum (%d)"` instead of silently clamping to 8.
+Zero/unset `MaxGPUsPerRequest` preserves the exact pre-Phase-7 behavior
+byte-for-byte. Also added a `Status.Phase == "Failed"` no-op guard
+(alongside the existing `"Succeeded"` one) so an already-`Failed` plan
+isn't re-processed/re-written on every reconcile. Per the design
+review's explicit scope: real GPU-inventory/advisor-based feasibility
+checking (the actual, harder problem -- confirmed via code inspection
+that `CapacityPlanReconciler` has no HTTP call, no `Node`/`ClusterPolicy`
+capacity query of any kind, despite unused `AdvisorEndpoint`/
+`AdvisorSecretName`/`AdvisorTimeoutSeconds` fields already existing on
+both `CapacityPlanSpec` and `PlatformConfigSpec`) remains explicitly out
+of scope -- flagged as a new backlog bullet under `REFACTOR_PLAN.md`'s
+Phase 7 section, noting a real `gpu-advisor` container image already
+exists and is used by the sandbox Tekton pipeline's own `gpu-advisor`
+Task (`model_onboarding_pipeline/tools/gpu-advisor`,
+`quay.io/jhurlocker/gpu-advisor`) -- a natural future integration point,
+discovered during this phase's research but not wired up.
+
+**Verified live**: a disposable `CapacityPlan`
+(`ContextLength: 32768, Concurrency: 16, MaxGPUsPerRequest: 4` -- raw
+GPU recommendation 8, exceeding the configured ceiling of 4) reached
+`Status.Phase: Failed`, `Status.Message: "requested capacity (8 GPUs)
+exceeds configured maximum (4)"` on the sandbox cluster. Deleted
+afterward.
+
+### TDD: what was genuinely new vs. relocated
+
+Per the guiding principle, tests were written before/alongside each new
+piece of behavior:
+
+- `internal/stagecommon/errors_test.go` (new, 3 tests): `ProviderConfigError`'s
+  `Error()`/`Unwrap()` behavior, including a test proving it survives
+  `fmt.Errorf("...: %w", ...)` wrapping and is still found by
+  `errors.As` -- mirroring exactly how `internal/stagewalk.Walk` wraps a
+  `StageRunner.EnsureRun` error before it reaches `Reconcile`.
+- `internal/stages/tekton/stagerunner_test.go` (5 new tests):
+  `TestEnsureRun_ProviderConfigResolutionFails_ReturnsProviderConfigError`
+  (written before `EnsureRun` wrapped this error), plus
+  `TestStageRunner_ImplementsOwnedTypesProvider`/
+  `TestStageRunner_OwnedTypes_ReturnsExactlyPipelineRun` (written before
+  `OwnedTypes()` existed).
+- `internal/stages/capacityplanning/stagerunner_test.go` /
+  `internal/stages/noop/stagerunner_test.go` (1 new test each):
+  `TestStageRunner_DoesNotImplementOwnedTypesProvider` -- the structural
+  proof (a type-assertion returning `false`) that CapacityPlan ownership
+  stays explicit on the core reconciler and that `noop.StageRunner`
+  needs "close to none" wiring, exactly as the design review claimed.
+- `internal/controller/modelrequest_controller_setup_test.go` (new, 2
+  tests): `sortedStageRunnerKeys`, written first (TDD: didn't exist
+  before this phase). `SetupWithManager` itself is not exercised
+  end-to-end (consistent with this package's pre-existing convention --
+  no prior phase tested `SetupWithManager` against a real `ctrl.Manager`
+  either, only `Reconcile` directly via `envtest`).
+- `internal/controller/capacityplan_controller_test.go` (5 new tests):
+  `TestCapacityPlan_MaxGPUsPerRequestUnset_PreservesExactPreviousClampingBehavior`,
+  `TestCapacityPlan_RequestedGPUsExceedMaxGPUsPerRequest_SetsFailedPhase`,
+  `TestCapacityPlan_RequestedGPUsWithinMaxGPUsPerRequest_Succeeds`,
+  `TestCapacityPlan_RequestedGPUsExactlyAtMaxGPUsPerRequest_DoesNotFail`
+  (boundary: exceeds means strictly-greater-than, not `>=`),
+  `TestCapacityPlan_AlreadyFailed_IsANoOp`. All written before the
+  `Reconcile` change landed.
+- `internal/controller/providerconfig_test.go`: the pre-existing
+  `TestModelRequest_ProviderConfigRef_MissingCR_SurfacesResolveErrorNotSilentDefault`
+  was rewritten (renamed
+  `..._SetsProviderConfigLookupFailed_WithBoundedRequeue`) to assert the
+  new behavior instead of the old raw-reconcile-error one; 3 new tests
+  added (`..._UnsupportedKind_SetsProviderConfigLookupFailed`,
+  `..._KeepsRequeueingUntilFixed`).
+- `internal/controller/modelrequest_controller_test.go`:
+  `TestModelRequest_ProfileWithNoStages_SetsNoStagesConfigured` (new,
+  for the `NoStagesConfigured` guard -- added slightly after the
+  production code, not strictly before; flagged rather than silently
+  presented as pure TDD).
+- `internal/stages/capacityplanning/handler_test.go`: `MaxGPUsPerRequest`
+  assertions added to the existing full-fixture and defaults tests
+  (confirms it's threaded through with no default applied, unlike
+  `MaxTimeSlices`).
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5), run twice (once for
+the main phase commit, once more after the `modelrequests/finalizers`
+fix). `config/crd/bases/*` diffs are purely additive
+(`maxGPUsPerRequest` on both `capacityplans`/`platformconfigs`,
+description-only changes elsewhere for the updated doc comments, the
+`Provider` printcolumn rename on `modellifecycleprofiles`).
+`config/rbac/role.yaml` diff matches the split described above exactly.
+`zz_generated.deepcopy.go` unchanged (plain `int` fields need no special
+deep-copy logic). `gitops/components/operator/crd-*.yaml` (4 of 5) and
+`clusterrole.yaml` re-synced from the regenerated bases, confirmed
+byte-identical afterward (CRDs) / matching verb-for-verb (the
+hand-maintained, differently-formatted `clusterrole.yaml`).
+`gitops/components/operator/crd-intakeproviderconfigs.yaml` confirmed
+unchanged (untouched by this phase). The pre-existing
+`serving.kserve.io`/`maas.opendatahub.io` hand-added rules in
+`clusterrole.yaml` (flagged first in Phase 1, no corresponding Go
+marker) are untouched.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all five packages under `internal/stages/*`
+(`sandbox`, `promotion`, `capacityplanning`, `tekton`, `noop`): none
+imports another (all five commands produced no matching output).
+`internal/stagecommon` gained a new import
+(`sigs.k8s.io/controller-runtime/pkg/client`, for `OwnedTypesProvider`'s
+`client.Object` return type) but still depends on nothing beyond
+`api/v1alpha1` + stdlib + controller-runtime/apimachinery (already a
+transitive dependency of everything in this module) -- confirmed via
+`go list -deps` showing no `internal/controller`/`internal/stages/*`
+entries.
+
+### Test coverage added
+
+- New: `internal/stagecommon/errors.go`+`errors_test.go` (3 tests).
+- New: `internal/controller/modelrequest_controller_setup_test.go` (2
+  tests).
+- Modified/added across `internal/stages/tekton` (+5),
+  `internal/stages/capacityplanning` (+1 stagerunner, handler tests
+  extended), `internal/stages/noop` (+1),
+  `internal/controller/capacityplan_controller_test.go` (+5),
+  `internal/controller/providerconfig_test.go` (+3, 1 rewritten),
+  `internal/controller/modelrequest_controller_test.go` (+1, 13
+  assertions updated), `internal/controller/modelrequest_stagerunner_test.go`
+  (2 assertions updated).
+- **Total suite: 124 passing test cases (`go test -count=1 ./...`,
+  counting subtests), 0 failing** -- up from 106 at the end of Phase 6.
+
+### Sandbox cluster verification
+
+- Built and pushed `quay.io/jhurlocker/modelops-operator:latest` from
+  `f978549`'s code; pushed the commit; hard-refreshed
+  `Application/modelops-operator` (auto-sync + self-heal) and
+  `Application/modelops-runtime-config`, both reached `Synced`/`Healthy`.
+  `kubectl rollout restart` on the operator `Deployment` picked up the
+  new image; manager started cleanly, all `EventSource`s (`ModelRequest`,
+  `CapacityPlan`, `PipelineRun` -- the last now registered via the
+  generalized `OwnedTypesProvider`-driven `.Owns()`, not a hardcoded
+  call) registered without error.
+- **First verification pass caught the `modelrequests/finalizers`
+  regression** described above (a real `ModelRequest` hit a reconcile
+  error on `CapacityPlan` creation: `"cannot set blockOwnerDeletion..."`).
+  Fixed, re-tested locally (124/124), committed as `cdf4643`, pushed,
+  hard-refreshed `Application/modelops-operator` (`Synced`/`Healthy` at
+  `cdf4643`, confirmed `modelrequests/finalizers` present on the live
+  `ClusterRole`), rebuilt/pushed the image again, rolled out again.
+- **Second verification pass**, against 4 disposable objects (all
+  created directly, not via the UI, then deleted after observation):
+  1. `phase7-verify` (`ModelRequest`, live migrated profile): full
+     sandbox -> promotion -> `Succeeded` lifecycle as described above,
+     confirming both the RBAC fix and the generic `Phase` strings live.
+  2. `phase7-bad-providerconfig` (`ModelLifecycleProfile` with a
+     deliberately-unresolvable stage-level `providerConfigRef`) +
+     `phase7-verify-pcref` (`ModelRequest`): reached
+     `Status.Phase: ProviderConfigLookupFailed`,
+     `Status.Message` containing `"does-not-exist-provider-config"` and
+     `"not found"`.
+  3. `phase7-no-stages` (`ModelLifecycleProfile` with no `Spec.Stages`) +
+     `phase7-verify-nostages` (`ModelRequest`): reached
+     `Status.Phase: NoStagesConfigured`,
+     `Status.Message: 'ModelLifecycleProfile "phase7-no-stages" has no
+     Spec.Stages configured'`.
+  4. `phase7-verify-maxgpu` (`CapacityPlan`, direct,
+     `ContextLength: 32768`/`Concurrency: 16`/`MaxGPUsPerRequest: 4`):
+     reached `Status.Phase: Failed`,
+     `Status.Message: "requested capacity (8 GPUs) exceeds configured
+     maximum (4)"`.
+  All four deleted afterward; owner-reference-based child objects (for
+  #1) confirmed garbage-collected on a follow-up `get`.
+  `Application/modelops-operator`/`Application/modelops-runtime-config`
+  both remained `Synced`/`Healthy` throughout.
+
+### Known follow-up NOT done in this phase
+
+Both items added to `REFACTOR_PLAN.md`'s Phase 7 section (bullets 8-9,
+appended by this phase) are deliberately deferred, not silently fixed:
+
+- **`Watches()`-based immediate re-trigger for all four lookup-failure
+  reasons** (`ProfileLookupFailed`, `PlatformConfigLookupFailed`, the new
+  `ProviderConfigLookupFailed`, and implicitly `NoStagesConfigured`) --
+  today only `ProviderConfigLookupFailed` gets an active bounded requeue
+  (30s, via `failRequestWithRequeue`); the other three still rely
+  entirely on `failRequest`'s no-requeue-at-all pattern (the
+  `ModelRequest`'s own resync or an unrelated watch event). Scoped
+  together since they share the identical "waiting on a separate GitOps
+  sync" shape.
+- **Real GPU-inventory/advisor-based capacity feasibility checking** for
+  `CapacityPlanReconciler` -- `MaxGPUsPerRequest` is a configured-ceiling
+  stopgap, not genuine capacity awareness. A real `gpu-advisor` container
+  image already exists (used by the sandbox Tekton pipeline's own
+  `gpu-advisor` Task) as a natural future integration point, discovered
+  but not wired up this phase.
+- `ModelLifecycleProfileSpec.Stages` is now functionally required but not
+  yet enforced at the CRD schema level (no `+kubebuilder:validation:MinItems=1`
+  marker) -- an empty/missing `Stages` is still a syntactically valid
+  object that fails only at reconcile time (`NoStagesConfigured`), not at
+  `kubectl apply` time. Flagged as a reasonable, low-risk follow-up in
+  the field's own doc comment, not implemented this pass.
+- `gitops/components/operator/clusterrole.yaml`'s pre-existing
+  `serving.kserve.io`/`maas.opendatahub.io` hand-added rules (flagged in
+  Phase 1, no corresponding Go marker) remain untouched -- unrelated to
+  this phase's RBAC split.
+
+### Phase 8 (ModelCard/DataCard CRD) explicitly NOT started
+
+Per the user's explicit instruction: Phase 7 was the last plan-doc phase
+besides Phase 8 (stretch). Phase 8 was not started automatically --
+flagged here as a separate decision to be made once this Phase 7 entry
+is reviewed, exactly as instructed.
