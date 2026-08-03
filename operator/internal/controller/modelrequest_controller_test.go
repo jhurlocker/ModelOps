@@ -416,6 +416,46 @@ func TestModelRequest_AllPromotionsSucceeded_SetsSucceededPhase(t *testing.T) {
 	require.Equal(t, "Model onboarding completed successfully", mr.Status.Message)
 }
 
+// TestModelRequest_AllPromotionsSucceeded_SetsPromotionPipelineRunName is a
+// regression test for a real bug caught only by live-cluster
+// verification, not envtest or any other Phase 0-5 characterization
+// test: stagewalk.Progress.Name is the ProfileStageSpec's own Name
+// ("promotion"), with the target namespace recorded separately in
+// Progress.Namespace -- not "promotion-<namespace>" the way the
+// per-invocation StageSpec.Name built by promotion.Handler is. The
+// first draft of lastPromotionProgress (Phase 6) assumed the latter
+// (prefix-matched "promotion-"), so it never matched anything and
+// Status.PromotionPipelineRunName silently stayed empty forever. No
+// pre-existing test asserted on this field's value at all, which is
+// exactly why a real cluster (`kubectl get modelrequest -o yaml`)
+// caught it and envtest/unit tests didn't -- pinning it now.
+func TestModelRequest_AllPromotionsSucceeded_SetsPromotionPipelineRunName(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, "staging")
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+	setupSucceededSandbox(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	setPipelineRunCondition(t, ns, "mr-1-promotion-staging", corev1.ConditionTrue, "done")
+
+	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", mr.Status.Phase)
+	require.Equal(t, "mr-1-promotion-staging", mr.Status.PromotionPipelineRunName)
+	require.Equal(t, "mr-1-promotion-staging", mr.Status.PipelineRunName)
+
+	require.Len(t, mr.Status.Stages, 3)
+	promoStage := mr.Status.Stages[2]
+	require.Equal(t, "promotion", promoStage.Name)
+	require.Equal(t, "staging", promoStage.Namespace)
+	require.Equal(t, "Succeeded", promoStage.Phase)
+	require.Equal(t, "mr-1-promotion-staging", promoStage.RunRef)
+}
+
 // --- resolveSecrets ---
 
 func TestResolveSecrets_SecretNamesConfigured_ReturnsSecretDerivedCredentials(t *testing.T) {

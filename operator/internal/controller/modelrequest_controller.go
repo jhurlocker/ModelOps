@@ -423,20 +423,15 @@ func lastProgressNamed(progress []stagewalk.Progress, name string) (stagewalk.Pr
 	return found, ok
 }
 
-// lastPromotionProgress finds the last progress entry whose Name is
-// "<promotion-stage-name>-<namespace>" -- i.e. any PerNamespace
-// promotion-kind invocation, without hardcoding the exact default name.
+// lastPromotionProgress finds the last progress entry for the
+// promotion stage -- stagewalk.Progress.Name is the ProfileStageSpec's
+// own Name (e.g. "promotion"), with the target namespace recorded
+// separately in Progress.Namespace (see internal/stagewalk.Walk), so
+// this is just lastProgressNamed under the hood; kept as its own
+// function so the call site at computeWalkStatus doesn't need to know
+// the default promotion stage's literal name.
 func lastPromotionProgress(progress []stagewalk.Progress) (stagewalk.Progress, bool) {
-	var found stagewalk.Progress
-	ok := false
-	prefix := defaultPromotionStageName + "-"
-	for _, p := range progress {
-		if len(p.Name) > len(prefix) && p.Name[:len(prefix)] == prefix {
-			found = p
-			ok = true
-		}
-	}
-	return found, ok
+	return lastProgressNamed(progress, defaultPromotionStageName)
 }
 
 func (r *ModelRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
