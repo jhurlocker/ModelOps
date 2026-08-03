@@ -1455,3 +1455,543 @@ deep-copies the new `*ProviderConfigRef` pointer field.
 - No second real provider (SageMaker/Databricks) was implemented, per
   the plan's explicit instruction; `internal/stages/noop` is the
   trivial stand-in that exists solely to prove the seam.
+
+## Phase 6 — Externalize the stage sequence as data via a generic stage walker
+
+**Commits:** `e34dfa5` ("Phase 6: externalize the stage sequence as data
+via a generic stage walker") and `54fe06e` ("Fix Phase 6
+PromotionPipelineRunName regression caught by sandbox cluster testing")
+on `feat/model-request-controller`. Additive CRD/API change (see below
+for exactly what's additive).
+
+This phase went through an explicit design review first (per the
+user's request, same as Phase 0/4/5) before any code was written; the
+approved design — the `stages` field shape, the walker's decision
+table and per-namespace loop, the `StageHandlers`/`StageRunners` dual
+registry, the `NativeSpec` escape hatch for `CapacityPlan`, and the
+`Phase`/`Message` legacy-compatibility shim — is what's implemented
+below. Two decisions and two backlog notes were agreed explicitly in
+review; see "What changed" and the `REFACTOR_PLAN.md` diff.
+
+### What changed
+
+- **`api/v1alpha1/modellifecycleprofile_types.go`**: `ModelLifecycleProfileSpec`
+  gains `Stages []ProfileStageSpec` (new `ProfileStageSpec` type: `Name`,
+  `Kind`, `ProviderConfigRef`, `Required *bool` (default `true`),
+  `PerNamespace bool`, `NamespaceSetup *StageNamespaceSetup`) and the new
+  `StageNamespaceSetup` type (`EnsureRBAC bool`, `Labels map[string]string`).
+  **Additive, not breaking**: when `Stages` is empty (every existing
+  `ModelLifecycleProfile`), the reconciler synthesizes the exact
+  pre-Phase-6 3-stage sequence via `defaultStages()`
+  (`internal/controller/stages_default.go`) — confirmed by the full
+  pre-Phase-6 characterization suite passing unmodified against it (see
+  "Test coverage," below).
+- **`api/v1alpha1/modelrequest_types.go`**: `ModelRequestStatus` gains
+  `CurrentStage string` and `Stages []StageProgress` (new `StageProgress`
+  type: `Name`, `Namespace`, `Phase` (a plain string mirroring
+  `stagecommon.StagePhase`'s values, so `api/v1alpha1` doesn't depend on
+  `internal/stagecommon`), `RunRef`, `Message`). Additive; `Phase`/
+  `Message`/`PipelineRunName`/`SandboxPipelineRunName`/
+  `PromotionPipelineRunName` are unchanged fields, with unchanged
+  *values* for the default stage list (see the compatibility shim below).
+- **`internal/stagecommon/stage.go`**: `StageSpec` gains `NativeSpec any`
+  (the agreed escape hatch — used only by the `CapacityPlan` kind, which
+  needs a typed `*modelopsv1alpha1.CapacityPlanSpec` rather than a string
+  param bag; every other kind leaves it `nil` and uses `Params`, and the
+  walker/`Handler`/`Runner` dispatch stays uniform across all kinds, no
+  bypass). New `StageContext` (what a `StageHandler` needs: `ModelRequest`/
+  `Profile`/`PlatformConfig`/`CapacityPlan`/`Secrets`/`Stage`/`Namespace`/
+  `NamespaceIndex`/`NamespaceCount`), new `StageHandler` interface
+  (`BuildSpec(StageContext) (StageSpec, error)`), and `IsRequired(stage)
+  bool` (the walker's sole `Required`-interpretation point).
+- **`internal/stagecommon/params.go`**: `Secrets` gains `ScanS3Endpoint`/
+  `ScanS3AccessKey`/`ScanS3SecretKey` (sandbox-stage-only; `BuildCommonModelParams`
+  itself still never reads them) — needed so `sandbox.Handler` can build
+  its scan-S3 params without `internal/stages/sandbox` importing
+  `internal/controller`'s private `resolvedSecrets` type.
+- **`internal/stagewalk`** (new package): `Walk(ctx, mr, Input) (Result, error)` —
+  the generic stage walker. Pure/client-free: `Handlers`/`Runners` are
+  plain maps, `Namespaces`/`SetupNamespace`/`BuildContext` are
+  caller-supplied closures, so the walker's own sequencing logic is
+  provable with in-memory fakes and zero Kubernetes client (see "Test
+  coverage"). Its decision table, exactly as approved in review:
+  `StageSucceeded` → advance; `StageRunning` → stop this stage's fan-out
+  loop is *not* short-circuited for still-unattempted namespaces, but the
+  whole `Walk` call stops advancing past the stage; `StageFailed` with
+  `stagecommon.IsRequired(stage)` → stop the whole walk immediately
+  (skips remaining namespaces too); `StageFailed` with `Required: false` →
+  recorded in `Result.Progress`, walk advances anyway (the entire
+  "optional/skippable" mechanism — no 4th `StagePhase` value was added,
+  per the review's preference to reuse the Phase 4 contract rather than
+  widen it before a real producer needs to). Depends only on
+  `api/v1alpha1` and `internal/stagecommon` (verified, see "Cross-stage
+  import check").
+- **`internal/stages/capacityplanning`** (new `Handler`+`StageRunner`,
+  package doc.go revised): `Handler.BuildSpec` relocates
+  `buildCapacityPlan`'s field mapping into a `*CapacityPlanSpec`,
+  attached via `StageSpec.NativeSpec`. `StageRunner.EnsureRun` is
+  genuinely new (TDD: tests written first, confirmed failing on
+  `undefined: StageRunner` before `stagerunner.go` existed) — a thin
+  Get-or-Create-then-map-status adapter over the `CapacityPlan` object,
+  type-asserting `NativeSpec` back to `*CapacityPlanSpec`. Crucially,
+  **`CapacityPlanReconciler` itself (the actual GPU-sizing heuristic) is
+  completely unchanged and untouched** — this package only adds the
+  translation layer the walker needs to dispatch to this stage kind
+  uniformly with `PipelineRun`. `mapStatus` already handles a
+  `Status.Phase == "Failed"` case (`CapacityPlanReconciler` never
+  produces one today — see the `REFACTOR_PLAN.md` Phase 7 backlog note
+  below — but the mapping is ready for when it does).
+- **`internal/stages/sandbox`** (new `Handler`, doc.go revised):
+  `Handler.BuildSpec` relocates `buildSandboxPipelineParams`/
+  `sandboxPipelineNameOrDefault` (renamed `PipelineNameOrDefault`)
+  field-for-field. The full-fixture characterization test relocated
+  alongside produced **byte-identical output on the first implementation
+  attempt** — no param, default, or precedence rule needed adjustment
+  during the move.
+- **`internal/stages/promotion`** (new `Handler`, doc.go revised):
+  `Handler.BuildSpec` relocates `buildPromotionPipelineParams`/
+  `promotionPipelineNameOrDefault` (renamed `PipelineNameOrDefault`)/
+  `getPromotionNamespaces` (renamed `GetNamespaces`) field-for-field.
+  `isFirst`/`isLast` are now derived from `StageContext.NamespaceIndex`/
+  `NamespaceCount` (supplied generically by the walker for any
+  `PerNamespace` stage) instead of being passed in as explicit bools —
+  this package decides what "first"/"last" means, the walker doesn't.
+  `ensurePromotionNamespaceRBAC`/`ensureMaaSNamespaceLabels` deliberately
+  **did not** move into this package (see "What deliberately didn't
+  move," below) — this is a considered deviation from this package's
+  original Phase 0 doc comment, explained in its revised doc.go.
+- **`internal/controller/stages_default.go`** (new): `defaultStages(profile)`
+  synthesizes the 3-entry default list. **Naming deviation, deliberate,
+  same judgment call as Phase 0's `sandbox`-not-`intake`**: stage names
+  are `"capacity"`/`"sandbox"`/`"promotion"`, not the plan's illustrative
+  `"capacity-planning"`/`"sandbox-intake"` — because `RunName` is derived
+  mechanically as `"<ModelRequest.Name>-<stage.Name>"`, and the more
+  descriptive names would silently rename the `CapacityPlan`/`PipelineRun`
+  child objects on upgrade (a real migration break, not a cosmetic one).
+- **`internal/controller/modelrequest_controller.go`**: `ModelRequestReconciler`
+  replaces its single `StageRunner stagecommon.StageRunner` field with
+  `StageHandlers map[string]stagecommon.StageHandler` (keyed by
+  `ProfileStageSpec.Name`) and `StageRunners map[string]stagecommon.StageRunner`
+  (keyed by `.Kind`). `Reconcile` now: looks up profile/platform config
+  (unchanged); resolves `stages := profile.Spec.Stages` or
+  `defaultStages(profile)`; best-effort-fetches the declared
+  `CapacityPlan`-kind stage's deterministic child object (via
+  `capacityPlanRunName`, the one place `Reconcile` inspects a `Kind`
+  string outside the walker's own dispatch — reconciler-level glue for a
+  genuine cross-stage *data* dependency, not part of the walker's
+  advance/stop/skip *decision* logic); builds `BuildContext`/`Namespaces`/
+  `SetupNamespace` closures (secrets resolved lazily, at most once,
+  skipped entirely for the `CapacityPlan` kind, preserving the exact
+  pre-Phase-6 ordering guarantee that `resolveSecrets` is never attempted
+  before capacity planning succeeds); calls `stagewalk.Walk`; and
+  persists the result via `persistWalkResult`/`computeWalkStatus`
+  (`ProfileStageSpec.NamespaceSetup`-driven RBAC/label provisioning
+  replaces the old hardcoded "sandbox's own namespace, then every
+  promotion namespace" / "only promotion gets MaaS labels" special
+  cases — see `defaultStages()`'s `NamespaceSetup` values for exactly
+  where the old `ensurePromotionNamespaceRBAC(modelRequest.Namespace,
+  modelRequest.Namespace)` call and `ensureEvalHubTenantLabel`/
+  `ensureMaaSNamespaceLabels` behavior moved to, as data).
+- **`ensureNamespaceLabels`** (new, generalizes the old
+  `ensureEvalHubTenantLabel`+`ensureMaaSNamespaceLabels` into one
+  data-driven helper: "set if absent or different," applied to whatever
+  `ProfileStageSpec.NamespaceSetup.Labels` says, for whatever namespace a
+  stage targets — not a Go function hardcoded to "sandbox gets evalhub,
+  promotion gets MaaS").
+- **The `Phase`/`Message` compatibility shim** (`computeWalkStatus`,
+  approved in review): for the synthesized default stage list, reproduces
+  the exact pre-Phase-6 `Phase` strings (`"CapacityPlanning"`/
+  `"SandboxRunning"`/`"PromotionRunning"`/`"Succeeded"`/`"Failed"`) and
+  message conventions (e.g. promotion's fixed `"Promotion pipeline(s)
+  running"` regardless of which namespace is running, matching the
+  original hardcoded string) via a small, isolated `switch` on
+  `result.CurrentStage` compared against `defaultCapacityStageName`/
+  `defaultSandboxStageName`/`defaultPromotionStageName`. A profile with
+  explicit `Spec.Stages` gets fully generic values instead
+  (`"<CurrentStage>Running"`/`"Succeeded"`/`"Failed"`), since there's no
+  pre-existing behavior to preserve for it.
+- **`main.go`**: wires the real `StageHandlers`/`StageRunners` maps
+  (`"capacity"→capacityplanning.Handler{}`, `"sandbox"→sandbox.Handler{}`,
+  `"promotion"→promotion.Handler{}`; `"CapacityPlan"→&capacityplanning.StageRunner{...}`,
+  `"PipelineRun"→&tektonstage.StageRunner{...}`) at manager setup.
+- **`docs/REFACTOR_PLAN.md`**: two bullets added to Phase 7, per the
+  user's explicit request: (6) deprecate the `Phase`/`Message` legacy
+  shim once profiles migrate off the default `Stages` list; (7) give
+  `CapacityPlan` a real `Failed` path in `CapacityPlanReconciler` so
+  `Required: true` is actually meaningful for that stage kind (today it
+  always eventually reaches `Succeeded`; `capacityplanning.StageRunner`'s
+  `Failed` mapping is implemented and tested but has no real producer
+  yet).
+
+### A real bug caught only by live-cluster verification, not envtest
+
+Exactly the kind of gap Phase 1's own RBAC-escalation incident already
+demonstrated this repo's regression net has: `Status.PromotionPipelineRunName`
+silently stayed empty forever. `lastPromotionProgress`'s first draft
+prefix-matched `stagewalk.Progress.Name` against `"promotion-"`, on the
+(wrong) assumption it held the per-invocation `StageSpec.Name` built by
+`promotion.Handler` (e.g. `"promotion-staging"`). It actually holds the
+*`ProfileStageSpec`'s own* `Name` (`"promotion"`), with the target
+namespace recorded separately in `Progress.Namespace` — so the prefix
+check never matched anything, and `PromotionPipelineRunName` was
+computed as an empty string on every reconcile, no error, no test
+failure. **No pre-existing Phase 0-5 characterization test ever asserted
+on this field's value at all** (only its presence was implied by other
+assertions), so nothing in the 106-test `envtest` suite caught it. It
+was caught by literally running `kubectl get modelrequest phase6-verify2
+-n sandbox -o yaml` against the rebuilt image on the sandbox cluster and
+noticing the field was missing after a real sandbox→promotion→`Succeeded`
+run — a direct instance of `REFACTOR_PLAN.md`'s own stated reason for
+requiring cluster verification, not just `envtest`, for Phases 4-6.
+Fixed by delegating to the same `lastProgressNamed` helper `sandbox`
+already uses (exact-match on `Name`, not a namespace-suffixed prefix).
+Added `TestModelRequest_AllPromotionsSucceeded_SetsPromotionPipelineRunName`
+to pin it, then rebuilt/redeployed/re-verified live (see below) before
+considering the phase done.
+
+### TDD: what was genuinely new vs. relocated
+
+Per the guiding principle:
+
+- **`internal/stagewalk`'s 11 tests were written first**, against
+  `walk.go` not existing at all (`go vet` failure: `undefined:
+  NamespacesFunc`), entirely against in-memory fakes (a local
+  `fakeHandler` func-adapter and `stagecommon.NewFakeStageRunner`) — no
+  real stage package, no Kubernetes client, no `envtest`. All 9
+  originally-scoped scenarios (1-stage, 3-stage-all-succeed,
+  middle-stage-fails-stops-before-third, middle-stage-running-stops-
+  before-third, optional-stage-fails-advances-anyway,
+  per-namespace-fans-out-running-doesn't-short-circuit,
+  per-namespace-failure-short-circuits-remaining-namespaces,
+  unknown-Kind/unknown-Name config errors, handler-`BuildSpec`-error-
+  stops-walk) plus 2 more added during implementation (a
+  `BuildContext`-error variant, and splitting the two config-error cases
+  into their own tests) — 11 total, all passing on the first
+  implementation attempt with zero test-side changes needed afterward.
+- **`internal/stages/capacityplanning/stagerunner_test.go`'s 6 tests
+  were written before `stagerunner.go` existed** (`vet` failure:
+  `undefined: StageRunner`) — this `EnsureRun` adapter has no pre-Phase-6
+  equivalent to characterize (capacity-planning creation/status-reading
+  was hardcoded inline in `Reconcile`, never behind any interface).
+- **Characterization-verified relocation** (not new logic):
+  `sandbox.Handler`'s and `promotion.Handler`'s full-fixture golden-value
+  tests (moved verbatim from `internal/controller`, same fixture data,
+  same expected maps) passed on the first attempt against the relocated
+  implementation — proof the move didn't change any param, default, or
+  precedence rule. `capacityplanning.Handler`'s 3 field-mapping tests are
+  new (no pre-existing test isolated `buildCapacityPlan`'s field mapping
+  from `Reconcile` before this phase), but assert the same defaults
+  `buildCapacityPlan` always used.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all five packages under `internal/stages/*`
+(`sandbox`, `promotion`, `capacityplanning`, `tekton`, `noop`): none
+imports another (each command below produced no output, i.e. no match):
+
+```
+$ go list -deps ./internal/stages/sandbox/...        | grep 'internal/stages' | grep -v 'internal/stages/sandbox'
+$ go list -deps ./internal/stages/promotion/...       | grep 'internal/stages' | grep -v 'internal/stages/promotion'
+$ go list -deps ./internal/stages/capacityplanning/... | grep 'internal/stages' | grep -v 'internal/stages/capacityplanning'
+$ go list -deps ./internal/stages/tekton/...          | grep 'internal/stages' | grep -v 'internal/stages/tekton'
+$ go list -deps ./internal/stages/noop/...            | grep 'internal/stages' | grep -v 'internal/stages/noop'
+```
+
+`internal/stagewalk` (the walker itself) and `internal/stagecommon` were
+also checked and depend only on `api/v1alpha1` and each other:
+
+```
+$ go list -deps ./internal/stagewalk/...
+github.com/jhurlocker/modelops-operator/api/v1alpha1
+github.com/jhurlocker/modelops-operator/internal/stagecommon
+github.com/jhurlocker/modelops-operator/internal/stagewalk
+
+$ go list -deps ./internal/stagecommon/...
+github.com/jhurlocker/modelops-operator/api/v1alpha1
+github.com/jhurlocker/modelops-operator/internal/stagecommon
+```
+
+### The modularity litmus test: an actual drill, not just an assertion
+
+Run twice, on disposable scratch branches created from the Phase 6
+commit (`e34dfa5`), each deleted afterward without merging. Exact
+commands and real output below (not a description of having done it).
+
+**Direction 1: delete `internal/stages/promotion`, confirm `sandbox` +
+`capacityplanning` still build and their tests still pass unmodified.**
+
+```
+$ git checkout -b phase6-litmus-scratch-delete-promotion
+$ git rm -r operator/internal/stages/promotion
+rm 'operator/internal/stages/promotion/doc.go'
+rm 'operator/internal/stages/promotion/handler.go'
+rm 'operator/internal/stages/promotion/handler_test.go'
+
+$ go build ./...
+go: finding module for package github.com/jhurlocker/modelops-operator/internal/stages/promotion
+internal/controller/modelrequest_controller.go:11:2: cannot find module providing package github.com/jhurlocker/modelops-operator/internal/stages/promotion: module github.com/jhurlocker/modelops-operator/internal/stages/promotion: git ls-remote -q origin in ...: exit status 128:
+	fatal: could not read Username for 'https://github.com': terminal prompts disabled
+```
+
+Exactly one compile failure, exactly where predicted in the design
+review: `internal/controller`'s import of the deleted package. `main.go`
+and `internal/controller/testutil_test.go` also reference it (registry
+wiring), as expected.
+
+```
+$ go build ./internal/stages/sandbox/... ./internal/stages/capacityplanning/... ./internal/stagecommon/...
+(exit 0, no output)
+
+$ go test ./internal/stages/sandbox/... ./internal/stages/capacityplanning/... ./internal/stagecommon/... -v
+=== RUN   TestBuildSpec_ExplicitOverride_TakesPrecedenceAndAppearsExactlyOnce
+--- PASS: TestBuildSpec_ExplicitOverride_TakesPrecedenceAndAppearsExactlyOnce (0.00s)
+... (8 sandbox tests, all PASS) ...
+ok  	github.com/jhurlocker/modelops-operator/internal/stages/sandbox	0.004s
+=== RUN   TestHandler_BuildSpec_UsesRequirementsAndPlatformConfigWithDefaults
+--- PASS: TestHandler_BuildSpec_UsesRequirementsAndPlatformConfigWithDefaults (0.00s)
+... (9 capacityplanning tests, all PASS) ...
+ok  	github.com/jhurlocker/modelops-operator/internal/stages/capacityplanning	0.037s
+=== RUN   TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams
+--- PASS: TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams (0.00s)
+=== RUN   TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty
+--- PASS: TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty (0.00s)
+PASS
+ok  	github.com/jhurlocker/modelops-operator/internal/stagecommon	0.004s
+```
+
+**8/8 sandbox, 9/9 capacityplanning, 2/2 stagecommon tests pass,
+unmodified, with `promotion` physically absent from the repo.** This is
+the core litmus assertion.
+
+As a further, optional demonstration of the actual "org that only wants
+intake + capacity-planning today" story the modularity principle
+describes, the small (3-line-import, 2-map-entry) wiring fix predicted
+above was also made (`main.go`, `modelrequest_controller.go`'s
+`namespaces` closure, `stages_default.go`'s `defaultStages` dropped to a
+2-stage list) to get the *whole repo* building with `promotion` deleted:
+
+```
+$ go build ./...
+(exit 0, no output)
+$ go vet ./...
+(exit 0, no output)
+$ go test ./...
+... 10 failures (11 counting one subtest), all named or clearly about
+    promotion (TestModelRequest_SandboxSucceeded_CreatesPromotionPipelineRun_*,
+    TestModelRequest_*Promotion*, TestModelRequest_FullLifecycle_*
+    proof tests that script a "promotion-staging" stage,
+    TestModelRequest_FullLifecycle_TektonAndNoopStageRunners_ReachSameTerminalPhase) ...
+ok  	.../internal/stages/capacityplanning
+ok  	.../internal/stages/noop
+ok  	.../internal/stages/sandbox
+ok  	.../internal/stages/tekton
+ok  	.../internal/stagewalk
+ok  	.../internal/stagecommon
+FAIL	.../internal/controller (10 failing, all promotion-specific)
+```
+
+Expected and not a concern: those 10 `internal/controller` tests were
+written for the 3-stage default sequence and explicitly assert on
+promotion behavior that, in this disposable hypothetical, no longer
+exists in the profile at all — not a regression in `sandbox`/
+`capacityplanning`, which is what the litmus test actually checks.
+
+Cleanup (both scratch changes fully discarded, not merged):
+
+```
+$ git checkout feat/model-request-controller
+$ git reset --hard e34dfa5
+$ git branch -D phase6-litmus-scratch-delete-promotion
+```
+
+**Direction 2 (the reverse, per the modularity principle's "the reverse
+must also hold"): delete `internal/stages/sandbox`, confirm `promotion`
++ `capacityplanning` still build and their tests still pass unmodified.**
+
+```
+$ git checkout -b phase6-litmus-scratch-delete-sandbox
+$ git rm -r operator/internal/stages/sandbox
+rm 'operator/internal/stages/sandbox/doc.go'
+rm 'operator/internal/stages/sandbox/handler.go'
+rm 'operator/internal/stages/sandbox/handler_test.go'
+
+$ go build ./...
+go: finding module for package github.com/jhurlocker/modelops-operator/internal/stages/sandbox
+main.go:12:2: cannot find module providing package github.com/jhurlocker/modelops-operator/internal/stages/sandbox: ...
+```
+
+Same shape of failure, this time in `main.go` (the first file
+importing it alphabetically) rather than `internal/controller` — both
+reference it, exactly as expected.
+
+```
+$ go build ./internal/stages/promotion/... ./internal/stages/capacityplanning/... ./internal/stagecommon/...
+(exit 0, no output)
+
+$ go test ./internal/stages/promotion/... ./internal/stages/capacityplanning/... ./internal/stagecommon/... -v
+... (9 promotion tests, all PASS) ...
+ok  	github.com/jhurlocker/modelops-operator/internal/stages/promotion	0.004s
+... (9 capacityplanning tests, all PASS) ...
+ok  	github.com/jhurlocker/modelops-operator/internal/stages/capacityplanning	(cached)
+... (2 stagecommon tests, all PASS) ...
+ok  	github.com/jhurlocker/modelops-operator/internal/stagecommon	(cached)
+```
+
+**9/9 promotion, 9/9 capacityplanning, 2/2 stagecommon tests pass,
+unmodified, with `sandbox` physically absent.** Cleanup:
+
+```
+$ git checkout feat/model-request-controller
+$ git reset --hard e34dfa5
+$ git branch -D phase6-litmus-scratch-delete-sandbox
+```
+
+Confirmed via `git status`/`go test ./...` afterward that the working
+tree and full test suite were back to exactly the pre-drill state (106
+passing, 0 failing) before proceeding.
+
+### Test coverage added
+
+- `internal/stagewalk/walk_test.go` (new, 11 tests, TDD): see above.
+- `internal/stages/capacityplanning/handler_test.go` (new, 3 tests) and
+  `stagerunner_test.go` (new, 6 tests, TDD): see above.
+- `internal/stages/sandbox/handler_test.go` (new, 8 tests): 3 relocated
+  `gpu-count-override` precedence tests, 1 relocated full-fixture
+  characterization test, 3 relocated `PipelineNameOrDefault` precedence
+  tests, 1 new `RunName` test.
+- `internal/stages/promotion/handler_test.go` (new, 9 tests): 2 relocated
+  full-fixture/middle-namespace characterization tests, 3 relocated
+  `PipelineNameOrDefault` tests, 3 relocated `GetNamespaces` tests, 1 new
+  `RunName`/`Name` test.
+- `internal/controller/modelrequest_controller_test.go`: `newModelRequestReconciler()`
+  and the `FakeStageRunner`/`noop.StageRunner` test constructions updated
+  mechanically (registry maps instead of one field) via two new shared
+  helpers in `testutil_test.go` (`newStageHandlers`/`newStageRunners`), so
+  the change is isolated to a handful of call sites, not scattered across
+  every test body. The ~13 relocated golden-value/`PipelineNameOrDefault`
+  tests were removed from this file (now living in `sandbox`/`promotion`,
+  same assertions). `TestModelRequest_CapacityPlanCreateRace_AlreadyExists_DoesNotFailReconcile`
+  adapted to build its fixture via `capacityplanning.Handler.BuildSpec`
+  instead of the removed `buildCapacityPlan`. One new regression test
+  added: `TestModelRequest_AllPromotionsSucceeded_SetsPromotionPipelineRunName`
+  (see "A real bug caught only by live-cluster verification," above).
+- **Total suite: 106 passing test cases (`go test -v -count=1 ./...`,
+  counting subtests), 0 failing, up from 77 at the end of Phase 5**
+  (measured against a clean `git worktree` checkout of `58d16da` for an
+  apples-to-apples comparison, not the working tree, since new untracked
+  Phase 6 files would otherwise inflate a naive count). Every pre-existing
+  Phase 0-5 characterization and proof test that didn't get physically
+  relocated passed **completely unmodified** — no assertion value
+  changed anywhere in this phase, only mechanical harness wiring at the
+  handful of `ModelRequestReconciler{...}` construction sites.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) picked up
+`ModelLifecycleProfileSpec.Stages`/`ProfileStageSpec`/`StageNamespaceSetup`
+and `ModelRequestStatus.CurrentStage`/`Stages`/`StageProgress`. Diffed
+both regenerated CRD bases field-by-field against the pre-Phase-6
+version: purely additive (new `stages`/`currentStage`/`stages` status
+properties and description-only changes to existing fields; zero fields
+removed or renamed). `zz_generated.deepcopy.go` gained `DeepCopyInto`/
+`DeepCopy` for `ProfileStageSpec`, `StageNamespaceSetup`, `StageProgress`,
+and updated `ModelLifecycleProfileSpec.DeepCopyInto`/
+`ModelRequestStatus.DeepCopyInto` to deep-copy the new slice fields.
+Confirmed `make manifests generate` idempotent on a second run (no
+further diff).
+
+### GitOps manifests (all committed, following the Phase 1/5 pattern)
+
+`gitops/components/operator/crd-lifecycleprofiles.yaml` and
+`crd-modelrequests.yaml` had drifted from the freshly regenerated
+`config/crd/bases/*` (same hand-sync debt Phase 1 first flagged) —
+re-synced verbatim, confirmed byte-identical afterward via `diff`.
+`crd-capacityplans.yaml`/`crd-platformconfigs.yaml`/`crd-intakeproviderconfigs.yaml`
+checked and confirmed to have no field-level drift from this phase
+(only the same pre-existing cosmetic formatting difference Phase 1
+already flagged and left alone). `kubectl kustomize gitops/components/operator`
+and `gitops/components/runtime-config` both run locally before pushing,
+confirming no rendering errors.
+
+### Sandbox cluster verification
+
+- Pushed `e34dfa5` to `feat/model-request-controller`; hard-refreshed
+  `Application/modelops-operator` (branch-tracked, auto-sync +
+  self-heal) — reached `Synced`/`Healthy` at `e34dfa5`, confirmed the new
+  `stages`/`currentStage`/`status.stages` fields are `Established` on the
+  live `modellifecycleprofiles`/`modelrequests` CRDs via `oc get crd ...
+  -o jsonpath`.
+- Built and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image from `e34dfa5`'s code (same pattern as every prior phase — the
+  `Deployment` runs from this pre-built tag, `imagePullPolicy: Always`, a
+  `kubectl rollout restart` picks it up). Manager started cleanly, all
+  three `EventSource`s (`ModelRequest`, `PipelineRun`, `CapacityPlan`)
+  registered without error.
+- Created a disposable `ModelRequest` (`phase6-verify`, `sandbox`
+  namespace, referencing the live `standard-generative-onboarding`
+  profile — which has **no** `Spec.Stages` set, so this exercises the
+  synthesized-default-list path exactly as every existing profile in
+  production does — with `requirements.gpuCountOverride: "3"`).
+  Reconciled to `SandboxRunning` with `Status.CurrentStage: sandbox` and
+  a fully populated `Status.Stages[]` (capacity `Succeeded` with its real
+  GPU-sizing message, sandbox `Running`); the sandbox `PipelineRun`'s
+  `pipelineRef.name` (`model-intake-sandbox`), `gpu-count-override=3`
+  (the explicit override, matching sandbox's precedence rule), and
+  `model-id` all matched expectations.
+- Manually flipped the sandbox `PipelineRun`'s `Succeeded` condition to
+  `True` (via `kubectl replace --raw .../status`, since this cluster's
+  `kubectl`/`oc` client versions don't support `--subresource=status`) —
+  request advanced to `PromotionRunning`, `CurrentStage: promotion`,
+  `Status.Stages[]` now showing capacity+sandbox `Succeeded` and
+  promotion `Running` for the `staging` namespace. The promotion
+  `PipelineRun` (created in the `sandbox` namespace, same as
+  pre-Phase-6 — `target-namespace` is a param, not the object's actual
+  namespace) had `gpu-count-override=4` (the `CapacityPlan`-derived
+  value, correctly **ignoring** the `"3"` override — the documented
+  sandbox/promotion divergence, confirmed still holding through the
+  walker), `run-register=true`, `target-namespace=staging`; the
+  `pipeline` `ServiceAccount` and the three MaaS labels
+  (`opendatahub.io/generated-namespace`, `maas.opendatahub.io/gateway-access`,
+  `opendatahub.io/dashboard`) were provisioned on the `staging` namespace
+  via `ProfileStageSpec.NamespaceSetup` — the data-driven RBAC/label
+  mechanism, confirmed working live, not just in `envtest`.
+- **This first run is exactly what surfaced the `PromotionPipelineRunName`
+  bug described above** (`Status.PromotionPipelineRunName` was silently
+  missing from `kubectl get modelrequest -o yaml` after flipping
+  promotion's condition to `True` and reaching `Succeeded`). Fixed,
+  re-tested locally (106/106), committed as `54fe06e`, pushed, hard-
+  refreshed `Application/modelops-operator` (`Synced`/`Healthy` at
+  `54fe06e`), rebuilt/pushed the image again, rolled out again.
+- **Second verification pass**, against a fresh disposable `ModelRequest`
+  (`phase6-verify2`, no `gpuCountOverride` this time) against the fixed
+  image: reconciled sandbox→promotion→`Succeeded` exactly as above, and
+  this time `Status.PromotionPipelineRunName`/`PipelineRunName` correctly
+  showed `phase6-verify2-promotion-staging`, with `Status.Stages[2]`
+  showing `{name: promotion, namespace: staging, phase: Succeeded, runRef:
+  phase6-verify2-promotion-staging}` — confirming the fix live.
+- Deleted both disposable `ModelRequest`s; their `CapacityPlan`s and
+  `PipelineRun`s were garbage-collected automatically via owner
+  references (confirmed gone on a follow-up `get`) — disposable
+  verification, not a permanent cluster change. `Application/modelops-operator`
+  and `Application/modelops-runtime-config` both remained
+  `Synced`/`Healthy` throughout.
+
+### Known follow-up NOT done in this phase
+
+Both items added to `REFACTOR_PLAN.md`'s Phase 7 (see above) are
+deliberately deferred, not silently fixed: deprecating the `Phase`/
+`Message` legacy-compatibility shim once profiles migrate off the
+default `Stages` list, and giving `CapacityPlan` a real `Failed` path so
+`Required: true` is meaningful for that stage kind (today it's
+structurally supported and tested in `capacityplanning.StageRunner` but
+has no real producer — `CapacityPlanReconciler` never sets
+`Phase="Failed"`).
+
+`ensurePromotionNamespaceRBAC`/`ensureNamespaceLabels` stay in
+`internal/controller`, not relocated into `internal/stages/promotion` —
+a deliberate deviation from that package's original Phase 0 doc comment,
+explained in its revised doc.go: as of Phase 6 these are invoked
+generically by the walker for *any* stage whose declared
+`ProfileStageSpec.NamespaceSetup` requests them, driven by data rather
+than by checking a stage's name, so they're shared walker-glue code, not
+promotion-specific logic.
