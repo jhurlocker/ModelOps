@@ -2679,3 +2679,151 @@ the old README's (stale) descriptions.
   the README's second provider box and the `noop` walkthrough are
   both explicitly labeled illustrative/minimal, not implied to be
   more than they are.
+
+---
+
+## Out-of-band follow-up — model-intake-ui: real scan/result S3 secret-ref bug + missing-field validation
+
+**Commit:** `aa25f0b` on `feat/model-request-controller` --
+"model-intake-ui: fix silently-dropped scan/result S3 secret refs,
+block submission when missing". Triggered by the user hitting a live
+`SecretLookupFailed` immediately after using the wizard following the
+task above -- not a REFACTOR_PLAN.md phase, and not part of that
+task's original scope; a same-day follow-up once the report came in.
+
+### What was initially suspected, and why that was wrong
+
+The first (incorrect) diagnosis, based only on the affected
+`ModelRequest`'s persisted spec: `evalhubSecretName` was set but
+`scanS3SecretName`/`resultS3SecretName` were empty, which looked like
+the user had cleared two pre-filled form fields by hand. That
+diagnosis was given to the user, then disproven within the same
+session: resubmitting through the exact same wizard code path with
+both fields explicitly filled in (`scan-s3-credentials`/
+`result-s3-credentials`) -- via `curl`, via Python `requests` against
+the live Route, and via the Flask test client locally -- still
+produced a `ModelRequest` with both keys absent from `spec`, every
+time, regardless of what was sent. This is why the earlier UI-fixes
+task's own live verification (previous log entry) didn't catch it: the
+gpuCountOverride/status-display checks it ran didn't happen to inspect
+`scanS3SecretName`/`resultS3SecretName` specifically on the objects it
+created.
+
+### Root cause
+
+`app/routes/intake.py`'s "Expert secret references" loop mapped a form
+field name to its CRD spec key with a generic string replace:
+
+```python
+spec[key.replace("-secret-name", "SecretName")] = val
+```
+
+This produces the right key for `evalhub-secret-name`/
+`huggingface-secret-name` (`-> evalhubSecretName`/`huggingfaceSecretName`,
+matching `ModelRequestSpec`'s real JSON tags) but the WRONG key for the
+two S3 fields: `"scan-s3-secret-name".replace("-secret-name",
+"SecretName")` yields `"scan-s3SecretName"` -- the embedded `-s3`
+hyphen isn't part of the literal `-secret-name` suffix being replaced,
+so it survives untouched, leaving a stray hyphen where the real field
+(`scanS3SecretName`) has none. Same for `result-s3-secret-name` ->
+`result-s3SecretName` instead of `resultS3SecretName`. Neither
+computed key matches any real `ModelRequestSpec` field, so the API
+server's structural-schema pruning silently drops it on every
+`Create` -- no error, no warning, just a missing field. This has been
+broken since these two inputs were added to the wizard (Phase 1 of
+`REFACTOR_PLAN.md`); Phase 1's own handoff log explicitly flagged that
+the wizard change was "only verified by reading, not by clicking
+through the live wizard," which is exactly the gap this bug lived in
+for two sessions.
+
+Fixed with an explicit `dict` mapping field name -> JSON key instead of
+a derived string transform, for all four secret-reference fields (not
+just the two broken ones, so nothing else depends on the fragile
+pattern going forward).
+
+### Defense in depth: block submission when either field is blank
+
+Independent of (1): even with the mapping fixed, nothing stopped a
+user from submitting with `scan-s3-secret-name`/`result-s3-secret-name`
+genuinely empty. There is no server-side credential fallback for
+either -- `internal/controller.resolveSecrets` removed the old
+hardcoded `minioadmin` default in Phase 1 of `REFACTOR_PLAN.md` -- so a
+`ModelRequest` submitted without them is guaranteed to reach
+`SecretLookupFailed` once it reaches the sandbox stage's secret
+resolution. This is exactly the gap the user's own question identified
+("shouldn't I be blocked from submitting?").
+
+Added server-side validation to `intake.py`'s `submit()`: if either
+field is blank, no `ModelRequest` is created at all (`HTTP 400`), and
+the wizard re-renders with:
+
+- An error banner (new markup in `wizard.html`, outside the step
+  panels so it's visible regardless of which step is active).
+- The submitted values preserved as-is (including the blank
+  field(s)) rather than silently repopulated with the sensible
+  defaults -- so the user can actually see what's empty, not just be
+  told something is wrong.
+- The "Show expert overrides" section auto-expanded and the two
+  offending inputs given a red border, via plain Jinja conditionals
+  (`{{ ' visible' if errors }}` / a checked checkbox) -- no new JS
+  needed for this part, since the section's CSS `visible` class
+  already existed.
+- The wizard landing directly on the Review step (where these fields
+  live) instead of always resetting to step 1: `app.js`'s
+  `initWizard()` now reads a `data-start-step` attribute on the form
+  instead of hardcoding `showStep(0)`.
+
+**Deliberately not implemented**: HTML5 `required` on these two
+inputs. They live inside a step panel that's `display:none` by
+default (multi-step wizard, only the active step is shown), and this
+codebase already avoids putting `required` on any field outside step
+1 for exactly this reason -- a `required` field whose ancestor is
+`display:none` makes some browsers (confirmed behavior in Chromium)
+silently refuse to submit with no visible validation message at all,
+since the browser can't focus/scroll to an unrendered element. Server-
+side validation with an explicit, always-visible error banner avoids
+that failure mode entirely.
+
+### Sandbox cluster verification
+
+All against the live Route, not just envtest-equivalent local checks
+(there is no Go/envtest layer involved in this fix -- it's Python
+template/route code only):
+
+- **Reproduced the drop bug pre-fix**: submitted a real `ModelRequest`
+  through the then-deployed pod with both S3 secret-name fields
+  correctly filled in (`curl`, then Python `requests`, then the Flask
+  test client locally against the same code) -- `spec.scanS3SecretName`/
+  `resultS3SecretName` came back unset every time, confirming the bug
+  independent of transport.
+- Rebuilt/pushed `quay.io/jhurlocker/model-intake-ui:latest` from the
+  fixed code; `kubectl rollout restart` picked it up.
+- **Confirmed fixed, end to end, not just at the spec level**:
+  resubmitted the identical request against the new pod --
+  `spec.scanS3SecretName`/`resultS3SecretName` now populated correctly,
+  and critically, the resulting `ModelRequest` progressed all the way
+  past capacity planning into a real, executing sandbox `PipelineRun`
+  (`status.phase: sandboxRunning`, a genuine Tekton task-completion
+  message), not just a status field that happened to look right.
+- Confirmed the new validation guard live: an empty-fields submission
+  against the live pod returns `HTTP 400` with the error banner and
+  creates no `ModelRequest`; a valid submission still returns `302` to
+  the new request's detail page, unchanged.
+- All disposable `ModelRequest`s created during this investigation
+  (on both the pre-fix and post-fix pod, including two the user's own
+  browser session created mid-investigation while the fix was being
+  written) were deleted afterward; their `CapacityPlan`/`PipelineRun`
+  children were garbage-collected via owner references.
+
+### Known follow-up NOT done here
+
+- Only `scan-s3-secret-name`/`result-s3-secret-name` were given
+  submission-blocking validation. `evalhub-secret-name`/
+  `huggingface-secret-name` remain best-effort/optional in
+  `internal/controller.resolveSecrets` (no error if unset), so they
+  correctly don't need the same treatment -- not an oversight.
+- No equivalent audit was done of every other wizard field for a
+  similarly silent CRD-field-name mismatch; this fix addressed the one
+  reported and found, not a general sweep. The explicit-map pattern
+  now used for secret-name fields is a reasonable model for auditing
+  the rest, if a similar report comes in.
