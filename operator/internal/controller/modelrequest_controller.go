@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
@@ -11,7 +12,6 @@ import (
 	"github.com/jhurlocker/modelops-operator/internal/stages/promotion"
 	"github.com/jhurlocker/modelops-operator/internal/stagewalk"
 
-	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -29,6 +29,15 @@ import (
 // API server), so the controller doesn't hot-loop as fast as the
 // workqueue allows against a persistent problem.
 const transientErrorRequeueDelay = 5 * time.Second
+
+// providerConfigLookupRequeueDelay backs off retries specifically for a
+// stagecommon.ProviderConfigError (see failRequestWithRequeue and the
+// "ProviderConfigLookupFailed" status reason below) -- deliberately
+// longer than transientErrorRequeueDelay, since "an IntakeProviderConfig
+// hasn't been created yet by a separate GitOps sync" is a slower-moving
+// condition than "wait for a PipelineRun to progress." See
+// docs/REFACTOR_PLAN.md Phase 7.
+const providerConfigLookupRequeueDelay = 30 * time.Second
 
 // createIgnoringAlreadyExists creates obj, treating AlreadyExists as a
 // harmless no-op (created=false, err=nil) instead of a reconcile-failing
@@ -87,14 +96,26 @@ type secretLookupError struct {
 func (e *secretLookupError) Error() string { return e.err.Error() }
 func (e *secretLookupError) Unwrap() error { return e.err }
 
+// RBAC (Phase 7 of REFACTOR_PLAN.md): split by concern. modelrequests/
+// modellifecycleprofiles/platformconfigs/capacityplans (read-only best-
+// effort lookup, see capacityPlanRunName)/events/secrets/namespaces/
+// serviceaccounts/rolebindings/clusterrolebindings all stay here --
+// core lifecycle CRUD, secret/namespace-provisioning glue driven by
+// ProfileStageSpec.NamespaceSetup data (see ensurePromotionNamespaceRBAC/
+// ensureNamespaceLabels below), not by any specific execution engine.
+// tekton.dev/pipelineruns and intakeproviderconfigs now live solely on
+// internal/stages/tekton.StageRunner's own marker (this file no longer
+// imports tektonv1 at all -- see SetupWithManager's generalized .Owns()
+// below); capacityplans' create/update/patch/delete verbs and the
+// capacityplans/finalizers and modelrequests/finalizers markers (dead:
+// no finalizer is registered on either type, confirmed by grep -- GC is
+// entirely owner-reference-based) were dropped as part of the same
+// pass. See docs/PHASE_LOG.md Phase 7 for the full split rationale.
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests/finalizers,verbs=update
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modellifecycleprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=modelops.example.io,resources=platformconfigs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=modelops.example.io,resources=capacityplans,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=modelops.example.io,resources=capacityplans/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=tekton.dev,resources=pipelineruns,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=modelops.example.io,resources=capacityplans,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
@@ -124,10 +145,17 @@ func (r *ModelRequestReconciler) Reconcile(
 		return r.failRequest(ctx, &modelRequest, "PlatformConfigLookupFailed", err.Error())
 	}
 
+	// Stages must be declared explicitly as of Phase 7 of
+	// REFACTOR_PLAN.md -- the implicit synthesized 3-stage default
+	// (defaultStages, Phase 6) was removed once every profile in this
+	// repo migrated to declaring Spec.Stages itself (see
+	// gitops/components/runtime-config/lifecycleprofile.yaml). A
+	// profile with no Stages configured is a real, visible
+	// configuration error now, not a silent no-op walk of zero stages.
 	stages := profile.Spec.Stages
-	usingDefaultStages := len(stages) == 0
-	if usingDefaultStages {
-		stages = defaultStages(profile)
+	if len(stages) == 0 {
+		return r.failRequest(ctx, &modelRequest, "NoStagesConfigured",
+			fmt.Sprintf("ModelLifecycleProfile %q has no Spec.Stages configured", profile.Name))
 	}
 
 	// Best-effort capacity plan lookup: find the declared CapacityPlan-
@@ -226,11 +254,26 @@ func (r *ModelRequestReconciler) Reconcile(
 		if errors.As(walkErr, &secErr) {
 			return r.failRequest(ctx, &modelRequest, "SecretLookupFailed", secErr.err.Error())
 		}
+		// ProviderConfigError (Phase 7): a stagecommon.StageSpec.
+		// ProviderConfigRef resolution failure (missing/malformed
+		// reference, unsupported Kind, unsupported providerType --
+		// see internal/stages/tekton/providerconfig.go). Gets its own
+		// visible status reason and a longer, dedicated bounded
+		// requeue instead of falling into the generic silent-retry
+		// path below -- long enough to tolerate the referenced
+		// IntakeProviderConfig being created moments later by a
+		// separate GitOps sync, without masking the failure as
+		// permanent the way a plain failRequest (no requeue at all)
+		// would. See docs/REFACTOR_PLAN.md Phase 7.
+		var pcErr *stagecommon.ProviderConfigError
+		if errors.As(walkErr, &pcErr) {
+			return r.failRequestWithRequeue(ctx, &modelRequest, "ProviderConfigLookupFailed", pcErr.Error(), providerConfigLookupRequeueDelay)
+		}
 		logger.Error(walkErr, "stage walk failed")
 		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, walkErr
 	}
 
-	return r.persistWalkResult(ctx, &modelRequest, usingDefaultStages, result)
+	return r.persistWalkResult(ctx, &modelRequest, result)
 }
 
 // capacityPlanRunName finds the declared CapacityPlan-kind stage (if
@@ -271,16 +314,22 @@ type walkStatus struct {
 
 // computeWalkStatus translates a stagewalk.Result into the new
 // ModelRequest.Status field values. CurrentStage/Stages are always
-// generic (Phase 6). Phase/Message/*PipelineRunName additionally
-// reproduce the exact pre-Phase-6 values when usingDefaultStages is
-// true -- a deliberate, isolated compatibility shim (see
-// docs/REFACTOR_PLAN.md Phase 6 design review) so every Phase 0-5
-// characterization test keeps passing unmodified. A profile with
-// explicit Spec.Stages gets fully generic Phase values instead, since
-// there's no pre-existing behavior to preserve for it. Deprecating this
-// shim once profiles migrate off the default list is tracked in
-// REFACTOR_PLAN.md Phase 7.
-func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, usingDefaultStages bool, result stagewalk.Result) walkStatus {
+// generic (Phase 6). Phase/Message are now ALSO always fully generic
+// ("<CurrentStage>Running"/"Succeeded"/"Failed", result.Message passed
+// through verbatim) -- the Phase 6 compatibility shim that used to
+// reproduce the pre-Phase-6 special-cased strings ("CapacityPlanning"/
+// "SandboxRunning"/"PromotionRunning") for the synthesized default stage
+// list was removed in Phase 7 (REFACTOR_PLAN.md), once every profile in
+// this repo migrated to declaring Spec.Stages explicitly (defaultStages
+// no longer exists -- see docs/PHASE_LOG.md's Phase 7 entry). This is a
+// real, deliberate, visible behavior change for any ModelRequest using
+// what used to be the default stage list: Phase values are now
+// lowercase-stage-name-prefixed ("capacityRunning"/"sandboxRunning"/
+// "promotionRunning") instead of the old bespoke strings, and
+// Sandbox/Promotion-Failed messages no longer get the old "Sandbox
+// pipeline failed: "/"Promotion to <ns> failed: " prose prefix (just
+// result.Message directly).
+func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, result stagewalk.Result) walkStatus {
 	ws := walkStatus{
 		currentStage: result.CurrentStage,
 		stages:       toStageProgressList(result.Progress),
@@ -292,7 +341,16 @@ func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, usingDefaultStages boo
 		promotionPipelineRunName: mr.Status.PromotionPipelineRunName,
 	}
 
-	if sandboxProgress, ok := lastProgressNamed(result.Progress, defaultSandboxStageName); ok && sandboxProgress.RunRef != "" {
+	// sandboxStageName/promotionStageName below only match a stage
+	// literally named "sandbox"/"promotion" -- a known, narrower
+	// limitation of these three legacy singular RunName fields
+	// (PipelineRunName/SandboxPipelineRunName/PromotionPipelineRunName
+	// predate Phase 6 entirely) that a custom-named Spec.Stages profile
+	// won't populate. Out of scope for Phase 7 (only the Phase/Message
+	// shim was asked to be deprecated this phase, not these three
+	// fields) -- Status.Stages[]/CurrentStage remain fully generic and
+	// correct regardless of stage naming.
+	if sandboxProgress, ok := lastProgressNamed(result.Progress, sandboxStageName); ok && sandboxProgress.RunRef != "" {
 		ws.sandboxPipelineRunName = sandboxProgress.RunRef
 		ws.pipelineRunName = sandboxProgress.RunRef
 	}
@@ -301,50 +359,16 @@ func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, usingDefaultStages boo
 		ws.pipelineRunName = promoProgress.RunRef
 	}
 
-	if !usingDefaultStages {
-		switch result.Outcome {
-		case stagewalk.OutcomeSucceeded:
-			ws.phase = "Succeeded"
-			ws.message = "Model onboarding completed successfully"
-		case stagewalk.OutcomeFailed:
-			ws.phase = "Failed"
-			ws.message = result.Message
-		case stagewalk.OutcomeRunning:
-			ws.phase = fmt.Sprintf("%sRunning", result.CurrentStage)
-			ws.message = result.Message
-		}
-		return ws
-	}
-
-	switch result.CurrentStage {
-	case defaultCapacityStageName:
-		ws.phase = "CapacityPlanning"
-		ws.message = result.Message
-	case defaultSandboxStageName:
-		if result.Outcome == stagewalk.OutcomeFailed {
-			ws.phase = "Failed"
-			ws.message = "Sandbox pipeline failed: " + result.Message
-		} else {
-			ws.phase = "SandboxRunning"
-			ws.message = result.Message
-		}
-	case defaultPromotionStageName:
-		if result.Outcome == stagewalk.OutcomeFailed {
-			ns := ""
-			if len(result.Progress) > 0 {
-				ns = result.Progress[len(result.Progress)-1].Namespace
-			}
-			ws.phase = "Failed"
-			ws.message = fmt.Sprintf("Promotion to %s failed: %s", ns, result.Message)
-		} else {
-			ws.phase = "PromotionRunning"
-			ws.message = "Promotion pipeline(s) running"
-		}
-	default:
-		// Outcome == Succeeded: CurrentStage is empty (see
-		// internal/stagewalk.Walk's final return).
+	switch result.Outcome {
+	case stagewalk.OutcomeSucceeded:
 		ws.phase = "Succeeded"
 		ws.message = "Model onboarding completed successfully"
+	case stagewalk.OutcomeFailed:
+		ws.phase = "Failed"
+		ws.message = result.Message
+	case stagewalk.OutcomeRunning:
+		ws.phase = fmt.Sprintf("%sRunning", result.CurrentStage)
+		ws.message = result.Message
 	}
 	return ws
 }
@@ -358,8 +382,8 @@ func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, usingDefaultStages boo
 // repeat (e.g. one promotion namespace's individual outcome changing
 // while the overall phase is still "PromotionRunning"), so comparing
 // only Phase+Message would silently let that go unpersisted.
-func (r *ModelRequestReconciler) persistWalkResult(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, usingDefaultStages bool, result stagewalk.Result) (ctrl.Result, error) {
-	ws := computeWalkStatus(mr, usingDefaultStages, result)
+func (r *ModelRequestReconciler) persistWalkResult(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, result stagewalk.Result) (ctrl.Result, error) {
+	ws := computeWalkStatus(mr, result)
 
 	if mr.Status.Phase == ws.phase &&
 		mr.Status.Message == ws.message &&
@@ -429,17 +453,65 @@ func lastProgressNamed(progress []stagewalk.Progress, name string) (stagewalk.Pr
 // separately in Progress.Namespace (see internal/stagewalk.Walk), so
 // this is just lastProgressNamed under the hood; kept as its own
 // function so the call site at computeWalkStatus doesn't need to know
-// the default promotion stage's literal name.
+// the conventional promotion stage's literal name.
 func lastPromotionProgress(progress []stagewalk.Progress) (stagewalk.Progress, bool) {
-	return lastProgressNamed(progress, defaultPromotionStageName)
+	return lastProgressNamed(progress, promotionStageName)
 }
 
+// sandboxStageName/promotionStageName identify the conventional stage
+// names used only for populating the legacy singular RunName status
+// fields (see computeWalkStatus's doc comment above) -- NOT for any
+// stage-sequencing/defaulting purpose (that mechanism, defaultStages,
+// was removed in Phase 7 of REFACTOR_PLAN.md; every profile must
+// declare Spec.Stages explicitly now). The live
+// standard-generative-onboarding profile (see
+// gitops/components/runtime-config/lifecycleprofile.yaml) still uses
+// these exact names, matching the pre-Phase-7 default shape, so this
+// legacy-field population keeps working for it unchanged.
+const (
+	sandboxStageName   = "sandbox"
+	promotionStageName = "promotion"
+)
+
+// SetupWithManager registers watches for ModelRequest and its core
+// lifecycle child, CapacityPlan (a core lifecycle CRD, not
+// provider-specific -- owned explicitly here, unconditionally). Any
+// execution-engine-specific child type (e.g. tektonv1.PipelineRun) is
+// instead declared generically by whichever registered StageRunner
+// creates it, via the optional stagecommon.OwnedTypesProvider
+// interface -- this is what lets this file avoid importing tektonv1 (or
+// any future non-Tekton engine's package) purely for manager-wiring
+// purposes. See stagecommon.OwnedTypesProvider's doc comment and
+// docs/REFACTOR_PLAN.md/docs/PHASE_LOG.md Phase 7 (this closes the
+// residual import Phase 4 flagged as "a natural candidate for Phase
+// 5/7").
 func (r *ModelRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	bldr := ctrl.NewControllerManagedBy(mgr).
 		For(&modelopsv1alpha1.ModelRequest{}).
-		Owns(&tektonv1.PipelineRun{}).
-		Owns(&modelopsv1alpha1.CapacityPlan{}).
-		Complete(r)
+		Owns(&modelopsv1alpha1.CapacityPlan{})
+
+	for _, name := range sortedStageRunnerKeys(r.StageRunners) {
+		if owner, ok := r.StageRunners[name].(stagecommon.OwnedTypesProvider); ok {
+			for _, t := range owner.OwnedTypes() {
+				bldr = bldr.Owns(t)
+			}
+		}
+	}
+
+	return bldr.Complete(r)
+}
+
+// sortedStageRunnerKeys returns r's keys in deterministic sorted order,
+// so SetupWithManager's .Owns() registration order (and any log output
+// derived from iterating the registry) doesn't vary from run to run --
+// map iteration order in Go is deliberately randomized.
+func sortedStageRunnerKeys(m map[string]stagecommon.StageRunner) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (r *ModelRequestReconciler) lookupProfile(ctx context.Context, mr *modelopsv1alpha1.ModelRequest) (*modelopsv1alpha1.ModelLifecycleProfile, error) {
@@ -619,9 +691,11 @@ func ptrInt64(i int64) *int64 {
 // presence-only-checked label) and ensureMaaSNamespaceLabels (three
 // value-checked labels) into one data-driven helper -- which labels get
 // applied to which namespace, for which stage, is now entirely
-// controlled by ProfileStageSpec.NamespaceSetup.Labels (see
-// defaultStages), not by a Go function hardcoded to "the sandbox stage
-// gets evalhub, the promotion stage gets MaaS."
+// controlled by ProfileStageSpec.NamespaceSetup.Labels (declared
+// directly in each ModelLifecycleProfile's Spec.Stages as of Phase 7 --
+// see gitops/components/runtime-config/lifecycleprofile.yaml), not by a
+// Go function hardcoded to "the sandbox stage gets evalhub, the
+// promotion stage gets MaaS."
 func (r *ModelRequestReconciler) ensureNamespaceLabels(ctx context.Context, namespace string, labels map[string]string) error {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
@@ -781,6 +855,32 @@ func (r *ModelRequestReconciler) failRequest(ctx context.Context, mr *modelopsv1
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+// failRequestWithRequeue is failRequest's counterpart for status
+// reasons that are plausibly transient (e.g. "ProviderConfigLookupFailed":
+// the referenced object may simply not exist yet, created moments later
+// by a separate GitOps sync -- see docs/REFACTOR_PLAN.md Phase 7).
+// Unlike failRequest, this ALWAYS returns a bounded RequeueAfter, even
+// on the "Phase/Message already match, nothing to persist" no-op branch
+// -- failRequest's other reasons (ProfileLookupFailed,
+// PlatformConfigLookupFailed, ...) rely solely on the ModelRequest's own
+// resync or a later unrelated watch event to ever re-check a fixed
+// dependency, which risks looking permanently stuck for a genuinely
+// transient condition. Adding the same active-requeue treatment to
+// those older reasons (or, better, a Watches()-based immediate
+// re-trigger for all of them) is deliberately deferred -- see the
+// backlog note added to REFACTOR_PLAN.md's Phase 7 section.
+func (r *ModelRequestReconciler) failRequestWithRequeue(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, phase, message string, requeueAfter time.Duration) (ctrl.Result, error) {
+	if mr.Status.Phase == phase && mr.Status.Message == message {
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+	mr.Status.Phase = phase
+	mr.Status.Message = message
+	if err := r.Status().Update(ctx, mr); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 func (r *ModelRequestReconciler) updateStatus(ctx context.Context, request *modelopsv1alpha1.ModelRequest, phase string, message string) (ctrl.Result, error) {

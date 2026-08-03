@@ -67,11 +67,12 @@ func main() {
 		// StageHandlers/StageRunners: the Phase 6 dual registry the
 		// generic stage walker dispatches through (see
 		// internal/stagewalk.Walk and docs/REFACTOR_PLAN.md Phase 6).
-		// Keyed to match defaultStages' "capacity"/"sandbox"/
-		// "promotion" names and "CapacityPlan"/"PipelineRun" kinds --
-		// a profile setting its own Spec.Stages must reference these
-		// same names/kinds (or register additional ones here) to be
-		// dispatchable.
+		// Every ModelLifecycleProfile must declare Spec.Stages
+		// explicitly as of Phase 7 (see
+		// gitops/components/runtime-config/lifecycleprofile.yaml),
+		// referencing these same "capacity"/"sandbox"/"promotion"
+		// names and "CapacityPlan"/"PipelineRun" kinds (or registering
+		// additional ones here) to be dispatchable.
 		StageHandlers: map[string]stagecommon.StageHandler{
 			"capacity":  capacityplanning.Handler{},
 			"sandbox":   sandbox.Handler{},

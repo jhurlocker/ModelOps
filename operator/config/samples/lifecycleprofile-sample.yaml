@@ -11,3 +11,28 @@ spec:
   defaultAccess:
     authorizedViewers: ""
     accessRole: view
+  # stages is required as of Phase 7 (REFACTOR_PLAN.md) -- the implicit
+  # 3-stage default synthesized when this field was left empty
+  # (defaultStages) was removed. This sample relies solely on
+  # workflow.pipelineRef (the DEPRECATED fallback -- no providerConfigRef
+  # set on either stage below), unlike the live
+  # gitops/components/runtime-config/lifecycleprofile.yaml sample, which
+  # sets a per-stage providerConfigRef.
+  stages:
+    - name: capacity
+      kind: CapacityPlan
+    - name: sandbox
+      kind: PipelineRun
+      namespaceSetup:
+        ensureRBAC: true
+        labels:
+          evalhub.trustyai.opendatahub.io/tenant: ""
+    - name: promotion
+      kind: PipelineRun
+      perNamespace: true
+      namespaceSetup:
+        ensureRBAC: true
+        labels:
+          opendatahub.io/generated-namespace: "true"
+          maas.opendatahub.io/gateway-access: "true"
+          opendatahub.io/dashboard: "true"

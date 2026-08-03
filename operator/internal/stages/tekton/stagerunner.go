@@ -32,6 +32,7 @@ import (
 // reconciler never fetches or interprets that CR itself.
 
 // +kubebuilder:rbac:groups=modelops.example.io,resources=intakeproviderconfigs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=tekton.dev,resources=pipelineruns,verbs=get;list;watch;create;update;patch;delete
 
 type StageRunner struct {
 	Client client.Client
@@ -39,6 +40,17 @@ type StageRunner struct {
 }
 
 var _ stagecommon.StageRunner = (*StageRunner)(nil)
+var _ stagecommon.OwnedTypesProvider = (*StageRunner)(nil)
+
+// OwnedTypes declares that this StageRunner creates tektonv1.PipelineRun
+// child objects, so ModelRequestReconciler.SetupWithManager can .Owns()
+// them generically -- see stagecommon.OwnedTypesProvider's doc comment
+// and docs/REFACTOR_PLAN.md/docs/PHASE_LOG.md Phase 7. This is what
+// lets internal/controller drop its last remaining tektonv1 import
+// (previously only needed for this exact .Owns() registration).
+func (r *StageRunner) OwnedTypes() []client.Object {
+	return []client.Object{&tektonv1.PipelineRun{}}
+}
 
 // EnsureRun looks up the PipelineRun named stage.RunName in req.Namespace,
 // creating it (idempotently) if absent, and reports its current status.
@@ -55,7 +67,14 @@ func (r *StageRunner) EnsureRun(ctx context.Context, req *modelopsv1alpha1.Model
 	if apierrors.IsNotFound(err) {
 		details, resolveErr := resolveProviderDetails(ctx, r.Client, req.Namespace, stage)
 		if resolveErr != nil {
-			return stagecommon.StageStatus{}, resolveErr
+			// Wrapped in stagecommon.ProviderConfigError so
+			// ModelRequestReconciler can recognize this specific
+			// failure class via errors.As and surface a dedicated
+			// "ProviderConfigLookupFailed" status reason instead of
+			// the generic silent-retry error path every other
+			// EnsureRun error falls into. See docs/REFACTOR_PLAN.md
+			// Phase 7.
+			return stagecommon.StageStatus{}, &stagecommon.ProviderConfigError{Err: resolveErr}
 		}
 		newRun := buildPipelineRun(stage.RunName, req.Namespace, details, toTektonParams(stage.Params), req, r.Scheme)
 		if createErr := r.Client.Create(ctx, &newRun); createErr != nil && !apierrors.IsAlreadyExists(createErr) {

@@ -50,22 +50,11 @@ rules:
   - modelops.example.io
   resources:
   - capacityplans
-  - modelrequests
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - modelops.example.io
-  resources:
-  - capacityplans/finalizers
-  - modelrequests/finalizers
-  verbs:
-  - update
 - apiGroups:
   - modelops.example.io
   resources:
@@ -84,6 +73,18 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - modelops.example.io
+  resources:
+  - modelrequests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io

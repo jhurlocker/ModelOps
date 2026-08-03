@@ -39,6 +39,11 @@ func (Handler) BuildSpec(sc stagecommon.StageContext) (stagecommon.StageSpec, er
 		ClusterPolicyName:     cfg.Spec.ClusterPolicyName,
 		TimeSlicingConfigMap:  cfg.Spec.TimeSlicingConfigMap,
 		MaxTimeSlices:         stagecommon.IntOrDefault(cfg.Spec.MaxTimeSlices, 8),
+		// MaxGPUsPerRequest deliberately has NO default applied here
+		// (unlike MaxTimeSlices above): 0 means "no configured
+		// ceiling," which must stay 0, not become a default cap. See
+		// docs/REFACTOR_PLAN.md Phase 7.
+		MaxGPUsPerRequest: cfg.Spec.MaxGPUsPerRequest,
 	}
 
 	return stagecommon.StageSpec{

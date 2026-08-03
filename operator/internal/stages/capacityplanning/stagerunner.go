@@ -22,6 +22,14 @@ import (
 // this phase). EnsureRun only Get-or-Creates the child CapacityPlan and
 // maps its Status.Phase into stagecommon.StageStatus, mirroring what
 // internal/stages/tekton.StageRunner does for PipelineRun.
+//
+// RBAC (Phase 7): only get/list/watch/create are needed -- EnsureRun
+// never updates, patches, or deletes a CapacityPlan (status writes are
+// exclusively CapacityPlanReconciler's job, which declares its own
+// narrower capacityplans/status marker). See docs/PHASE_LOG.md Phase 7.
+
+// +kubebuilder:rbac:groups=modelops.example.io,resources=capacityplans,verbs=get;list;watch;create
+
 type StageRunner struct {
 	Client client.Client
 	Scheme *runtime.Scheme

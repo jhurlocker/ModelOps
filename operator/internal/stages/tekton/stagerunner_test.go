@@ -2,6 +2,7 @@ package tekton
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
@@ -228,6 +229,38 @@ func TestEnsureRun_ExistingRun_ConditionTrue_ReturnsSucceeded(t *testing.T) {
 	require.Equal(t, "Tasks Completed: 5 (Failed: 0, Cancelled 0), Skipped: 0", status.Message)
 }
 
+// TestEnsureRun_ProviderConfigResolutionFails_ReturnsProviderConfigError
+// is Phase 7's TDD-first test (written before EnsureRun wrapped this
+// error): an unresolvable ProviderConfigRef must surface as a
+// *stagecommon.ProviderConfigError, not a bare error, so
+// ModelRequestReconciler can recognize it via errors.As and surface a
+// dedicated "ProviderConfigLookupFailed" status reason instead of
+// falling into the generic silent-retry error path. See
+// docs/REFACTOR_PLAN.md Phase 7.
+func TestEnsureRun_ProviderConfigResolutionFails_ReturnsProviderConfigError(t *testing.T) {
+	c := newFakeClient(t)
+	r := &StageRunner{Client: c, Scheme: testScheme(t)}
+	mr := newOwnerModelRequest("mr-1", "ns-1")
+
+	_, err := r.EnsureRun(context.Background(), mr, stagecommon.StageSpec{
+		Name:      "sandbox",
+		RunName:   "mr-1-sandbox",
+		StageKind: stagecommon.StageKindSandbox,
+		ProviderConfigRef: &modelopsv1alpha1.ProviderConfigRef{
+			Name: "whatever", Kind: "SomeOtherKind",
+		},
+	})
+	require.Error(t, err)
+
+	var pcErr *stagecommon.ProviderConfigError
+	require.True(t, errors.As(err, &pcErr), "EnsureRun must wrap a resolveProviderDetails failure in *stagecommon.ProviderConfigError")
+	require.Contains(t, pcErr.Error(), "unsupported provider config kind")
+
+	var pr tektonv1.PipelineRun
+	getErr := c.Get(context.Background(), types.NamespacedName{Name: "mr-1-sandbox", Namespace: "ns-1"}, &pr)
+	require.Error(t, getErr, "no PipelineRun should ever be created when the provider config cannot be resolved")
+}
+
 func TestEnsureRun_ExistingRun_ConditionFalse_ReturnsFailed(t *testing.T) {
 	c := newFakeClient(t)
 	r := &StageRunner{Client: c, Scheme: testScheme(t)}
@@ -242,4 +275,25 @@ func TestEnsureRun_ExistingRun_ConditionFalse_ReturnsFailed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stagecommon.StageFailed, status.Phase)
 	require.Equal(t, "compliance scan failed", status.Message)
+}
+
+// --- OwnedTypes: Phase 7's RBAC/import-scoping generalization. Written
+// first (TDD): stagecommon.OwnedTypesProvider/StageRunner.OwnedTypes
+// don't exist yet at this point. This is what lets
+// ModelRequestReconciler.SetupWithManager .Owns() a tektonv1.PipelineRun
+// generically, without internal/controller importing tektonv1 itself
+// purely for manager-wiring purposes. See docs/REFACTOR_PLAN.md/
+// docs/PHASE_LOG.md Phase 7.
+func TestStageRunner_ImplementsOwnedTypesProvider(t *testing.T) {
+	var r stagecommon.StageRunner = &StageRunner{}
+	_, ok := r.(stagecommon.OwnedTypesProvider)
+	require.True(t, ok, "tekton.StageRunner must implement stagecommon.OwnedTypesProvider so its owned PipelineRun type can be .Owns() generically")
+}
+
+func TestStageRunner_OwnedTypes_ReturnsExactlyPipelineRun(t *testing.T) {
+	r := &StageRunner{}
+	owned := r.OwnedTypes()
+	require.Len(t, owned, 1)
+	_, ok := owned[0].(*tektonv1.PipelineRun)
+	require.True(t, ok, "tekton.StageRunner owns exactly *tektonv1.PipelineRun")
 }

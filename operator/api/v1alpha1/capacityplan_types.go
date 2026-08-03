@@ -22,6 +22,17 @@ type CapacityPlanSpec struct {
 	ClusterPolicyName       string               `json:"clusterPolicyName,omitempty"`
 	TimeSlicingConfigMap    string               `json:"timeSlicingConfigMap,omitempty"`
 	MaxTimeSlices           int                  `json:"maxTimeSlices,omitempty"`
+	// MaxGPUsPerRequest, when set (> 0), is a configured ceiling
+	// CapacityPlanReconciler compares its unclamped GPU recommendation
+	// against: if the recommendation would exceed this value,
+	// Status.Phase is set to "Failed" instead of silently clamping to
+	// the reconciler's own internal 8-GPU cap. Zero/unset preserves the
+	// exact pre-Phase-7 clamping behavior (always succeeds, silently
+	// capped at 8). Populated from PlatformConfigSpec.MaxGPUsPerRequest
+	// by internal/stages/capacityplanning.Handler.BuildSpec, the same
+	// way GPUOperatorNamespace/ClusterPolicyName already are. See
+	// docs/REFACTOR_PLAN.md Phase 7.
+	MaxGPUsPerRequest int `json:"maxGPUsPerRequest,omitempty"`
 }
 
 type CapacityPlanModelRef struct {

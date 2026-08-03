@@ -30,16 +30,16 @@ import (
 )
 
 // newStageHandlers returns the real StageHandlers registry (keyed by
-// ProfileStageSpec.Name, matching defaultStages' "capacity"/"sandbox"/
-// "promotion" names) every test in this package uses -- these build
-// *what* to run and never touch Tekton/a CapacityPlan object
+// ProfileStageSpec.Name, matching testDefaultStages' "capacity"/
+// "sandbox"/"promotion" names) every test in this package uses -- these
+// build *what* to run and never touch Tekton/a CapacityPlan object
 // themselves, so it's safe to use the real handlers even in tests that
 // fake the StageRunner side (e.g. modelrequest_stagerunner_test.go).
 func newStageHandlers() map[string]stagecommon.StageHandler {
 	return map[string]stagecommon.StageHandler{
-		defaultCapacityStageName:  capacityplanning.Handler{},
-		defaultSandboxStageName:   sandbox.Handler{},
-		defaultPromotionStageName: promotion.Handler{},
+		"capacity":  capacityplanning.Handler{},
+		"sandbox":   sandbox.Handler{},
+		"promotion": promotion.Handler{},
 	}
 }
 
@@ -99,9 +99,58 @@ func ensureNamespace(t *testing.T, name string) {
 	}
 }
 
+// testDefaultStages reproduces, for test fixtures only, the exact
+// 3-stage sequence internal/controller's now-removed defaultStages()
+// used to synthesize automatically for any profile with an empty
+// Spec.Stages. That implicit synthesis was removed in Phase 7 of
+// REFACTOR_PLAN.md once the live standard-generative-onboarding profile
+// migrated to declaring Stages explicitly (see
+// gitops/components/runtime-config/lifecycleprofile.yaml and
+// docs/PHASE_LOG.md's Phase 7 entry) -- every profile must now set
+// Spec.Stages itself. This helper keeps that declaration in one place
+// instead of duplicating the same 3-entry literal across every
+// characterization test fixture in this package that exercises the full
+// capacity -> sandbox -> promotion flow.
+//
+// providerConfigRef is threaded onto the sandbox/promotion stages
+// exactly the way the removed defaultStages() threaded
+// ModelLifecycleProfileSpec.ProviderConfigRef onto them -- pass nil for
+// the deprecated Workflow.PipelineRef/PromotionPipelineRef fallback
+// path.
+func testDefaultStages(providerConfigRef *modelopsv1alpha1.ProviderConfigRef) []modelopsv1alpha1.ProfileStageSpec {
+	return []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{
+			Name:              "sandbox",
+			Kind:              "PipelineRun",
+			ProviderConfigRef: providerConfigRef,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				Labels:     map[string]string{"evalhub.trustyai.opendatahub.io/tenant": ""},
+			},
+		},
+		{
+			Name:              "promotion",
+			Kind:              "PipelineRun",
+			ProviderConfigRef: providerConfigRef,
+			PerNamespace:      true,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				Labels: map[string]string{
+					"opendatahub.io/generated-namespace": "true",
+					"maas.opendatahub.io/gateway-access":  "true",
+					"opendatahub.io/dashboard":            "true",
+				},
+			},
+		},
+	}
+}
+
 // defaultProfileSpec returns a minimal, valid ModelLifecycleProfileSpec
 // pointing at the given PlatformConfig name, matching the shape the real
-// UI/controller expects (Workflow.Engine/PipelineRef required).
+// UI/controller expects (Workflow.Engine/PipelineRef required), with the
+// standard 3-stage Spec.Stages declared explicitly (see
+// testDefaultStages).
 func defaultProfileSpec(platformConfigName string) modelopsv1alpha1.ModelLifecycleProfileSpec {
 	return modelopsv1alpha1.ModelLifecycleProfileSpec{
 		Workflow: modelopsv1alpha1.WorkflowRef{
@@ -109,6 +158,7 @@ func defaultProfileSpec(platformConfigName string) modelopsv1alpha1.ModelLifecyc
 			PipelineRef: "model-intake-sandbox",
 		},
 		PlatformConfigRef: platformConfigName,
+		Stages:            testDefaultStages(nil),
 	}
 }
 

@@ -111,6 +111,28 @@ func TestModelRequest_MissingProfile_SetsProfileLookupFailed(t *testing.T) {
 	require.Equal(t, "ProfileLookupFailed", mr.Status.Phase)
 }
 
+// TestModelRequest_ProfileWithNoStages_SetsNoStagesConfigured is Phase 7's
+// regression test for the guard that replaced the removed defaultStages()
+// fallback: a ModelLifecycleProfile with an empty/nil Spec.Stages used to
+// be silently synthesized into the pre-Phase-6 3-stage default; now it's
+// a real, visible configuration error instead of a silent no-op walk of
+// zero stages.
+func TestModelRequest_ProfileWithNoStages_SetsNoStagesConfigured(t *testing.T) {
+	ns := newTestNamespace(t)
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	newProfile(t, ns, "profile-1", modelopsv1alpha1.ModelLifecycleProfileSpec{
+		Workflow:          modelopsv1alpha1.WorkflowRef{Engine: "tekton", PipelineRef: "model-intake-sandbox"},
+		PlatformConfigRef: "cfg-1",
+		// Stages deliberately left nil/empty.
+	})
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+
+	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "NoStagesConfigured", mr.Status.Phase)
+	require.Contains(t, mr.Status.Message, "profile-1")
+}
+
 func TestModelRequest_MissingPlatformConfig_SetsPlatformConfigLookupFailed(t *testing.T) {
 	ns := newTestNamespace(t)
 	newProfile(t, ns, "profile-1", modelopsv1alpha1.ModelLifecycleProfileSpec{
@@ -138,7 +160,7 @@ func TestModelRequest_FirstReconcile_CreatesCapacityPlan(t *testing.T) {
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "CapacityPlanning", mr.Status.Phase)
+	require.Equal(t, "capacityRunning", mr.Status.Phase)
 
 	var plan modelopsv1alpha1.CapacityPlan
 	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "mr-1-capacity"), &plan))
@@ -161,7 +183,7 @@ func TestModelRequest_CapacityPlanNotYetSucceeded_StaysInCapacityPlanningPhase(t
 	// Second reconcile: CapacityPlan exists but its Phase is still "".
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "CapacityPlanning", mr.Status.Phase)
+	require.Equal(t, "capacityRunning", mr.Status.Phase)
 	require.Contains(t, mr.Status.Message, "Waiting for capacity plan")
 }
 
@@ -189,7 +211,7 @@ func TestModelRequest_CapacityPlanSucceeded_CreatesSandboxPipelineRun(t *testing
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "SandboxRunning", mr.Status.Phase)
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
 	require.Equal(t, "mr-1-sandbox", mr.Status.SandboxPipelineRunName)
 
 	var pr tektonv1.PipelineRun
@@ -209,6 +231,7 @@ func TestModelRequest_SandboxPipelineNameOrDefault_PrecedenceOrder(t *testing.T)
 	newProfile(t, ns, "profile-1", modelopsv1alpha1.ModelLifecycleProfileSpec{
 		Workflow:          modelopsv1alpha1.WorkflowRef{Engine: "tekton", PipelineRef: "profile-sandbox-pipeline"},
 		PlatformConfigRef: "cfg-1",
+		Stages:            testDefaultStages(nil),
 	})
 	// mr.Spec.PipelineRef, if set, wins over the profile's.
 	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
@@ -241,7 +264,7 @@ func TestModelRequest_SandboxPipelineRunPending_NoDuplicateCreated(t *testing.T)
 	// Second reconcile: PipelineRun exists with no/unknown condition.
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "SandboxRunning", mr.Status.Phase)
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
 
 	var after tektonv1.PipelineRun
 	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "mr-1-sandbox"), &after))
@@ -286,7 +309,7 @@ func TestModelRequest_SandboxSucceeded_CreatesPromotionPipelineRun_DefaultNamesp
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "PromotionRunning", mr.Status.Phase)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
 
 	var pr tektonv1.PipelineRun
 	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "mr-1-promotion-staging"), &pr),
@@ -324,7 +347,7 @@ func TestModelRequest_MultiplePromotionNamespaces_KnownBehavior_AllCreatedInSame
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "PromotionRunning", mr.Status.Phase)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
 
 	var stagingPR, preprodPR tektonv1.PipelineRun
 	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "mr-1-promotion-staging"), &stagingPR),
@@ -367,7 +390,7 @@ func TestModelRequest_OnePromotionSucceededOneRunning_StaysPromotionRunning(t *t
 
 	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
 	require.NoError(t, err)
-	require.Equal(t, "PromotionRunning", mr.Status.Phase)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
 }
 
 func TestModelRequest_PromotionFailed_ReportsFirstFailureEncountered(t *testing.T) {
@@ -561,6 +584,7 @@ func TestModelRequest_PromotionUsesProfilePromotionPipelineRef_EndToEnd(t *testi
 			PromotionPipelineRef: "profile-promotion-pipeline",
 		},
 		PlatformConfigRef: "cfg-1",
+		Stages:            testDefaultStages(nil),
 	})
 	newModelRequest(t, ns, "mr-1", "profile-1", nil)
 	setupSucceededCapacityPlan(t, ns, "mr-1")

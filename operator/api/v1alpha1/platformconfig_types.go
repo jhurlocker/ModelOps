@@ -21,6 +21,15 @@ type PlatformConfigSpec struct {
 	ClusterPolicyName    string `json:"clusterPolicyName,omitempty"`
 	TimeSlicingConfigMap string `json:"timeSlicingConfigMap,omitempty"`
 	MaxTimeSlices        int    `json:"maxTimeSlices,omitempty"`
+	// MaxGPUsPerRequest, when set (> 0), is the configured ceiling
+	// CapacityPlanReconciler enforces: a request whose GPU
+	// recommendation would exceed this value fails (Status.Phase =
+	// "Failed") instead of being silently clamped to the reconciler's
+	// internal 8-GPU cap. Zero/unset preserves the exact pre-Phase-7
+	// behavior. This is a configured-ceiling stopgap, not real
+	// inventory/advisor-based capacity awareness -- see
+	// docs/REFACTOR_PLAN.md Phase 7's backlog note.
+	MaxGPUsPerRequest int `json:"maxGPUsPerRequest,omitempty"`
 
 	AdvisorSecretName     string `json:"advisorSecretName,omitempty"`
 	AdvisorTimeoutSeconds int    `json:"advisorTimeoutSeconds,omitempty"`

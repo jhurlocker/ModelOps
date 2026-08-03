@@ -179,6 +179,98 @@ func TestCapacityPlan_DeletedBeforeReconcile_IsIgnored(t *testing.T) {
 	require.Equal(t, ctrl.Result{}, res)
 }
 
+// --- MaxGPUsPerRequest / Failed path (Phase 7 of REFACTOR_PLAN.md) ---
+//
+// TDD: written before CapacityPlanReconciler had any Failed-producing
+// branch at all -- prior to this phase, Status.Phase could only ever
+// become "Succeeded" (see TestCapacityPlan_LargeContextAndHighConcurrency_CapsAtEightGPUs
+// above, which pins the OLD silent-clamp-at-8 behavior unchanged for
+// the MaxGPUsPerRequest-unset case).
+
+func TestCapacityPlan_MaxGPUsPerRequestUnset_PreservesExactPreviousClampingBehavior(t *testing.T) {
+	ns := newTestNamespace(t)
+	// Same fixture as TestCapacityPlan_LargeContextAndHighConcurrency_CapsAtEightGPUs,
+	// with MaxGPUsPerRequest left at its zero value -- must produce the
+	// identical Succeeded/8-GPU result, not a Failed one.
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength: 32768,
+		Concurrency:   16,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", plan.Status.Phase)
+	require.Equal(t, 8, plan.Status.GPUsNeeded)
+}
+
+func TestCapacityPlan_RequestedGPUsExceedMaxGPUsPerRequest_SetsFailedPhase(t *testing.T) {
+	ns := newTestNamespace(t)
+	// ContextLength>16384 -> raw=4; concurrency>8 -> raw*=2 -> raw=8.
+	// A configured ceiling of 4 must reject this, not silently clamp it
+	// to the reconciler's own internal 8-GPU cap the way an unset
+	// ceiling would.
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength:     32768,
+		Concurrency:       16,
+		MaxGPUsPerRequest: 4,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Failed", plan.Status.Phase)
+	require.Equal(t, "requested capacity (8 GPUs) exceeds configured maximum (4)", plan.Status.Message)
+	require.Zero(t, plan.Status.GPUsNeeded, "a Failed plan must not also report a (misleading) GPUsNeeded value")
+}
+
+func TestCapacityPlan_RequestedGPUsWithinMaxGPUsPerRequest_Succeeds(t *testing.T) {
+	ns := newTestNamespace(t)
+	// raw=1 (small context/concurrency), well within a ceiling of 4.
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength:     8192,
+		Concurrency:       4,
+		MaxGPUsPerRequest: 4,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", plan.Status.Phase)
+	require.Equal(t, 1, plan.Status.GPUsNeeded)
+}
+
+func TestCapacityPlan_RequestedGPUsExactlyAtMaxGPUsPerRequest_DoesNotFail(t *testing.T) {
+	ns := newTestNamespace(t)
+	// raw=8 (same as the CapsAtEightGPUs fixture), ceiling also 8:
+	// "exceeds" must mean strictly greater-than, not >=.
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength:     32768,
+		Concurrency:       16,
+		MaxGPUsPerRequest: 8,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", plan.Status.Phase)
+	require.Equal(t, 8, plan.Status.GPUsNeeded)
+}
+
+func TestCapacityPlan_AlreadyFailed_IsANoOp(t *testing.T) {
+	ns := newTestNamespace(t)
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength:     32768,
+		Concurrency:       16,
+		MaxGPUsPerRequest: 4,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Failed", plan.Status.Phase)
+	rvAfterFirst := plan.ResourceVersion
+
+	plan2, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, rvAfterFirst, plan2.ResourceVersion, "reconciling an already-Failed CapacityPlan must not write status again")
+}
+
 func TestCapacityPlan_MessageFormat_MatchesCurrentTemplate(t *testing.T) {
 	ns := newTestNamespace(t)
 	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{

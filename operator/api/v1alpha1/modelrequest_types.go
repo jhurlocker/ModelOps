@@ -113,15 +113,19 @@ type MaaSOverride struct {
 }
 
 type ModelRequestStatus struct {
-	// Phase is the coarse-grained onboarding phase. For the synthesized
-	// default 3-stage sequence (see defaultStages in
-	// internal/controller), this retains its pre-Phase-6 values exactly
-	// ("CapacityPlanning"/"SandboxRunning"/"PromotionRunning"/
-	// "Succeeded"/"Failed"/the *LookupFailed reasons) for backward
-	// compatibility with existing tooling/dashboards. A profile that
-	// sets Spec.Stages explicitly gets fully generic values instead
-	// ("<CurrentStage>Running"/"Succeeded"/"Failed") -- see
-	// docs/REFACTOR_PLAN.md Phase 6.
+	// Phase is the coarse-grained onboarding phase. Always fully
+	// generic as of Phase 7 (REFACTOR_PLAN.md):
+	// "<CurrentStage>Running"/"Succeeded"/"Failed" (CurrentStage/
+	// Failed/Succeeded messages come from result.Message verbatim), or
+	// one of the *LookupFailed/*SetupFailed/NoStagesConfigured reasons
+	// for a config/lookup error. Prior to Phase 7, the synthesized
+	// default 3-stage sequence (defaultStages, now removed) got a
+	// special-cased set of pre-Phase-6 values instead
+	// ("CapacityPlanning"/"SandboxRunning"/"PromotionRunning") via a
+	// compatibility shim in internal/controller's computeWalkStatus --
+	// removed once every ModelLifecycleProfile in this repo migrated to
+	// declaring Spec.Stages explicitly. See docs/PHASE_LOG.md's Phase 7
+	// entry for the exact before/after values.
 	Phase string `json:"phase,omitempty"`
 	// CurrentStage is the ProfileStageSpec.Name the generic stage
 	// walker is currently on (or was on when the ModelRequest reached

@@ -12,19 +12,16 @@ type ModelLifecycleProfileSpec struct {
 	// names, service account, workspace bindings. Introduced in Phase
 	// 5 of REFACTOR_PLAN.md.
 	//
-	// This is additive, not a breaking change: when nil, the sandbox
-	// and promotion stages resolve their pipeline name exactly as
-	// before this field existed, via Workflow.PipelineRef/
-	// PromotionPipelineRef (now deprecated fallbacks, still fully
-	// honored) and the hardcoded execution defaults in
-	// internal/stages/tekton. Existing ModelLifecycleProfile objects
-	// need no changes to keep working.
-	//
-	// As of Phase 6, this field is only consulted to build the
-	// synthesized default Stages list (see defaultStages in
-	// internal/controller) when Stages is empty. A profile that sets
-	// Stages explicitly gives each ProfileStageSpec its own
-	// ProviderConfigRef instead; this top-level field is then ignored.
+	// DEPRECATED as of Phase 7: this top-level field is no longer
+	// consulted by Reconcile at all. It used to be the source
+	// defaultStages (Phase 6) copied onto each synthesized stage's own
+	// ProfileStageSpec.ProviderConfigRef when Stages was left empty;
+	// now that every profile must declare Stages explicitly (Phase 7),
+	// each ProfileStageSpec carries its own ProviderConfigRef directly
+	// instead. Left in place, non-functional, rather than removed --
+	// same treatment as WorkflowRef.Engine below -- since removing a
+	// field outright is a breaking CRD change this phase doesn't need
+	// to make. See docs/PHASE_LOG.md Phase 7.
 	ProviderConfigRef *ProviderConfigRef `json:"providerConfigRef,omitempty"`
 	PolicyRef         string             `json:"policyRef,omitempty"`
 	PlatformConfigRef string             `json:"platformConfigRef,omitempty"`
@@ -35,11 +32,23 @@ type ModelLifecycleProfileSpec struct {
 	// walker iterates instead of a hardcoded Go sequence. Introduced
 	// in Phase 6 of REFACTOR_PLAN.md.
 	//
-	// This is additive, not a breaking change: when nil/empty, the
-	// reconciler synthesizes the exact pre-Phase-6 3-stage sequence
-	// (capacity-planning -> sandbox -> promotion, see defaultStages in
-	// internal/controller) -- every existing ModelLifecycleProfile
-	// needs no changes to keep working.
+	// Functionally required as of Phase 7 (not yet enforced at the CRD
+	// schema level -- no +kubebuilder:validation:MinItems marker was
+	// added this phase, so an empty/missing Stages is still a
+	// syntactically valid object): the Phase 6 fallback that
+	// synthesized the pre-Phase-6 3-stage default sequence when this
+	// field was left empty (defaultStages, internal/controller) was
+	// removed once every ModelLifecycleProfile in this repo migrated to
+	// declaring Stages explicitly (see
+	// gitops/components/runtime-config/lifecycleprofile.yaml). A
+	// profile with no Stages configured now fails at reconcile time
+	// with a visible "NoStagesConfigured" ModelRequest status reason
+	// instead of silently walking zero stages. This is a real,
+	// deliberate breaking change for any ModelLifecycleProfile that was
+	// still relying on the implicit default -- see docs/PHASE_LOG.md's
+	// Phase 7 entry. Adding schema-level MinItems=1 for earlier
+	// (admission-time) feedback is a reasonable, low-risk follow-up,
+	// not done this phase.
 	Stages []ProfileStageSpec `json:"stages,omitempty"`
 }
 
@@ -130,6 +139,19 @@ type ProviderConfigRef struct {
 // ModelLifecycleProfile objects keep working unmodified. Prefer
 // ProviderConfigRef -> IntakeProviderConfig for new profiles.
 type WorkflowRef struct {
+	// Engine is DEPRECATED as of Phase 7 (REFACTOR_PLAN.md): it never
+	// drove any runtime dispatch even before this phase (routing
+	// between execution engines has always gone through
+	// ProfileStageSpec.Kind + the StageRunners registry, since Phase
+	// 6 -- confirmed by grep: no Go code outside this field's own
+	// declaration and the (now-repointed) printcolumn marker below
+	// ever read WorkflowRef.Engine). IntakeProviderConfigSpec.ProviderType
+	// is the field that actually carries functional weight today (a
+	// Go-level guard in internal/stages/tekton's resolveProviderDetails
+	// confirming a resolved IntakeProviderConfig is meant for the
+	// tekton StageRunner). Left in place, non-functional, rather than
+	// removed -- removing a field outright is a breaking CRD change
+	// this phase doesn't need to make. See docs/PHASE_LOG.md Phase 7.
 	Engine string `json:"engine"`
 	// PipelineRef was required prior to Phase 5; now optional so a
 	// profile can rely solely on ProviderConfigRef instead.
@@ -147,7 +169,7 @@ type ModelLifecycleProfileStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Engine",type=string,JSONPath=`.spec.workflow.engine`
+// +kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerConfigRef.name`
 // +kubebuilder:printcolumn:name="Pipeline",type=string,JSONPath=`.spec.workflow.pipelineRef`
 
 type ModelLifecycleProfile struct {

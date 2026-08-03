@@ -67,7 +67,7 @@ func TestModelRequest_FullLifecycle_DrivenEntirelyByFakeStageRunner_NoTektonInvo
 	// critically, no PipelineRun exists anywhere.
 	fakeRunner.ScriptStage("sandbox", stagecommon.StageStatus{Phase: stagecommon.StageRunning})
 	mr := reconcile()
-	require.Equal(t, "SandboxRunning", mr.Status.Phase)
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
 	require.Equal(t, "mr-1-sandbox", mr.Status.SandboxPipelineRunName,
 		"the reconciler still tracks the RunName it chose, even though no real object was ever created")
 	requireNoPipelineRuns(t, ns)
@@ -78,7 +78,7 @@ func TestModelRequest_FullLifecycle_DrivenEntirelyByFakeStageRunner_NoTektonInvo
 	fakeRunner.ScriptStage("sandbox", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
 	fakeRunner.ScriptStage("promotion-staging", stagecommon.StageStatus{Phase: stagecommon.StageRunning})
 	mr = reconcile()
-	require.Equal(t, "PromotionRunning", mr.Status.Phase)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
 	requireNoPipelineRuns(t, ns)
 
 	// Prove the reconciler built a real, correct StageSpec for the

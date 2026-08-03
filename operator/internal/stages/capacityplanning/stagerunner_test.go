@@ -135,10 +135,13 @@ func TestEnsureRun_ExistingPlan_PhaseSucceeded_ReturnsSucceeded(t *testing.T) {
 }
 
 func TestEnsureRun_ExistingPlan_PhaseFailed_ReturnsFailed(t *testing.T) {
-	// CapacityPlanReconciler never sets Phase="Failed" today (see
-	// docs/REFACTOR_PLAN.md Phase 7 backlog note) -- this pins the
-	// mapping for whenever it does, so Required:true is already
-	// meaningful for this stage without a second code change later.
+	// CapacityPlanReconciler now sets Phase="Failed" when
+	// Spec.MaxGPUsPerRequest is exceeded (Phase 7 of
+	// REFACTOR_PLAN.md) -- this mapping was pre-built starting in
+	// Phase 6, ready for exactly this producer. Constructed directly
+	// here (not via a real CapacityPlanReconciler run) since this
+	// package's own responsibility is only the StageStatus mapping,
+	// not reproducing CapacityPlanReconciler's own heuristic.
 	c := newFakeClient(t)
 	r := &StageRunner{Client: c, Scheme: testScheme(t)}
 	mr := newOwnerModelRequest("mr-1", "ns-1")
@@ -156,4 +159,18 @@ func TestEnsureRun_ExistingPlan_PhaseFailed_ReturnsFailed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, stagecommon.StageFailed, status.Phase)
 	require.Equal(t, "advisor unreachable", status.Message)
+}
+
+// TestStageRunner_DoesNotImplementOwnedTypesProvider is the structural
+// proof (Phase 7) that CapacityPlan ownership stays where it already
+// was (ModelRequestReconciler.SetupWithManager's explicit
+// .Owns(&modelopsv1alpha1.CapacityPlan{}) call -- CapacityPlan is a
+// core lifecycle CRD, not provider-specific) rather than being
+// generalized through stagecommon.OwnedTypesProvider the way
+// tekton.StageRunner's PipelineRun ownership is. See
+// docs/PHASE_LOG.md Phase 7.
+func TestStageRunner_DoesNotImplementOwnedTypesProvider(t *testing.T) {
+	var r stagecommon.StageRunner = &StageRunner{}
+	_, ok := r.(stagecommon.OwnedTypesProvider)
+	require.False(t, ok)
 }

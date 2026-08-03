@@ -35,6 +35,7 @@ func TestHandler_BuildSpec_UsesRequirementsAndPlatformConfigWithDefaults(t *test
 			ClusterPolicyName:     "cluster-policy",
 			TimeSlicingConfigMap:  "ts-cm",
 			MaxTimeSlices:         4,
+			MaxGPUsPerRequest:     6,
 		},
 	}
 
@@ -63,6 +64,7 @@ func TestHandler_BuildSpec_UsesRequirementsAndPlatformConfigWithDefaults(t *test
 	require.Equal(t, "cluster-policy", native.ClusterPolicyName)
 	require.Equal(t, "ts-cm", native.TimeSlicingConfigMap)
 	require.Equal(t, 4, native.MaxTimeSlices)
+	require.Equal(t, 6, native.MaxGPUsPerRequest)
 }
 
 func TestHandler_BuildSpec_NilRequirements_UsesAllDefaults(t *testing.T) {
@@ -84,6 +86,7 @@ func TestHandler_BuildSpec_NilRequirements_UsesAllDefaults(t *testing.T) {
 	require.False(t, native.AllowMIG)
 	require.Equal(t, "dedicated", native.IsolationPolicy)
 	require.Equal(t, 8, native.MaxTimeSlices)
+	require.Equal(t, 0, native.MaxGPUsPerRequest, "unset MaxGPUsPerRequest must not gain a default -- 0 means no configured ceiling")
 }
 
 func TestHandler_BuildSpec_SetsModelRefFromModelRequestName(t *testing.T) {

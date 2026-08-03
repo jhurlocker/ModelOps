@@ -37,3 +37,14 @@ func TestEnsureRun_RepeatedCalls_KeepReturningSucceeded(t *testing.T) {
 		require.Equal(t, stagecommon.StageSucceeded, status.Phase, "call %d", i)
 	}
 }
+
+// TestStageRunner_DoesNotImplementOwnedTypesProvider is the structural
+// proof (Phase 7) that noop.StageRunner needs "close to none" RBAC/
+// manager-wiring: it creates no child object of any kind, so it has
+// nothing to declare via stagecommon.OwnedTypesProvider. See
+// docs/PHASE_LOG.md Phase 7.
+func TestStageRunner_DoesNotImplementOwnedTypesProvider(t *testing.T) {
+	var r stagecommon.StageRunner = &StageRunner{}
+	_, ok := r.(stagecommon.OwnedTypesProvider)
+	require.False(t, ok)
+}

@@ -20,12 +20,6 @@ rules:
   - apiGroups:
       - modelops.example.io
     resources:
-      - modelrequests/finalizers
-    verbs:
-      - update
-  - apiGroups:
-      - modelops.example.io
-    resources:
       - modelrequests/status
     verbs:
       - get
@@ -61,18 +55,9 @@ rules:
       - capacityplans
     verbs:
       - create
-      - delete
       - get
       - list
-      - patch
-      - update
       - watch
-  - apiGroups:
-      - modelops.example.io
-    resources:
-      - capacityplans/finalizers
-    verbs:
-      - update
   - apiGroups:
       - modelops.example.io
     resources:

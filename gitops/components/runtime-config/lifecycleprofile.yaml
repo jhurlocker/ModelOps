@@ -8,17 +8,53 @@ spec:
     accessRole: view
     authorizedViewers: ""
   platformConfigRef: default-modelops-platform
-  # providerConfigRef is Phase 5's live resolution path (REFACTOR_PLAN.md):
-  # sandbox/promotion pipeline names, service account, and workspace
-  # bindings are resolved from this IntakeProviderConfig object instead
-  # of workflow.pipelineRef below.
+  # providerConfigRef (top-level) is now DEPRECATED and non-functional as
+  # of Phase 7 (REFACTOR_PLAN.md): Reconcile no longer reads this field at
+  # all -- it used to be the source the now-removed defaultStages() copied
+  # onto each synthesized stage's own providerConfigRef. Kept in place
+  # (matching the same non-removal treatment as workflow.engine below)
+  # since deleting a field outright is a breaking CRD change this phase
+  # doesn't need to make; the two providerConfigRef entries under
+  # spec.stages below are what Reconcile actually resolves now.
   providerConfigRef:
     name: standard-generative-onboarding-provider
-  # workflow.pipelineRef is now inert: kept in place, deliberately not
-  # removed, only as the DEPRECATED fallback that would apply if
-  # providerConfigRef above were ever unset -- proving the precedence
-  # (providerConfigRef wins) end to end on the sandbox cluster rather
-  # than just in envtest.
+  # workflow.pipelineRef is inert: kept in place, deliberately not
+  # removed, only as the DEPRECATED fallback that would apply if a
+  # stage's own providerConfigRef were ever unset -- proving the
+  # precedence (providerConfigRef wins) end to end on the sandbox
+  # cluster rather than just in envtest.
   workflow:
     engine: tekton
     pipelineRef: model-intake-sandbox
+  # stages is REQUIRED as of Phase 7: the Phase 6 fallback that
+  # synthesized this exact 3-stage sequence automatically whenever this
+  # field was left empty (defaultStages, internal/controller) was
+  # removed once this profile -- the only one in this repo -- migrated to
+  # declaring it explicitly, here. This is the live, git-committed
+  # migration referenced throughout docs/PHASE_LOG.md's Phase 7 entry;
+  # verified end to end against the sandbox cluster via
+  # Application/modelops-runtime-config, not just envtest. The shape
+  # below is a mechanical, field-for-field copy of what defaultStages()
+  # used to synthesize in Go.
+  stages:
+    - name: capacity
+      kind: CapacityPlan
+    - name: sandbox
+      kind: PipelineRun
+      providerConfigRef:
+        name: standard-generative-onboarding-provider
+      namespaceSetup:
+        ensureRBAC: true
+        labels:
+          evalhub.trustyai.opendatahub.io/tenant: ""
+    - name: promotion
+      kind: PipelineRun
+      providerConfigRef:
+        name: standard-generative-onboarding-provider
+      perNamespace: true
+      namespaceSetup:
+        ensureRBAC: true
+        labels:
+          opendatahub.io/generated-namespace: "true"
+          maas.opendatahub.io/gateway-access: "true"
+          opendatahub.io/dashboard: "true"

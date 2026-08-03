@@ -4,6 +4,8 @@ import (
 	"context"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // StagePhase is the generic outcome of a single lifecycle stage run,
@@ -124,6 +126,28 @@ type StageSpec struct {
 // today; a future SageMaker/Databricks equivalent later).
 type StageRunner interface {
 	EnsureRun(ctx context.Context, req *modelopsv1alpha1.ModelRequest, stage StageSpec) (StageStatus, error)
+}
+
+// OwnedTypesProvider is an optional capability a StageRunner may
+// implement to declare which child object types its EnsureRun
+// implementation creates, so ModelRequestReconciler.SetupWithManager
+// can register a generic .Owns() watch for each one without importing
+// an execution-engine-specific package itself (e.g. tektonv1) purely
+// for manager-wiring purposes.
+//
+// Not every StageRunner needs this: noop.StageRunner creates nothing
+// and implements nothing here (needs "close to none" RBAC/wiring, per
+// docs/REFACTOR_PLAN.md Phase 7). capacityplanning.StageRunner's owned
+// type (CapacityPlan) is also NOT declared through this interface --
+// CapacityPlan is a core lifecycle CRD (api/v1alpha1), not
+// provider-specific, so ModelRequestReconciler.SetupWithManager already
+// owns that .Owns() call explicitly and unconditionally. This interface
+// exists specifically for the residual tektonv1 import Phase 4 flagged
+// ("a natural candidate for Phase 5/7... a provider-agnostic 'which
+// child types does this StageRunner own' hook") -- tekton.StageRunner
+// is, today, this interface's only implementation.
+type OwnedTypesProvider interface {
+	OwnedTypes() []client.Object
 }
 
 // StageContext is everything a StageHandler needs to build the
