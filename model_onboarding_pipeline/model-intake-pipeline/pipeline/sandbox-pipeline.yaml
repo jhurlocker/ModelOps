@@ -25,7 +25,12 @@ spec:
     - name: model-tokenizer
       type: string
       default: ""
-      description: "Hugging Face tokenizer ID for GuideLLM benchmarks"
+      description: >-
+        Optional Hugging Face id used by gpu-advisor to resolve real
+        architecture shape for KV-cache sizing, when model-id itself
+        isn't a resolvable Hugging Face id (e.g. an OCI/modelcar tag).
+        Not currently consumed by guidellm-benchmark, which resolves
+        tokenization server-side via EvalHub from model-name instead.
     - name: model-source-type
       type: string
       default: "huggingface"
@@ -227,6 +232,8 @@ spec:
       params:
         - name: model-id
           value: $(params.model-id)
+        - name: model-tokenizer
+          value: $(params.model-tokenizer)
         - name: plan-id
           value: $(context.pipelineRun.name)-sandbox
         - name: environment

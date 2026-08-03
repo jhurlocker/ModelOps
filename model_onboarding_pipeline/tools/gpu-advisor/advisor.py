@@ -130,7 +130,8 @@ def discover_gpu_inventory(nodes_json_file, pods_json_file):
     }, node_gpus, largest_free, min_mem
 
 
-def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, total_free):
+def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, total_free,
+                          hf_config_id=None):
     param_map = {
         "70b": 70e9, "33b": 33e9, "32b": 32e9, "13b": 13e9,
         "8b": 8e9, "7b": 7e9, "6.9b": 6.9e9, "3b": 3e9, "2b": 2e9, "1b": 1e9
@@ -142,19 +143,36 @@ def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, tot
             param_count = v
             break
 
+    # hf_config_id lets the caller supply a real Hugging Face id to
+    # resolve architecture shape (layers/hidden size/heads) when
+    # model_id itself isn't one -- e.g. an OCI/modelcar tag like
+    # "granite-3.3-2b-instruct" that's missing its "ibm-granite/" org
+    # prefix (the modelcar catalog's naming convention drops it).
+    # Falls back to model_id, matching prior behavior, if not supplied.
+    config_lookup_id = (hf_config_id or "").strip() or model_id
+
+    assumptions = []
     try:
         from transformers import AutoConfig
-        cfg = AutoConfig.from_pretrained(model_id, use_fast=True, trust_remote_code=False)
+        cfg = AutoConfig.from_pretrained(config_lookup_id, use_fast=True, trust_remote_code=False)
         num_layers = getattr(cfg, "num_hidden_layers", 32)
         hidden_size = getattr(cfg, "hidden_size", 4096)
         num_heads = getattr(cfg, "num_attention_heads", 32)
         num_kv_heads = getattr(cfg, "num_key_value_heads", num_heads)
         head_dim = hidden_size // num_heads
-        print(f"  Loaded config: {hidden_size} hidden, {num_layers} layers, {num_heads} heads, {num_kv_heads} KV heads")
+        print(f"  Loaded config ({config_lookup_id}): {hidden_size} hidden, {num_layers} layers, {num_heads} heads, {num_kv_heads} KV heads")
     except Exception as e:
-        print(f"  Could not load config ({e}). Using defaults.")
+        print(f"  Could not load config for '{config_lookup_id}' ({e}). Using generic defaults.")
         num_layers, hidden_size, num_heads, num_kv_heads = 32, 4096, 32, 32
         head_dim = 128
+        assumptions.append(
+            f"Could not resolve a Hugging Face config for '{config_lookup_id}' -- "
+            "KV-cache sizing uses a generic ~7B-class architecture shape "
+            "(32 layers, 4096 hidden, 32 heads), which may significantly "
+            "over- or under-estimate memory for models of a different "
+            "shape. Provide a real Hugging Face id (Tokenizer field / "
+            "model-tokenizer param) for an accurate estimate."
+        )
 
     weight_gb = (param_count * 2) / 1e9
     kv_bytes_per_tok = 2 * num_layers * num_kv_heads * head_dim * 2
@@ -164,6 +182,8 @@ def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, tot
 
     print(f"  Param estimate: {param_count / 1e9:.1f}B, Weight (BF16): {weight_gb:.2f} GB, KV cache: {kv_gb:.2f} GB")
     print(f"  Overhead: {overhead_gb:.2f} GB, Total per replica: {total_gb:.2f} GB")
+    if assumptions:
+        print(f"  ASSUMPTION (low confidence): {assumptions[0]}")
 
     options = []
     if total_gb <= min_mem and node_gpus:
@@ -198,7 +218,9 @@ def local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, tot
         "param_count": param_count,
         "estimated_total_memory_gb": total_gb,
         "options": options,
-        "sources": ["local heuristic sizing (no web research performed)"]
+        "sources": ["local heuristic sizing (no web research performed)"],
+        "confidence": "low" if assumptions else "high",
+        "assumptions": assumptions,
     }
 
 
@@ -233,7 +255,8 @@ class BudgetExhaustedError(ValueError):
 
 def remote_recommendation(gpu_inventory, model_id, ctx_len, concurrency,
                           isolation, allow_ts, allow_mig, plan_id, target_ns,
-                          advisor_endpoint, advisor_api_key, advisor_timeout):
+                          advisor_endpoint, advisor_api_key, advisor_timeout,
+                          hf_config_id=None):
     import requests
 
     headers = {"Content-Type": "application/json"}
@@ -256,6 +279,11 @@ def remote_recommendation(gpu_inventory, model_id, ctx_len, concurrency,
     user_payload = {
         "plan_id": plan_id,
         "model_id": model_id,
+        # Optional real Hugging Face id, when model_id itself isn't one
+        # (e.g. an OCI/modelcar tag) -- helps the remote advisor reason
+        # about actual architecture shape rather than guessing from the
+        # deployment artifact identifier.
+        "model_hf_config_id": (hf_config_id or "").strip() or None,
         "target_namespace": target_ns,
         "expected_context_length": ctx_len,
         "expected_concurrency": concurrency,
@@ -302,6 +330,8 @@ def remote_recommendation(gpu_inventory, model_id, ctx_len, concurrency,
                 "estimated_total_memory_gb": data.get("estimated_total_memory_gb", 0) or 0,
                 "options": options,
                 "sources": [f"remote agentic LLM ({advisor_model_id})"],
+                "confidence": "high",
+                "assumptions": [],
                 "raw_response": data}
 
     max_tokens = 6144
@@ -401,6 +431,11 @@ def plan_gpu_sharing(node_gpus, total_free, total_gb, param_count, allow_ts,
 
 def main():
     model_id = os.environ["MODEL_ID"]
+    # Optional real Hugging Face id for architecture-config lookup, when
+    # MODEL_ID isn't a resolvable HF id (e.g. an OCI/modelcar tag).
+    # Empty by default -- see gpu-advisor-task.yaml's model-tokenizer
+    # param description for the full rationale.
+    hf_config_id = os.environ.get("MODEL_TOKENIZER", "").strip()
     target_ns = os.environ["TARGET_NS"]
     ctx_len = int(os.environ["CTX_LEN"])
     concurrency = int(os.environ["CONCURRENCY"])
@@ -433,13 +468,16 @@ def main():
                 gpu_inventory, model_id, ctx_len, concurrency,
                 isolation, allow_ts, allow_mig, plan_id, target_ns,
                 advisor_endpoint, advisor_api_key, advisor_timeout,
+                hf_config_id=hf_config_id,
             )
         except Exception as e:
             print(f"ERROR calling advisor endpoint: {e}", file=sys.stderr)
             print("Falling back to local heuristic sizing.", file=sys.stderr)
-            result = local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, largest_free)
+            result = local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, largest_free,
+                                           hf_config_id=hf_config_id)
     else:
-        result = local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, largest_free)
+        result = local_recommendation(model_id, ctx_len, concurrency, node_gpus, min_mem, largest_free,
+                                       hf_config_id=hf_config_id)
 
     options = result["options"]
     param_count = result.get("param_count", 0) or 0
@@ -481,15 +519,31 @@ def main():
             "vllm_flags": [],
         }]
 
+    confidence = result.get("confidence", "high")
+    assumptions = result.get("assumptions") or []
+
     blocked = (not options) or (options[0].get("status") == "blocked")
     if blocked:
         print(f"DEBUG: blocked=True options={options} sharing_plan={json.dumps({k: v for k, v in sharing_plan.items() if k != 'coresident_models'})}")
+        if confidence == "low":
+            print("WARN: this BLOCKED verdict is based on a LOW-CONFIDENCE estimate -- "
+                  "the sizing math used a guessed generic architecture shape, not the "
+                  "model's real config. See ASSUMPTION line(s) above before treating "
+                  "this as a definitive capacity conclusion:")
+            for a in assumptions:
+                print(f"  - {a}")
 
     # Write outputs
     with open("gpu-inventory.json", "w") as f:
         json.dump(gpu_inventory, f, indent=2)
     with open("deployment-options.json", "w") as f:
-        json.dump({"plan_id": plan_id, "recommended": options[0]["name"] if options else "none", "options": options}, f, indent=2)
+        json.dump({
+            "plan_id": plan_id,
+            "recommended": options[0]["name"] if options else "none",
+            "options": options,
+            "confidence": confidence,
+            "assumptions": assumptions,
+        }, f, indent=2)
     with open("gpu-sharing-plan.json", "w") as f:
         json.dump(sharing_plan, f, indent=2)
 
@@ -534,6 +588,9 @@ def main():
         summary.append(f"**Estimated parameters**: {param_count / 1e9:.1f}B")
     if total_gb:
         summary.append(f"**Estimated memory**: {total_gb:.2f} GB")
+    summary.append(f"**Confidence**: {confidence.upper()}")
+    for a in assumptions:
+        summary.append(f"**Assumption**: {a}")
     physical = gpu_inventory.get("physical", gpu_inventory["total"])
     if physical != gpu_inventory["total"]:
         summary.append(f"**Cluster**: {gpu_inventory['total']} time-slices ({physical} physical GPU{'s' if physical > 1 else ''}), {gpu_inventory['free']} free")

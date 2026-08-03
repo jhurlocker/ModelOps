@@ -27,6 +27,21 @@ spec:
     - name: model-id
       type: string
       description: "Hugging Face model ID"
+    - name: model-tokenizer
+      type: string
+      default: ""
+      description: >-
+        Optional Hugging Face id to use for architecture-config lookup
+        (num layers/hidden size/heads, used for KV-cache sizing), when
+        model-id itself is not a resolvable Hugging Face id -- e.g. an
+        OCI/modelcar tag such as "granite-3.3-2b-instruct" (missing its
+        org prefix, since the modelcar catalog's naming convention
+        drops it). When empty, falls back to model-id, matching prior
+        behavior. When the effective id (this or model-id) can't be
+        resolved either, the advisor falls back to a generic 7B-class
+        architecture shape for KV-cache sizing and explicitly flags the
+        resulting estimate as a low-confidence assumption rather than
+        silently presenting it as precise.
     - name: plan-id
       type: string
       default: "$(context.taskRun.name)"
@@ -135,11 +150,13 @@ spec:
         echo "Inventory captured: gpu_nodes.json, all_pods.json"
 
     - name: run-advisor
-      image: quay.io/jhurlocker/gpu-advisor:v0.1.3
+      image: quay.io/jhurlocker/gpu-advisor:v0.1.4
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_ID
           value: $(params.model-id)
+        - name: MODEL_TOKENIZER
+          value: $(params.model-tokenizer)
         - name: TARGET_NS
           value: $(params.target-namespace)
         - name: ENVIRONMENT
