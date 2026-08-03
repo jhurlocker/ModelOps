@@ -2455,3 +2455,227 @@ Per the user's explicit instruction: Phase 7 was the last plan-doc phase
 besides Phase 8 (stretch). Phase 8 was not started automatically --
 flagged here as a separate decision to be made once this Phase 7 entry
 is reviewed, exactly as instructed.
+
+---
+
+## Out-of-band task — model-intake-ui fixes and README.md rewrite
+
+**Commits:** `8522c27` ("model-intake-ui: fix Phase display regression,
+add stage progress/provider display, fix gpuCountOverride type bug") and
+`b486be7` ("docs: rewrite README.md as a grounded, public-facing
+explanation") on `feat/model-request-controller`. **Explicitly not a
+`REFACTOR_PLAN.md` phase** -- a separate, scoped task with two
+independent parts, done as two commits per the user's request. No Go
+code, CRD, or manifest changed; `make manifests generate` was not run
+(nothing under `operator/api` or `operator/config` touched).
+
+### Part 1 — model-intake-ui fixes
+
+The UI is a demo/visualization tool, not core to the solution -- kept
+deliberately small and scoped, no new abstractions beyond what each fix
+needed.
+
+1. **Status.Phase display regression, fixed.** Since Phase 7's live
+   profile migration (see that phase's entry above),
+   `ModelRequest.Status.Phase` is fully generic and lowercase-prefixed
+   (`"sandboxRunning"`/`"promotionRunning"`) instead of the old bespoke
+   strings the templates were written against
+   (`"SandboxRunning"`/`"PromotionRunning"`). `requests/list.html` and
+   `requests/detail.html` rendered this raw string directly.
+
+   New `app/status_display.py` (+3 Jinja filters registered in
+   `app/__init__.py`): `status_label(status)` prefers a humanized
+   `Status.CurrentStage` (e.g. `"sandbox"` -> `"Sandbox"`) over the raw
+   `Phase` string, falling back to `Phase` verbatim in two cases --
+   empty `CurrentStage` (a pre-Phase-6 status shape, or a lookup/setup
+   failure that never reached the stage walker), **and** the two
+   genuine terminal outcomes (`"Succeeded"`/`"Failed"`).
+
+   The terminal-outcome exception is a deliberate, reviewed deviation
+   from a fully literal reading of "always prefer CurrentStage when
+   non-empty": `internal/stagewalk.Walk` does NOT clear
+   `Status.CurrentStage` on a `Failed` outcome -- it stays set to
+   whichever stage actually failed (confirmed against a live `Failed`
+   `ModelRequest` on the sandbox cluster: `currentStage: sandbox`,
+   `phase: Failed`). A fully literal implementation would show
+   "Sandbox" (colored red) for a failed request instead of "Failed",
+   silently losing the terminal outcome from the primary label. Raised
+   with the user before implementing (via the question tool); the
+   user chose showing Phase verbatim for both terminal values,
+   confirmed as the recommended option. (On success, `Walk` *does*
+   clear `CurrentStage` to `""`, so this asymmetry only bites the
+   `Failed` case in practice -- also confirmed live.) `status_badge_class`
+   is keyed off the raw `Phase` (not `CurrentStage`, which carries no
+   success/failure information): `Succeeded`/`Failed` get their own
+   classes, anything ending in `"Running"` gets `badge-info`, and any
+   other value (the `*LookupFailed`/`*SetupFailed`/`NoStagesConfigured`
+   reasons) gets `badge-warning` (blocked/needs-attention, not
+   necessarily permanent -- several of these retry on a bounded
+   requeue per Phase 7).
+
+2. **Per-stage progress display, added.** `requests/detail.html` gains
+   a "Stage Progress" card rendering `Status.Stages[]` (Phase 6) as an
+   ordered table: stage name (humanized), namespace, phase (its own
+   small badge), message. This is the first UI surface for this data
+   since it was introduced three phases ago.
+
+3. **Read-only "Provider" field, added.** `requests/detail.html` gains
+   a "Provider" card showing, per stage declared on the request's
+   resolved `ModelLifecycleProfile`, which `IntakeProviderConfig` it
+   points at (or the legacy inline `pipelineRef`/`promotionPipelineRef`
+   fallback, labeled "deprecated", when a stage has no
+   `providerConfigRef` of its own) -- mirroring
+   `internal/stages/tekton/providerconfig.go`'s `resolveProviderDetails`
+   at the display layer. Deliberately does NOT fetch the referenced
+   `IntakeProviderConfig` object itself: the UI's `ServiceAccount`
+   (`gitops/components/model-intake-ui/deployment.yaml`) has RBAC for
+   `modellifecycleprofiles` but not `intakeproviderconfigs`, and adding
+   that would have been scope creep for a read-only display field --
+   this only reports what the profile's own spec says it resolves to.
+   `app/routes/requests.py`'s `request_detail` fetches the profile via
+   a new `get_lifecycle_profile` (added to
+   `app/kubernetes/model_requests.py`, alongside the existing
+   `list_lifecycle_profiles`) and degrades gracefully (empty
+   `provider_rows`, rest of the page still renders) if the profile was
+   deleted/renamed -- confirmed live against a real `ProfileLookupFailed`
+   `ModelRequest` on the sandbox cluster referencing a profile that
+   doesn't exist.
+
+4. **`gpuCountOverride` type bug, fixed and confirmed pre-existing.**
+   `ModelRequirements.GPUConfig.GPUCountOverride` has always been a
+   `string` field on the CRD (Phase 2 of `REFACTOR_PLAN.md`), but
+   `app/routes/intake.py`'s `submit()` sent it as a Python `int`.
+   Confirmed this was a hard, pre-existing failure, not silent
+   coercion -- both via a direct `kubectl`/`oc apply` with a bare YAML
+   integer and via the exact `kubernetes` Python client call path
+   `create_model_request` uses, against the real sandbox-cluster API
+   server: `422 Unprocessable Entity`, `"must be of type string"`.
+   Every wizard submission that set a GPU override was failing
+   `create_model_request` outright (an unhandled exception in the
+   Flask request, not a silently-wrong value). Fixed by sending the
+   raw string straight through.
+
+**Sandbox cluster verification (all of Part 1).** Confirmed
+`Application/model-intake-ui` (namespace `openshift-gitops`) exists,
+tracks `feat/model-request-controller` at
+`gitops/components/model-intake-ui`, deploys into the `sandbox`
+namespace via Kustomize, auto-sync + self-heal enabled -- and found it
+stuck at sync status `Unknown` (not just `OutOfSync`), because
+`gitops/components/model-intake-ui/deployment.yaml` has had a malformed
+`stringData` value (`DEFAULT_S3_ACCESS_KEY: " "minioadmin"` -- an extra
+leading `" "` before the real value) since Phase 1, which fails
+`kustomize build` outright and has silently blocked ArgoCD from
+computing a diff at all since Phase 1 first flagged (but didn't fix)
+this Application being broken. Fixed as part of this task, since it
+directly blocked doing the live verification this task's instructions
+asked for:
+
+- Fixed the malformed YAML; confirmed `kubectl kustomize
+  gitops/components/model-intake-ui` succeeds.
+- Pushed both commits; hard-refreshed `Application/model-intake-ui` --
+  reached `Synced`/`Healthy` for the first time since Phase 1 (previous
+  state: `Unknown`/`Healthy`).
+- Ran this session's exact changed application code directly against
+  the live sandbox-cluster API server (Flask test client, real
+  kubeconfig, no mocking) against real existing `ModelRequest` objects
+  spanning every interesting status shape: `Failed` (confirmed primary
+  label reads "Failed", not "Sandbox"), `Succeeded` (label reads
+  "Succeeded"), `SecretLookupFailed` (label falls back to the raw
+  reason verbatim, no Stage Progress card since `Status.Stages` is
+  empty), `ProfileLookupFailed` referencing a since-deleted profile
+  (Provider card omitted, rest of the page still renders -- the
+  graceful-degradation path). Confirmed the Stage Progress and Provider
+  tables render with real data (stage names, namespaces, phases,
+  messages; resolved `standard-generative-onboarding-provider` for the
+  `sandbox`/`promotion` stages).
+- Built and pushed a new `quay.io/jhurlocker/model-intake-ui:latest`
+  image from this session's code (the `Deployment` runs from this
+  pre-built tag with `imagePullPolicy: Always`, same convention as
+  every operator-image rebuild in earlier phases); `kubectl rollout
+  restart` picked it up. Hit the real `Route` (not the local test
+  client) directly with `curl` against the live pod: the "Failed"
+  request's detail page shows the "Failed" primary badge and both new
+  cards render.
+- Submitted a real `ModelRequest` with a GPU override two ways against
+  the live pod: once via a direct Python `kubernetes`-client call
+  reproducing `create_model_request`'s exact call shape (confirmed the
+  pre-fix `int` value gets a `422` from the real API server, then that
+  the post-fix `str` value is accepted), and once via a real HTTP `POST`
+  to the live Route's `/intake/submit` (the actual wizard's code path,
+  end to end) -- both created a real `ModelRequest` with
+  `spec.requirements.gpuCountOverride: "3"` (string). Both disposable
+  objects were deleted afterward.
+
+### Part 2 — README.md rewrite
+
+Full rewrite (not an edit): the previous README described a
+pre-refactor "Enterprise AI Lifecycle Platform" module tree
+(catalog/application-development/optimization/governance entries that
+don't correspond to anything in this repo), a hardcoded 3-phase pipeline
+table, and setup steps referencing CRD fields removed in Phase 1
+(`resultS3AccessKey`/`resultS3SecretKey`). Per the task's own
+instructions, a section outline (including a description of what each
+diagram would show) was proposed and reviewed before writing full
+prose; the user approved it with one optional addition (a horizontal
+7-stage Mermaid diagram in the scope section, in addition to the
+already-planned table), which is included.
+
+Final structure: (1) what this is -- a governance/orchestration control
+plane, not a platform replacement, stating plainly the CRDs+operator are
+the product and the tools underneath are swappable; (2) an explicit
+"this repo's Tekton/RHOAI implementation is a reference architecture,
+not the solution" callout, pointing at `internal/stages/tekton` as the
+concrete adapter example and `internal/stages/noop` as the
+seam-is-real proof; (3) a Mermaid architecture diagram (CRDs -> core
+reconciler/stage walker depending only on the `StageHandler`/
+`StageRunner` contract -> one real Tekton provider box, one
+illustrative/not-implemented box); (4) an explicit "only model intake
+is implemented" scope statement, a horizontal Mermaid lifecycle diagram
+(intake solid/filled, six future stages dashed/grayed) plus a table
+confirming no CRD/controller/code exists yet for any of the six; (5) a
+CRD reference for all five CRDs that exist today, each grounded in the
+actual current `api/v1alpha1` types (not a simplified/outdated shape)
+with a short example YAML -- `ModelRequest`'s and
+`IntakeProviderConfig`'s trimmed from real samples already in the repo,
+`PlatformConfig`'s trimmed from its real sample, `CapacityPlan`'s drawn
+from a real object observed on the sandbox cluster
+(`granite-2b-onboarding-capacity`); (6) operator architecture --
+package layout table, the `StageHandler`-builds-*what*-vs.-`StageRunner`
+-executes-*how* distinction, how the generic walker drives
+`profile.Spec.Stages`, and a "how to add a new provider" walkthrough
+referencing `noop` (minimal) and `tekton` (real) plus `docs/RBAC.md`
+for the permission-attribution side; (7) getting started, pointing at
+`gitops/applications` (the app-of-apps) and `gitops/components` (what
+each `Application` actually syncs), stating plainly this is
+ArgoCD-deployed, not `kubectl apply`-deployed; (8) a pointer to
+`docs/REFACTOR_PLAN.md`/`docs/PHASE_LOG.md` for implementation history,
+deliberately not duplicated in the README itself.
+
+No sandbox-cluster verification needed for this part -- it's a
+documentation file with no runtime behavior; every factual claim in it
+(CRD field names/shapes, package names, file paths) was grounded by
+reading the actual current `operator/api/v1alpha1/*_types.go` source
+and, for the CapacityPlan example specifically, a real object on the
+live sandbox cluster, rather than by re-deriving it from memory or from
+the old README's (stale) descriptions.
+
+### Known follow-up NOT done in this task
+
+- The model-intake-ui's list-page phase filter dropdown
+  (`requests/list.html`'s `<select>` offering
+  `Pending`/`Evaluating`/`Deploying`/`Completed`/`Failed`) has been
+  inert since before this task -- `app/routes/requests.py`'s
+  `list_page()` never reads a `phase` query parameter at all, and none
+  of those five values match any `Phase`/reason string the operator
+  actually produces post-Phase-7. Noticed while fixing the badge
+  logic in the same file; left alone as a pre-existing, unrelated gap
+  outside this task's explicit scope (the task named `list.html`'s
+  Phase *display*, not its filtering).
+- `docs/RBAC.md`, `docs/REFACTOR_PLAN.md`, and `docs/PHASE_LOG.md`
+  itself were not rewritten or trimmed -- the task was explicit that
+  these remain the detailed internal record and the README should
+  point to them, not absorb or duplicate their content.
+- No second real provider adapter (SageMaker/Databricks) exists;
+  the README's second provider box and the `noop` walkthrough are
+  both explicitly labeled illustrative/minimal, not implied to be
+  more than they are.
