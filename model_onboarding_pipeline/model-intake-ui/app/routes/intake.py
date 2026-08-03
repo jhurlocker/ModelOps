@@ -64,23 +64,60 @@ REQUIRED_SECRET_FIELDS = [
     ("result-s3-secret-name", "Result S3 Secret Name"),
 ]
 
+# Which wizard step (0-indexed: 0=Model, 1=Workload, 2=Governance,
+# 3=Review) each validated field lives on, so an error re-render can
+# land the user on the step containing the actual problem field
+# instead of always jumping to Review.
+FIELD_STEP = {
+    "model-id": 0,
+    "scan-s3-secret-name": 3,
+    "result-s3-secret-name": 3,
+}
+
 
 def _validate_required_secrets(form_data):
+    """Returns a list of (field_name, message) tuples."""
     errors = []
     for field, label in REQUIRED_SECRET_FIELDS:
         if not form_data.get(field, "").strip():
-            errors.append(
+            errors.append((field, (
                 f"{label} is required (Governance step -> Show expert overrides -> "
                 "S3 Connection Override). No default credential is used if this is "
                 "left blank -- the request will fail once it reaches the sandbox stage."
-            )
+            )))
+    return errors
+
+
+def _validate_model_source_uri(model_source, model_uri):
+    """Catches a Hugging Face model-id that is actually a URL or OCI
+    image reference (e.g. pasted from a quay.io/registry link while
+    "Model Source" was left at its "Hugging Face" default). A bare HF
+    repo id ("org/name") never contains "://" or ":" -- if it does,
+    the value is a URL/OCI ref, and every downstream consumer that
+    derives an image tag from spec.model.uri (compliance-inspect's
+    SHORT_TAG/ORG_TAG, deploy_model.py's _resolve_modelcar_uri) assumes
+    a bare id and produces a malformed reference otherwise. Returns a
+    list of (field_name, message) tuples, same shape as
+    _validate_required_secrets, so both can be merged.
+    """
+    errors = []
+    if model_source == "huggingface" and model_uri and (
+        "://" in model_uri or ":" in model_uri
+    ):
+        errors.append(("model-id", (
+            f"Model ID (\"{model_uri}\") looks like a URL or OCI image reference, "
+            "not a Hugging Face repo id (e.g. \"ibm-granite/granite-3.3-2b-instruct\"). "
+            "If you're referencing a container image or OCI artifact, switch "
+            "\"Model Source\" (Model step) to \"OCI Container Registry\" first."
+        )))
     return errors
 
 
 @intake_bp.route("/")
 def intake_form():
     return render_template(
-        "intake/wizard.html", defaults=_base_form_defaults(), errors=[], active_page="intake",
+        "intake/wizard.html", defaults=_base_form_defaults(),
+        errors=[], error_fields=set(), start_step=0, active_page="intake",
     )
 
 
@@ -88,20 +125,31 @@ def intake_form():
 def submit():
     form_data = request.form.to_dict()
 
-    errors = _validate_required_secrets(form_data)
-    if errors:
-        # Re-render with exactly what was submitted (not silently
-        # repopulated with defaults) so the user can see which field(s)
-        # are actually empty, rather than just being told "something is
-        # wrong" -- overlaying onto _base_form_defaults() only fills in
-        # keys the form itself never sends (e.g. an unchecked checkbox).
-        defaults = {**_base_form_defaults(), **form_data}
-        return render_template(
-            "intake/wizard.html", defaults=defaults, errors=errors, active_page="intake",
-        ), 400
-
     model_source = form_data.get("model-source", "huggingface")
     model_uri = form_data.get("model-id", "").strip()
+
+    field_errors = (
+        _validate_required_secrets(form_data)
+        + _validate_model_source_uri(model_source, model_uri)
+    )
+    if field_errors:
+        error_fields = {field for field, _ in field_errors}
+        errors = [message for _, message in field_errors]
+        # Land on the earliest step containing a problem field (Model
+        # step's model-id takes priority over Review step's secret
+        # fields, since fixing it first is usually required anyway).
+        start_step = min(FIELD_STEP.get(f, 3) for f in error_fields)
+        # Re-render with exactly what was submitted (not silently
+        # repopulated with defaults) so the user can see which field(s)
+        # are actually empty/wrong, rather than just being told
+        # "something is wrong" -- overlaying onto _base_form_defaults()
+        # only fills in keys the form itself never sends (e.g. an
+        # unchecked checkbox).
+        defaults = {**_base_form_defaults(), **form_data}
+        return render_template(
+            "intake/wizard.html", defaults=defaults, errors=errors,
+            error_fields=error_fields, start_step=start_step, active_page="intake",
+        ), 400
 
     if model_source == "oci":
         model_uri = _sanitize_oci_url(model_uri)

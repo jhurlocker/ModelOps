@@ -146,6 +146,17 @@ spec:
             REF="$BARE"
           fi
         else
+          # Strip any URL scheme before deriving a tag -- MODEL_ID is
+          # expected to be a bare Hugging Face org/name, but a URL can
+          # end up here (e.g. pasted into the wizard's Model ID field
+          # while Model Source was left at its Hugging Face default).
+          # Without this, a value like
+          # "https://quay.io/redhat-ai-services/modelcar-catalog:foo"
+          # produces a still-scheme-prefixed, colon-containing tag that
+          # gets appended after a second colon below, yielding a
+          # malformed double-tagged reference. Mirrors the scheme-strip
+          # already done for the explicit modelcar-image override above.
+          MODEL_ID="$(echo "$MODEL_ID" | sed -E 's#^(https?|docker|oci)://##')"
           SHORT_TAG="$(echo "${MODEL_ID##*/}" | tr '[:upper:]' '[:lower:]')"
           ORG_TAG="$(echo "$MODEL_ID" | tr '[:upper:]' '[:lower:]' | sed 's#/#--#g')"
 

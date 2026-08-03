@@ -95,8 +95,21 @@ def _resolve_modelcar_uri():
                 break
         return "oci://" + bare
 
-    short_tag = MODEL_ID.split("/")[-1].lower()
-    org_tag = MODEL_ID.lower().replace("/", "--")
+    # Strip any URL scheme before deriving a tag -- MODEL_ID is expected
+    # to be a bare Hugging Face org/name, but a URL can end up here
+    # (e.g. pasted into the wizard's Model ID field while Model Source
+    # was left at its Hugging Face default). Mirrors the scheme-strip
+    # already done for the explicit MODELCAR_IMAGE override above, and
+    # the identical fix applied to compliance-artifact-scan-task.yaml's
+    # compliance-inspect step, which has the same derivation logic.
+    model_id = MODEL_ID
+    for scheme in ("https://", "http://", "docker://", "oci://"):
+        if model_id.startswith(scheme):
+            model_id = model_id[len(scheme):]
+            break
+
+    short_tag = model_id.split("/")[-1].lower()
+    org_tag = model_id.lower().replace("/", "--")
     repo = "redhat-ai-services/modelcar-catalog"
 
     for candidate in (short_tag, org_tag):
@@ -104,7 +117,7 @@ def _resolve_modelcar_uri():
         if _tag_exists(candidate):
             return f"oci://quay.io/{repo}:{candidate}"
 
-    print(f"FATAL: no modelcar image found for '{MODEL_ID}'", file=sys.stderr)
+    print(f"FATAL: no modelcar image found for '{model_id}'", file=sys.stderr)
     sys.exit(1)
 
 
