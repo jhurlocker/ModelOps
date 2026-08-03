@@ -5,24 +5,9 @@ import (
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 	"github.com/stretchr/testify/require"
-	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 )
 
 func boolPtr(b bool) *bool { return &b }
-
-// paramsToMap converts a tektonv1.Params into a map[string]string,
-// failing outright if any param name appears more than once.
-func paramsToMap(t *testing.T, params tektonv1.Params) map[string]string {
-	t.Helper()
-	out := make(map[string]string, len(params))
-	for _, p := range params {
-		if _, exists := out[p.Name]; exists {
-			t.Fatalf("duplicate param %q in output", p.Name)
-		}
-		out[p.Name] = p.Value.StringVal
-	}
-	return out
-}
 
 func TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams(t *testing.T) {
 	spec := modelopsv1alpha1.ModelRequestSpec{
@@ -86,8 +71,7 @@ func TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams(t *test
 		ResultS3SecretKey: "result-secret",
 	}
 
-	params := BuildCommonModelParams(spec, reqs, cfg, secrets)
-	got := paramsToMap(t, params)
+	got := BuildCommonModelParams(spec, reqs, cfg, secrets)
 
 	want := map[string]string{
 		"model-id":                   "quay.io/models/foo:v1",
@@ -147,12 +131,7 @@ func TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty(t *testing.T) {
 	cfg := &modelopsv1alpha1.PlatformConfig{}
 	secrets := Secrets{}
 
-	params := BuildCommonModelParams(spec, reqs, cfg, secrets)
-
-	got := map[string]string{}
-	for _, p := range params {
-		got[p.Name] = p.Value.StringVal
-	}
+	got := BuildCommonModelParams(spec, reqs, cfg, secrets)
 
 	require.Equal(t, "unknown", got["model-name"], "defaults to \"unknown\" when Model.Name is empty")
 	require.Equal(t, "v1", got["model-version"], "defaults to \"v1\" when Model.Version is empty")

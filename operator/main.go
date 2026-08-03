@@ -6,6 +6,7 @@ import (
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 	"github.com/jhurlocker/modelops-operator/internal/controller"
+	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,6 +60,10 @@ func main() {
 	if err = (&controller.ModelRequestReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		StageRunner: &tektonstage.StageRunner{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelRequest")
 		os.Exit(1)

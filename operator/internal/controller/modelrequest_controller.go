@@ -50,6 +50,13 @@ func createIgnoringAlreadyExists(ctx context.Context, c client.Client, obj clien
 type ModelRequestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// StageRunner drives sandbox and promotion stage execution
+	// (Tekton PipelineRuns today via internal/stages/tekton.StageRunner,
+	// injected at manager setup; a fake implementation in tests -- see
+	// internal/stagecommon.StageRunner/REFACTOR_PLAN.md Phase 4). The
+	// reconciler never constructs a PipelineRun or reads a Tekton
+	// condition directly.
+	StageRunner stagecommon.StageRunner
 }
 
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests,verbs=get;list;watch;create;update;patch;delete
@@ -133,48 +140,32 @@ func (r *ModelRequestReconciler) Reconcile(
 		return r.failRequest(ctx, &modelRequest, "SecretLookupFailed", secretErr.Error())
 	}
 
-	// PHASE 1: Sandbox pipeline
-	sandboxRun := tektonv1.PipelineRun{}
-	sandboxKey := types.NamespacedName{Name: sandboxRunName, Namespace: modelRequest.Namespace}
-	err = r.Get(ctx, sandboxKey, &sandboxRun)
-
-	if apierrors.IsNotFound(err) {
-		if rbacErr := r.ensurePromotionNamespaceRBAC(ctx, modelRequest.Namespace, modelRequest.Namespace); rbacErr != nil {
-			return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", rbacErr.Error())
-		}
-		sandboxRun = buildPipelineRun(sandboxRunName, modelRequest.Namespace,
-			r.sandboxPipelineNameOrDefault(profile, &modelRequest),
-			r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
-			&modelRequest, r.Scheme)
-		created, err := createIgnoringAlreadyExists(ctx, r.Client, &sandboxRun)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
-		}
-		modelRequest.Status.Phase = "SandboxRunning"
-		modelRequest.Status.SandboxPipelineRunName = sandboxRun.Name
-		modelRequest.Status.PipelineRunName = sandboxRun.Name
-		modelRequest.Status.Message = "Sandbox governance pipeline started"
-		if err := r.Status().Update(ctx, &modelRequest); err != nil {
-			return ctrl.Result{}, err
-		}
-		if created {
-			logger.Info("created sandbox PipelineRun", "pipelineRun", sandboxRun.Name)
-		}
-		return ctrl.Result{}, nil
+	// PHASE 1: Sandbox stage
+	if rbacErr := r.ensurePromotionNamespaceRBAC(ctx, modelRequest.Namespace, modelRequest.Namespace); rbacErr != nil {
+		return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", rbacErr.Error())
 	}
+	sandboxStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
+		Name:        "sandbox",
+		RunName:     sandboxRunName,
+		WorkflowRef: r.sandboxPipelineNameOrDefault(profile, &modelRequest),
+		Params:      r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
+	})
 	if err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
 	}
+	modelRequest.Status.SandboxPipelineRunName = sandboxRunName
+	modelRequest.Status.PipelineRunName = sandboxRunName
 
-	sandboxCond := sandboxRun.Status.GetCondition("Succeeded")
-	if sandboxCond == nil || sandboxCond.Status == corev1.ConditionUnknown {
-		return r.updateStatus(ctx, &modelRequest, "SandboxRunning", "Sandbox pipeline is running")
+	switch sandboxStatus.Phase {
+	case stagecommon.StageRunning:
+		logger.Info("sandbox stage running", "runName", sandboxRunName)
+		return r.updateStatus(ctx, &modelRequest, "SandboxRunning", sandboxStatus.Message)
+	case stagecommon.StageFailed:
+		return r.updateStatus(ctx, &modelRequest, "Failed", "Sandbox pipeline failed: "+sandboxStatus.Message)
 	}
-	if sandboxCond.Status == corev1.ConditionFalse {
-		return r.updateStatus(ctx, &modelRequest, "Failed", "Sandbox pipeline failed: "+sandboxCond.Message)
-	}
+	// stagecommon.StageSucceeded: fall through to promotion.
 
-	// PHASE 2: Promotion pipelines (one per namespace)
+	// PHASE 2: Promotion stages (one per namespace)
 	promoNamespaces := r.getPromotionNamespaces(&modelRequest)
 	planID := fmt.Sprintf("%s-promotion", modelRequest.Name)
 	pipelineName := r.promotionPipelineNameOrDefault(profile, &modelRequest)
@@ -191,39 +182,29 @@ func (r *ModelRequestReconciler) Reconcile(
 		}
 
 		prName := fmt.Sprintf("%s-promotion-%s", modelRequest.Name, ns)
-		promotionRun := tektonv1.PipelineRun{}
-		promotionKey := types.NamespacedName{Name: prName, Namespace: modelRequest.Namespace}
-		err = r.Get(ctx, promotionKey, &promotionRun)
+		isFirst := i == 0
+		isLast := i == len(promoNamespaces)-1
+		params := r.buildPromotionPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets, ns, planID, isFirst, isLast)
 
-		if apierrors.IsNotFound(err) {
-			isFirst := i == 0
-			isLast := i == len(promoNamespaces)-1
-			params := r.buildPromotionPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets, ns, planID, isFirst, isLast)
-			promotionRun = buildPipelineRun(prName, modelRequest.Namespace, pipelineName, params, &modelRequest, r.Scheme)
-			created, createErr := createIgnoringAlreadyExists(ctx, r.Client, &promotionRun)
-			if createErr != nil {
-				return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, createErr
-			}
-			if created {
-				logger.Info("created promotion PipelineRun", "pipelineRun", promotionRun.Name, "namespace", ns)
-			}
-			allSucceeded = false
-			anyRunning = true
-			modelRequest.Status.PromotionPipelineRunName = prName
-			modelRequest.Status.PipelineRunName = prName
-			continue
-		}
+		promoStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
+			Name:        fmt.Sprintf("promotion-%s", ns),
+			RunName:     prName,
+			WorkflowRef: pipelineName,
+			Params:      params,
+		})
 		if err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
 		}
+		modelRequest.Status.PromotionPipelineRunName = prName
+		modelRequest.Status.PipelineRunName = prName
 
-		cond := promotionRun.Status.GetCondition("Succeeded")
-		if cond == nil || cond.Status == corev1.ConditionUnknown {
+		switch promoStatus.Phase {
+		case stagecommon.StageFailed:
+			return r.updateStatus(ctx, &modelRequest, "Failed", fmt.Sprintf("Promotion to %s failed: %s", ns, promoStatus.Message))
+		case stagecommon.StageRunning:
 			anyRunning = true
 			allSucceeded = false
-		} else if cond.Status == corev1.ConditionFalse {
-			return r.updateStatus(ctx, &modelRequest, "Failed", fmt.Sprintf("Promotion to %s failed: %s", ns, cond.Message))
-		} else if cond.Status == corev1.ConditionTrue {
+		case stagecommon.StageSucceeded:
 			// this one succeeded, continue checking others
 		}
 	}
@@ -297,55 +278,11 @@ func (r *ModelRequestReconciler) promotionPipelineNameOrDefault(profile *modelop
 	return "model-intake-promotion"
 }
 
-func buildPipelineRun(name, namespace, pipelineName string, params tektonv1.Params, modelReq *modelopsv1alpha1.ModelRequest, scheme *runtime.Scheme) tektonv1.PipelineRun {
-	pr := tektonv1.PipelineRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"modelops.example.io/model-request": modelReq.Name,
-			},
-		},
-		Spec: tektonv1.PipelineRunSpec{
-			PipelineRef: &tektonv1.PipelineRef{
-				Name: pipelineName,
-			},
-			Params: params,
-			TaskRunTemplate: tektonv1.PipelineTaskRunTemplate{
-				ServiceAccountName: "pipeline",
-			},
-			Timeouts: &tektonv1.TimeoutFields{
-				Pipeline: &metav1.Duration{Duration: 0},
-			},
-			Workspaces: []tektonv1.WorkspaceBinding{
-				{
-					Name: "shared-workspace",
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "guidellm-output-pvc",
-					},
-				},
-				{
-					Name: "manifests",
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "mmlu-manifest",
-						},
-					},
-				},
-				{
-					Name: "custom-mmlu",
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "custom-mmlu",
-						},
-					},
-				},
-			},
-		},
-	}
-	controllerutil.SetControllerReference(modelReq, &pr, scheme)
-	return pr
-}
+// buildPipelineRun, and the PipelineRun construction/condition-reading
+// it used to be paired with inline in Reconcile, moved to
+// internal/stages/tekton.StageRunner in Phase 4 of REFACTOR_PLAN.md.
+// ModelRequestReconciler now drives both the sandbox and promotion
+// stages through r.StageRunner (stagecommon.StageRunner) instead.
 
 type resolvedSecrets struct {
 	evalhubToken      string
@@ -570,7 +507,7 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	cfg *modelopsv1alpha1.PlatformConfig,
 	plan *modelopsv1alpha1.CapacityPlan,
 	secrets *resolvedSecrets,
-) tektonv1.Params {
+) map[string]string {
 	spec := mr.Spec
 	reqs := spec.Requirements
 	if reqs == nil {
@@ -585,12 +522,12 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 		ResultS3SecretKey: secrets.resultS3SecretKey,
 	})
 
-	stagecommon.AddParam(&p, "target-namespace", stagecommon.StrOrDefault(reqs.SandboxNamespace, "sandbox"))
+	stagecommon.AddParam(p, "target-namespace", stagecommon.StrOrDefault(reqs.SandboxNamespace, "sandbox"))
 
-	stagecommon.AddParam(&p, "artifact-scan-image", stagecommon.StrOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
-	stagecommon.AddParam(&p, "artifact-cve-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
-	stagecommon.AddParam(&p, "ignore-unfixed", stagecommon.StrOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
-	stagecommon.AddParam(&p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
+	stagecommon.AddParam(p, "artifact-scan-image", stagecommon.StrOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
+	stagecommon.AddParam(p, "artifact-cve-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
+	stagecommon.AddParam(p, "ignore-unfixed", stagecommon.StrOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
+	stagecommon.AddParam(p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
 
 	// Exactly one gpu-count-override param: an explicit
 	// reqs.GPUConfig.GPUCountOverride always wins over the
@@ -600,22 +537,22 @@ func (r *ModelRequestReconciler) buildSandboxPipelineParams(
 	// computes this param differently -- see stagecommon/params.go's doc
 	// comment for why folding it into the shared helper isn't safe.
 	if reqs.GPUConfig.GPUCountOverride != "" {
-		stagecommon.AddParam(&p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
+		stagecommon.AddParam(p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
 	} else if plan != nil && plan.Status.GPUsNeeded > 0 {
-		stagecommon.AddParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
+		stagecommon.AddParam(p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
 
-	stagecommon.AddParam(&p, "severity-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
-	stagecommon.AddParam(&p, "tenant-ns", stagecommon.StrOrDefault(reqs.SandboxNamespace, "vllm"))
+	stagecommon.AddParam(p, "severity-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
+	stagecommon.AddParam(p, "tenant-ns", stagecommon.StrOrDefault(reqs.SandboxNamespace, "vllm"))
 
-	stagecommon.AddParam(&p, "scan-s3-endpoint", secrets.scanS3Endpoint)
-	stagecommon.AddParam(&p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
-	stagecommon.AddParam(&p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
+	stagecommon.AddParam(p, "scan-s3-endpoint", secrets.scanS3Endpoint)
+	stagecommon.AddParam(p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
+	stagecommon.AddParam(p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
 	compBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
 	secBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
-	stagecommon.AddParam(&p, "compliance-s3-bucket", compBucket)
-	stagecommon.AddParam(&p, "security-s3-bucket", secBucket)
-	stagecommon.AddParam(&p, "s3-ui-route", "")
+	stagecommon.AddParam(p, "compliance-s3-bucket", compBucket)
+	stagecommon.AddParam(p, "security-s3-bucket", secBucket)
+	stagecommon.AddParam(p, "s3-ui-route", "")
 
 	return p
 }
@@ -761,7 +698,7 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	planID string,
 	isFirst bool,
 	isLast bool,
-) tektonv1.Params {
+) map[string]string {
 	spec := mr.Spec
 	reqs := spec.Requirements
 	if reqs == nil {
@@ -776,8 +713,8 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 		ResultS3SecretKey: secrets.resultS3SecretKey,
 	})
 
-	stagecommon.AddParam(&p, "target-namespace", targetNamespace)
-	stagecommon.AddParam(&p, "plan-id", planID)
+	stagecommon.AddParam(p, "target-namespace", targetNamespace)
+	stagecommon.AddParam(p, "plan-id", planID)
 
 	// KNOWN BEHAVIOR, unchanged by this refactor: unlike
 	// buildSandboxPipelineParams, this never checks
@@ -787,50 +724,50 @@ func (r *ModelRequestReconciler) buildPromotionPipelineParams(
 	// helper instead of being unified with sandbox's override-aware
 	// logic.
 	if plan != nil && plan.Status.GPUsNeeded > 0 {
-		stagecommon.AddParam(&p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
+		stagecommon.AddParam(p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
 	}
 
 	approvalURL := stagecommon.StrOrDefault(cfg.Spec.ApprovalApiUrl, "")
 	if !isFirst {
 		approvalURL = ""
 	}
-	stagecommon.AddParam(&p, "approval-api-url", approvalURL)
-	stagecommon.AddParam(&p, "approval-poll-interval-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalPollIntervalSeconds, 15)))
-	stagecommon.AddParam(&p, "approval-timeout-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
+	stagecommon.AddParam(p, "approval-api-url", approvalURL)
+	stagecommon.AddParam(p, "approval-poll-interval-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalPollIntervalSeconds, 15)))
+	stagecommon.AddParam(p, "approval-timeout-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
 
-	stagecommon.AddParam(&p, "guidellm-profile", stagecommon.StrOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
-	stagecommon.AddParam(&p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
-	stagecommon.AddParam(&p, "guidellm-max-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
-	stagecommon.AddParam(&p, "guidellm-max-requests", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
+	stagecommon.AddParam(p, "guidellm-profile", stagecommon.StrOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
+	stagecommon.AddParam(p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
+	stagecommon.AddParam(p, "guidellm-max-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
+	stagecommon.AddParam(p, "guidellm-max-requests", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
 	if cfg.Spec.BenchmarkTargetUrl != "" {
-		stagecommon.AddParam(&p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
+		stagecommon.AddParam(p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
 	} else if spec.MaaS != nil && spec.MaaS.Enabled {
-		stagecommon.AddParam(&p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+		stagecommon.AddParam(p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
 	} else {
-		stagecommon.AddParam(&p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
+		stagecommon.AddParam(p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
 	}
-	stagecommon.AddParam(&p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
-	stagecommon.AddParam(&p, "custom-filename", stagecommon.StrOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
+	stagecommon.AddParam(p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
+	stagecommon.AddParam(p, "custom-filename", stagecommon.StrOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
 
 	if spec.Access != nil {
-		stagecommon.AddParam(&p, "authorized-viewers", spec.Access.AuthorizedViewers)
-		stagecommon.AddParam(&p, "access-role", stagecommon.StrOrDefault(spec.Access.AccessRole, "view"))
+		stagecommon.AddParam(p, "authorized-viewers", spec.Access.AuthorizedViewers)
+		stagecommon.AddParam(p, "access-role", stagecommon.StrOrDefault(spec.Access.AccessRole, "view"))
 	}
 
 	maasGPU := stagecommon.StrOrDefault(cfg.Spec.MaaSGPUCount, "1")
 	if spec.MaaS != nil {
-		stagecommon.AddParam(&p, "deploy-maas", strconv.FormatBool(spec.MaaS.Enabled))
+		stagecommon.AddParam(p, "deploy-maas", strconv.FormatBool(spec.MaaS.Enabled))
 		maasGPU = stagecommon.StrOrDefault(spec.MaaS.GPUCount, maasGPU)
 	} else {
-		stagecommon.AddParam(&p, "deploy-maas", "false")
+		stagecommon.AddParam(p, "deploy-maas", "false")
 	}
-	stagecommon.AddParam(&p, "maas-serving-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
-	stagecommon.AddParam(&p, "maas-policy-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
-	stagecommon.AddParam(&p, "maas-gpu-count", maasGPU)
-	stagecommon.AddParam(&p, "maas-runtime-image", stagecommon.StrOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
-	stagecommon.AddParam(&p, "maas-authorized-group", stagecommon.StrOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
+	stagecommon.AddParam(p, "maas-serving-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
+	stagecommon.AddParam(p, "maas-policy-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
+	stagecommon.AddParam(p, "maas-gpu-count", maasGPU)
+	stagecommon.AddParam(p, "maas-runtime-image", stagecommon.StrOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
+	stagecommon.AddParam(p, "maas-authorized-group", stagecommon.StrOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
 
-	stagecommon.AddParam(&p, "run-register", strconv.FormatBool(isLast))
+	stagecommon.AddParam(p, "run-register", strconv.FormatBool(isLast))
 
 	return p
 }

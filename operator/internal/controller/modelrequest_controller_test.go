@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
+	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
 
 	"github.com/stretchr/testify/require"
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
@@ -33,8 +34,25 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
+// newModelRequestReconciler wires the reconciler with the REAL
+// tekton.StageRunner (not a fake), so all of this file's
+// PipelineRun-shaped assertions (PipelineRef, OwnerReferences, Params,
+// conditions) continue to exercise genuine Tekton behavior end-to-end --
+// this is Phase 4's regression net for "relocate, don't change" (see
+// docs/PHASE_LOG.md). Tests that specifically want to prove the
+// reconciler works with zero Tekton involvement construct a
+// ModelRequestReconciler directly with a stagecommon.FakeStageRunner
+// instead of using this helper.
 func newModelRequestReconciler() *ModelRequestReconciler {
-	return &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme()}
+	scheme := testRuntimeScheme()
+	return &ModelRequestReconciler{
+		Client: k8sClient,
+		Scheme: scheme,
+		StageRunner: &tektonstage.StageRunner{
+			Client: k8sClient,
+			Scheme: scheme,
+		},
+	}
 }
 
 func reconcileModelRequest(t *testing.T, ns, name string) (*modelopsv1alpha1.ModelRequest, ctrl.Result, error) {
@@ -509,8 +527,14 @@ func TestBuildSandboxPipelineParams_ExplicitOverride_TakesPrecedenceAndAppearsEx
 
 	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
 
-	values := findAllParams(params, "gpu-count-override")
-	require.Equal(t, []string{"7"}, values, "explicit override must win and the plan-derived value must not also be added")
+	// Since buildSandboxPipelineParams now returns map[string]string
+	// (Phase 4), a duplicate AddParam call for the same name can no
+	// longer produce two entries by construction -- see
+	// stagecommon.AddParam's doc comment. Asserting the single value is
+	// therefore the meaningful check here; the "appears exactly once"
+	// guarantee moved from a runtime test assertion to a structural
+	// property of the map type itself.
+	require.Equal(t, "7", params["gpu-count-override"], "explicit override must win over the plan-derived value")
 }
 
 func TestBuildSandboxPipelineParams_NoOverride_FallsBackToPlanDerivedGPUCount(t *testing.T) {
@@ -526,8 +550,7 @@ func TestBuildSandboxPipelineParams_NoOverride_FallsBackToPlanDerivedGPUCount(t 
 
 	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
 
-	values := findAllParams(params, "gpu-count-override")
-	require.Equal(t, []string{"4"}, values)
+	require.Equal(t, "4", params["gpu-count-override"])
 }
 
 func TestBuildSandboxPipelineParams_NoOverrideAndNoPlan_OmitsParam(t *testing.T) {
@@ -542,8 +565,8 @@ func TestBuildSandboxPipelineParams_NoOverrideAndNoPlan_OmitsParam(t *testing.T)
 
 	params := r.buildSandboxPipelineParams(mr, nil, cfg, nil, secrets)
 
-	values := findAllParams(params, "gpu-count-override")
-	require.Empty(t, values)
+	_, ok := params["gpu-count-override"]
+	require.False(t, ok)
 }
 
 // --- Phase 3 dedup regression net: full-fixture characterization tests ---
@@ -561,22 +584,14 @@ func TestBuildSandboxPipelineParams_NoOverrideAndNoPlan_OmitsParam(t *testing.T)
 
 func boolPtr(b bool) *bool { return &b }
 
-// paramsToMap converts a tektonv1.Params into a map[string]string,
-// failing the test outright if any param name appears more than once
-// (the exact shape of the Phase 1 gpu-count-override duplicate-param bug
-// this suite guards against).
-func paramsToMap(t *testing.T, params tektonv1.Params) map[string]string {
-	t.Helper()
-	out := make(map[string]string, len(params))
-	for _, p := range params {
-		if _, exists := out[p.Name]; exists {
-			t.Fatalf("duplicate param %q found in params (this is the exact shape of the Phase 1 gpu-count-override bug)", p.Name)
-		}
-		out[p.Name] = p.Value.StringVal
-	}
-	require.Len(t, out, len(params), "no duplicate param names")
-	return out
-}
+// paramsToMap used to convert a tektonv1.Params into a map[string]string
+// here, failing the test outright if any param name appeared more than
+// once (the exact shape of the Phase 1 gpu-count-override duplicate-param
+// bug this suite guards against). Phase 4 changed
+// buildSandboxPipelineParams/buildPromotionPipelineParams to return
+// map[string]string directly, so that conversion -- and the duplicate
+// check, which is now a structural property of the map type itself
+// rather than something a test needs to detect -- is no longer needed.
 
 // fullCharacterizationFixture returns a ModelRequest/PlatformConfig/
 // CapacityPlan/resolvedSecrets tuple with every field buildSandboxPipelineParams
@@ -698,8 +713,7 @@ func TestBuildSandboxPipelineParams_FullFixture_CharacterizesCurrentOutput(t *te
 	r := newModelRequestReconciler()
 	mr, cfg, plan, secrets := fullCharacterizationFixture()
 
-	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
-	got := paramsToMap(t, params)
+	got := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
 
 	want := map[string]string{
 		"model-id":                   "quay.io/models/foo:v1",
@@ -767,8 +781,7 @@ func TestBuildPromotionPipelineParams_FirstAndLastNamespace_FullFixture_Characte
 	r := newModelRequestReconciler()
 	mr, cfg, plan, secrets := fullCharacterizationFixture()
 
-	params := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "prod-ns", "plan-123", true, true)
-	got := paramsToMap(t, params)
+	got := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "prod-ns", "plan-123", true, true)
 
 	want := map[string]string{
 		"model-id":               "quay.io/models/foo:v1",
@@ -853,8 +866,7 @@ func TestBuildPromotionPipelineParams_MiddleNamespace_OmitsApprovalURL_AndRunReg
 	r := newModelRequestReconciler()
 	mr, cfg, plan, secrets := fullCharacterizationFixture()
 
-	params := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "staging-ns", "plan-123", false, false)
-	got := paramsToMap(t, params)
+	got := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "staging-ns", "plan-123", false, false)
 
 	_, hasApprovalURL := got["approval-api-url"]
 	require.False(t, hasApprovalURL, "approval-api-url must be omitted (empty string) when isFirst=false")
