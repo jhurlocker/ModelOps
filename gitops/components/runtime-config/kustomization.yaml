@@ -6,4 +6,5 @@ namespace: sandbox
 resources:
   - platformconfig.yaml
   - lifecycleprofile.yaml
+  - intakeproviderconfig.yaml
   - secrets.yaml

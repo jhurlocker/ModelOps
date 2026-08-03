@@ -43,6 +43,24 @@ type StageStatus struct {
 	RunRef string
 }
 
+// StageKind classifies which named "slot" of a shared provider config a
+// stage invocation corresponds to -- e.g. which of
+// IntakeProviderConfigSpec's SandboxPipelineName/PromotionPipelineName
+// fields a StageRunner should resolve against. This is a genuine, if
+// small, widening of the StageSpec contract introduced in
+// REFACTOR_PLAN.md Phase 5: StageSpec.Name stays "logging purposes
+// only" (see below), so a separate, explicit field is used for anything
+// a StageRunner actually branches on. StageKind itself is not
+// Tekton-specific -- "this is the sandbox stage" vs "this is a
+// promotion stage" is a generic lifecycle concept every provider needs
+// to distinguish, not an execution-engine detail.
+type StageKind string
+
+const (
+	StageKindSandbox   StageKind = "sandbox"
+	StageKindPromotion StageKind = "promotion"
+)
+
 // StageSpec is everything a StageRunner needs to ensure one lifecycle
 // stage's execution exists and is up to date, without needing to know
 // anything about ModelRequest.Spec, ModelLifecycleProfile,
@@ -52,7 +70,8 @@ type StageStatus struct {
 type StageSpec struct {
 	// Name identifies the stage for logging/status purposes only (e.g.
 	// "sandbox", "promotion-staging"). It is never used as the child
-	// object's name.
+	// object's name, and a StageRunner must not branch on it -- use
+	// StageKind for that.
 	Name string
 	// RunName is the deterministic name of the underlying execution
 	// object (a Tekton PipelineRun today). Chosen by the reconciler so
@@ -60,11 +79,24 @@ type StageSpec struct {
 	RunName string
 	// WorkflowRef identifies which workflow/pipeline to run -- the
 	// Tekton pipeline name today (mr.Spec.PipelineRef /
-	// profile.Spec.Workflow.PipelineRef / a fixed default).
-	// REFACTOR_PLAN.md Phase 5 is expected to replace this with a
-	// provider-config reference; kept as a plain string for now to
-	// avoid getting ahead of that phase.
+	// profile.Spec.Workflow.PipelineRef / a fixed default). This is the
+	// DEPRECATED fallback path (REFACTOR_PLAN.md Phase 5): a
+	// StageRunner should prefer resolving ProviderConfigRef when set,
+	// and fall back to this plain string only when it's nil.
 	WorkflowRef string
+	// ProviderConfigRef is a passthrough of
+	// ModelLifecycleProfileSpec.ProviderConfigRef, set by the
+	// reconciler without any interpretation of what it points at. Only
+	// a StageRunner (e.g. internal/stages/tekton) resolves it -- the
+	// reconciler never fetches or inspects the referenced object. Nil
+	// means the profile hasn't opted into provider-config-based
+	// resolution; a StageRunner must fall back to WorkflowRef in that
+	// case.
+	ProviderConfigRef *modelopsv1alpha1.ProviderConfigRef
+	// StageKind says which named slot of a (potentially shared)
+	// provider config this invocation corresponds to. See StageKind's
+	// doc comment.
+	StageKind StageKind
 	// Params is a provider-agnostic bag of string parameters. Building
 	// this map is the reconciler's (or, from a later phase, a
 	// per-stage package's) job; converting it into whatever native

@@ -132,6 +132,8 @@ Modeled on Cluster API's `infrastructureRef` pattern.
 1. Review the full RBAC marker list on `ModelRequestReconciler` and split permissions by concern: core lifecycle (ModelRequest, CapacityPlan, status subresources) vs. Tekton-specific (PipelineRun) vs. namespace RBAC provisioning (RoleBindings, ClusterRoleBindings, ServiceAccounts).
 2. If feasible within this pass, move the Tekton-specific and RBAC-provisioning permissions onto the `TektonStageRunner`'s own service account / manager setup rather than the core reconciler's, so a future non-Tekton `StageRunner` doesn't inherit permissions it doesn't need.
 3. Document the resulting permission boundaries in a short `RBAC.md` or comment block — what the core controller can touch vs. what the provider adapter can touch.
+4. Resolve the `WorkflowRef.Engine` vs. `IntakeProviderConfigSpec.ProviderType` redundancy introduced in Phase 5 (both now describe "which execution engine," one on `ModelLifecycleProfile` and one on the referenced provider config) — decide whether `Engine` is deprecated/removed, derived from the resolved provider config, or kept as a distinct concept, and update the `Engine` printcolumn accordingly.
+5. Give `ProviderConfigRef` resolution failures (missing/malformed reference, unsupported `Kind`, unsupported `providerType` — see `internal/stages/tekton/providerconfig.go`'s `resolveProviderDetails`) a real `ModelRequest` status reason (e.g. `ProviderConfigLookupFailed`, following the existing `ProfileLookupFailed`/`PlatformConfigLookupFailed` pattern) instead of the generic silent-retry error path every other `StageRunner.EnsureRun` error currently falls into.
 
 ## Phase 8 (stretch, do only if the above are stable) — ModelCard / DataCard CRD
 

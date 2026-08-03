@@ -8,6 +8,17 @@ spec:
     accessRole: view
     authorizedViewers: ""
   platformConfigRef: default-modelops-platform
+  # providerConfigRef is Phase 5's live resolution path (REFACTOR_PLAN.md):
+  # sandbox/promotion pipeline names, service account, and workspace
+  # bindings are resolved from this IntakeProviderConfig object instead
+  # of workflow.pipelineRef below.
+  providerConfigRef:
+    name: standard-generative-onboarding-provider
+  # workflow.pipelineRef is now inert: kept in place, deliberately not
+  # removed, only as the DEPRECATED fallback that would apply if
+  # providerConfigRef above were ever unset -- proving the precedence
+  # (providerConfigRef wins) end to end on the sandbox cluster rather
+  # than just in envtest.
   workflow:
     engine: tekton
     pipelineRef: model-intake-sandbox

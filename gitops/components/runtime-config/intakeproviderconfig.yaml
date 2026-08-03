@@ -1,0 +1,15 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: IntakeProviderConfig
+metadata:
+  name: standard-generative-onboarding-provider
+  namespace: sandbox
+spec:
+  providerType: tekton
+  sandboxPipelineName: model-intake-sandbox
+  promotionPipelineName: model-intake-promotion
+  # serviceAccountName, pipelineTimeout, and workspaces are deliberately
+  # left unset here: internal/stages/tekton falls back to the same
+  # hardcoded defaults (ServiceAccountName "pipeline", the
+  # shared-workspace/manifests/custom-mmlu workspace bindings, unbounded
+  # timeout) that were in effect before this CR existed. Only the two
+  # pipeline names are actually resolved from this object today.

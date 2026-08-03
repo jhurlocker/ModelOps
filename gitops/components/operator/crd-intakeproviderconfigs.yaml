@@ -4,22 +4,19 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.5
-  name: modellifecycleprofiles.modelops.example.io
+  name: intakeproviderconfigs.modelops.example.io
 spec:
   group: modelops.example.io
   names:
-    kind: ModelLifecycleProfile
-    listKind: ModelLifecycleProfileList
-    plural: modellifecycleprofiles
-    singular: modellifecycleprofile
+    kind: IntakeProviderConfig
+    listKind: IntakeProviderConfigList
+    plural: intakeproviderconfigs
+    singular: intakeproviderconfig
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.workflow.engine
-      name: Engine
-      type: string
-    - jsonPath: .spec.workflow.pipelineRef
-      name: Pipeline
+    - jsonPath: .spec.providerType
+      name: ProviderType
       type: string
     name: v1alpha1
     schema:
@@ -43,75 +40,82 @@ spec:
           metadata:
             type: object
           spec:
-            properties:
-              defaultAccess:
-                properties:
-                  accessRole:
-                    type: string
-                  authorizedViewers:
-                    type: string
-                type: object
-              platformConfigRef:
-                type: string
-              policyRef:
-                type: string
-              providerConfigRef:
-                description: |-
-                  ProviderConfigRef points at an IntakeProviderConfig (or, in
-                  principle, another kind sharing the same name+kind reference
-                  shape) holding execution-engine-specific details -- pipeline
-                  names, service account, workspace bindings. Introduced in Phase
-                  5 of REFACTOR_PLAN.md.
+            description: |-
+              IntakeProviderConfigSpec holds execution-engine-specific details that
+              ModelLifecycleProfile used to embed directly (WorkflowRef.PipelineRef/
+              PromotionPipelineRef) or that were hardcoded Go constants inside
+              internal/stages/tekton.StageRunner (ServiceAccountName, workspace
+              bindings, pipeline timeout). See docs/REFACTOR_PLAN.md Phase 5.
 
-                  This is additive, not a breaking change: when nil, the sandbox
-                  and promotion stages resolve their pipeline name exactly as
-                  before this field existed, via Workflow.PipelineRef/
-                  PromotionPipelineRef (now deprecated fallbacks, still fully
-                  honored) and the hardcoded execution defaults in
-                  internal/stages/tekton. Existing ModelLifecycleProfile objects
-                  need no changes to keep working.
-                properties:
-                  kind:
-                    default: IntakeProviderConfig
-                    description: |-
-                      Kind of the referenced object. Defaults to "IntakeProviderConfig"
-                      when empty.
-                    type: string
-                  name:
-                    description: Name of the provider config object.
-                    type: string
-                required:
-                - name
-                type: object
-              workflow:
+              This is deliberately one generic kind with a ProviderType
+              discriminator rather than a separate typed kind per backend
+              (RHOAIIntakeConfig, SageMakerIntakeConfig, ...) -- per Phase 5's own
+              text, split into typed kinds only once a second real backend is
+              implemented. Today only "tekton" is supported; the fields below this
+              comment only apply when ProviderType == "tekton".
+            properties:
+              pipelineTimeout:
                 description: |-
-                  WorkflowRef.PipelineRef and PromotionPipelineRef are DEPRECATED as of
-                  Phase 5 (REFACTOR_PLAN.md): honored only as a fallback when
-                  ModelLifecycleProfileSpec.ProviderConfigRef is unset, so existing
-                  ModelLifecycleProfile objects keep working unmodified. Prefer
-                  ProviderConfigRef -> IntakeProviderConfig for new profiles.
-                properties:
-                  engine:
-                    type: string
-                  pipelineRef:
-                    description: |-
-                      PipelineRef was required prior to Phase 5; now optional so a
-                      profile can rely solely on ProviderConfigRef instead.
-                    type: string
-                  promotionPipelineRef:
-                    description: |-
-                      PromotionPipelineRef selects the pipeline used for promotion runs.
-                      If empty, the controller falls back to a fixed default
-                      ("model-intake-promotion") rather than reusing PipelineRef, which
-                      names the sandbox stage's pipeline.
-                    type: string
-                required:
-                - engine
-                type: object
+                  PipelineTimeout bounds the PipelineRun. nil/zero means unbounded,
+                  matching today's hardcoded metav1.Duration{Duration: 0}.
+                type: string
+              promotionPipelineName:
+                description: |-
+                  PromotionPipelineName is the Tekton Pipeline run for each
+                  promotion-namespace stage. Was: WorkflowRef.PromotionPipelineRef.
+                type: string
+              providerType:
+                description: |-
+                  ProviderType discriminates which StageRunner implementation
+                  understands this config. Only "tekton" exists today -- the enum
+                  is intentionally restrictive rather than a free string, so a
+                  typo is a rejected write, not a silent runtime fallback.
+                enum:
+                - tekton
+                type: string
+              sandboxPipelineName:
+                description: |-
+                  SandboxPipelineName is the Tekton Pipeline run for the sandbox
+                  stage. Was: WorkflowRef.PipelineRef / mr.Spec.PipelineRef
+                  fallback chain in ModelRequestReconciler.
+                type: string
+              serviceAccountName:
+                description: |-
+                  ServiceAccountName is the PipelineRun's
+                  TaskRunTemplate.ServiceAccountName. Was: hardcoded "pipeline" in
+                  internal/stages/tekton.buildPipelineRun.
+                type: string
+              workspaces:
+                description: |-
+                  Workspaces are the PipelineRun workspace bindings. Was: 3
+                  hardcoded WorkspaceBinding entries (shared-workspace ->
+                  guidellm-output-pvc PVC, manifests -> mmlu-manifest ConfigMap,
+                  custom-mmlu -> custom-mmlu ConfigMap).
+                items:
+                  description: |-
+                    IntakeProviderWorkspace is a single Tekton workspace binding, reduced
+                    to the two binding kinds internal/stages/tekton.buildPipelineRun has
+                    ever produced (PersistentVolumeClaim or ConfigMap by name).
+                  properties:
+                    configMap:
+                      type: string
+                    name:
+                      type: string
+                    persistentVolumeClaim:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
             required:
-            - workflow
+            - providerType
             type: object
           status:
+            description: |-
+              IntakeProviderConfigStatus follows the same (currently unwritten)
+              Conditions-only precedent already set by ModelLifecycleProfileStatus
+              and PlatformConfigStatus -- no controller reconciles this kind's
+              status yet.
             properties:
               conditions:
                 items:

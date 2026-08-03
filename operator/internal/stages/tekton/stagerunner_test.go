@@ -77,11 +77,18 @@ func TestToTektonParams_EmptyMap_ProducesEmptyParams(t *testing.T) {
 // relocating buildPipelineRun, rather than just re-testing what was
 // already covered. ---
 
+// TestBuildPipelineRun_WorkspaceBindings_MatchTodaysHardcodedShape needed
+// one mechanical, signature-only update in Phase 5: buildPipelineRun now
+// takes a providerDetails value instead of a bare pipeline-name string
+// (see providerconfig.go), so this test constructs one via
+// defaultProviderDetails -- the exact same hardcoded shape asserted on
+// below, just relocated to a single source of truth. No assertion value
+// changed.
 func TestBuildPipelineRun_WorkspaceBindings_MatchTodaysHardcodedShape(t *testing.T) {
 	mr := &modelopsv1alpha1.ModelRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "mr-1", Namespace: "ns-1", UID: "abc-123"},
 	}
-	pr := buildPipelineRun("mr-1-sandbox", "ns-1", "model-intake-sandbox", tektonv1.Params{}, mr, testScheme(t))
+	pr := buildPipelineRun("mr-1-sandbox", "ns-1", defaultProviderDetails("model-intake-sandbox"), tektonv1.Params{}, mr, testScheme(t))
 
 	require.Len(t, pr.Spec.Workspaces, 3)
 	byName := map[string]tektonv1.WorkspaceBinding{}

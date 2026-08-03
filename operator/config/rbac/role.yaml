@@ -78,6 +78,7 @@ rules:
 - apiGroups:
   - modelops.example.io
   resources:
+  - intakeproviderconfigs
   - modellifecycleprofiles
   - platformconfigs
   verbs:

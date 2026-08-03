@@ -55,11 +55,48 @@ spec:
                 type: string
               policyRef:
                 type: string
+              providerConfigRef:
+                description: |-
+                  ProviderConfigRef points at an IntakeProviderConfig (or, in
+                  principle, another kind sharing the same name+kind reference
+                  shape) holding execution-engine-specific details -- pipeline
+                  names, service account, workspace bindings. Introduced in Phase
+                  5 of REFACTOR_PLAN.md.
+
+                  This is additive, not a breaking change: when nil, the sandbox
+                  and promotion stages resolve their pipeline name exactly as
+                  before this field existed, via Workflow.PipelineRef/
+                  PromotionPipelineRef (now deprecated fallbacks, still fully
+                  honored) and the hardcoded execution defaults in
+                  internal/stages/tekton. Existing ModelLifecycleProfile objects
+                  need no changes to keep working.
+                properties:
+                  kind:
+                    default: IntakeProviderConfig
+                    description: |-
+                      Kind of the referenced object. Defaults to "IntakeProviderConfig"
+                      when empty.
+                    type: string
+                  name:
+                    description: Name of the provider config object.
+                    type: string
+                required:
+                - name
+                type: object
               workflow:
+                description: |-
+                  WorkflowRef.PipelineRef and PromotionPipelineRef are DEPRECATED as of
+                  Phase 5 (REFACTOR_PLAN.md): honored only as a fallback when
+                  ModelLifecycleProfileSpec.ProviderConfigRef is unset, so existing
+                  ModelLifecycleProfile objects keep working unmodified. Prefer
+                  ProviderConfigRef -> IntakeProviderConfig for new profiles.
                 properties:
                   engine:
                     type: string
                   pipelineRef:
+                    description: |-
+                      PipelineRef was required prior to Phase 5; now optional so a
+                      profile can rely solely on ProviderConfigRef instead.
                     type: string
                   promotionPipelineRef:
                     description: |-
@@ -70,7 +107,6 @@ spec:
                     type: string
                 required:
                 - engine
-                - pipelineRef
                 type: object
             required:
             - workflow

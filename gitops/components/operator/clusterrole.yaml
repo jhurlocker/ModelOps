@@ -50,6 +50,14 @@ rules:
   - apiGroups:
       - modelops.example.io
     resources:
+      - intakeproviderconfigs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - modelops.example.io
+    resources:
       - capacityplans
     verbs:
       - create

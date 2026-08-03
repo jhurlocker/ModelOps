@@ -25,6 +25,14 @@ import (
 // tektonv1.Params conversion, and condition-reading. This is a verbatim
 // relocation -- see docs/REFACTOR_PLAN.md Phase 4 / docs/PHASE_LOG.md
 // for the characterization tests that prove behavior is unchanged.
+//
+// As of Phase 5, it also owns resolving
+// stagecommon.StageSpec.ProviderConfigRef into an IntakeProviderConfig
+// CR (see providerconfig.go's resolveProviderDetails) -- the core
+// reconciler never fetches or interprets that CR itself.
+
+// +kubebuilder:rbac:groups=modelops.example.io,resources=intakeproviderconfigs,verbs=get;list;watch
+
 type StageRunner struct {
 	Client client.Client
 	Scheme *runtime.Scheme
@@ -45,7 +53,11 @@ func (r *StageRunner) EnsureRun(ctx context.Context, req *modelopsv1alpha1.Model
 	err := r.Client.Get(ctx, key, &run)
 
 	if apierrors.IsNotFound(err) {
-		newRun := buildPipelineRun(stage.RunName, req.Namespace, stage.WorkflowRef, toTektonParams(stage.Params), req, r.Scheme)
+		details, resolveErr := resolveProviderDetails(ctx, r.Client, req.Namespace, stage)
+		if resolveErr != nil {
+			return stagecommon.StageStatus{}, resolveErr
+		}
+		newRun := buildPipelineRun(stage.RunName, req.Namespace, details, toTektonParams(stage.Params), req, r.Scheme)
 		if createErr := r.Client.Create(ctx, &newRun); createErr != nil && !apierrors.IsAlreadyExists(createErr) {
 			return stagecommon.StageStatus{}, createErr
 		}
@@ -110,12 +122,17 @@ func toTektonParams(params map[string]string) tektonv1.Params {
 	return p
 }
 
-// buildPipelineRun constructs the PipelineRun object, verbatim-relocated
-// from internal/controller/modelrequest_controller.go's buildPipelineRun
-// (Phase 0-3): identical workspace bindings (shared-workspace PVC,
-// manifests/custom-mmlu ConfigMaps), ServiceAccountName, and unbounded
-// pipeline timeout.
-func buildPipelineRun(name, namespace, pipelineName string, params tektonv1.Params, modelReq *modelopsv1alpha1.ModelRequest, scheme *runtime.Scheme) tektonv1.PipelineRun {
+// buildPipelineRun constructs the PipelineRun object. Prior to Phase 5
+// this hardcoded the workspace bindings, ServiceAccountName, and
+// pipeline timeout directly (verbatim-relocated from
+// internal/controller/modelrequest_controller.go in Phase 0-3); those
+// values now come from providerDetails, resolved by
+// resolveProviderDetails (providerconfig.go) -- either from an
+// IntakeProviderConfig CR, or, when stage.ProviderConfigRef is nil,
+// defaultProviderDetails reproducing the exact same hardcoded shape as
+// before. This function's own body is otherwise unchanged.
+func buildPipelineRun(name, namespace string, details providerDetails, params tektonv1.Params, modelReq *modelopsv1alpha1.ModelRequest, scheme *runtime.Scheme) tektonv1.PipelineRun {
+	timeout := details.pipelineTimeout
 	pr := tektonv1.PipelineRun{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -126,39 +143,16 @@ func buildPipelineRun(name, namespace, pipelineName string, params tektonv1.Para
 		},
 		Spec: tektonv1.PipelineRunSpec{
 			PipelineRef: &tektonv1.PipelineRef{
-				Name: pipelineName,
+				Name: details.pipelineName,
 			},
 			Params: params,
 			TaskRunTemplate: tektonv1.PipelineTaskRunTemplate{
-				ServiceAccountName: "pipeline",
+				ServiceAccountName: details.serviceAccountName,
 			},
 			Timeouts: &tektonv1.TimeoutFields{
-				Pipeline: &metav1.Duration{Duration: 0},
+				Pipeline: &timeout,
 			},
-			Workspaces: []tektonv1.WorkspaceBinding{
-				{
-					Name: "shared-workspace",
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: "guidellm-output-pvc",
-					},
-				},
-				{
-					Name: "manifests",
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "mmlu-manifest",
-						},
-					},
-				},
-				{
-					Name: "custom-mmlu",
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: "custom-mmlu",
-						},
-					},
-				},
-			},
+			Workspaces: details.workspaces,
 		},
 	}
 	controllerutil.SetControllerReference(modelReq, &pr, scheme)

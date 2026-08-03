@@ -14,3 +14,4 @@ resources:
   - crd-lifecycleprofiles.yaml
   - crd-platformconfigs.yaml
   - crd-capacityplans.yaml
+  - crd-intakeproviderconfigs.yaml

@@ -145,10 +145,12 @@ func (r *ModelRequestReconciler) Reconcile(
 		return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", rbacErr.Error())
 	}
 	sandboxStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
-		Name:        "sandbox",
-		RunName:     sandboxRunName,
-		WorkflowRef: r.sandboxPipelineNameOrDefault(profile, &modelRequest),
-		Params:      r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
+		Name:              "sandbox",
+		RunName:           sandboxRunName,
+		WorkflowRef:       r.sandboxPipelineNameOrDefault(profile, &modelRequest),
+		ProviderConfigRef: providerConfigRef(profile),
+		StageKind:         stagecommon.StageKindSandbox,
+		Params:            r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
 	})
 	if err != nil {
 		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
@@ -187,10 +189,12 @@ func (r *ModelRequestReconciler) Reconcile(
 		params := r.buildPromotionPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets, ns, planID, isFirst, isLast)
 
 		promoStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
-			Name:        fmt.Sprintf("promotion-%s", ns),
-			RunName:     prName,
-			WorkflowRef: pipelineName,
-			Params:      params,
+			Name:              fmt.Sprintf("promotion-%s", ns),
+			RunName:           prName,
+			WorkflowRef:       pipelineName,
+			ProviderConfigRef: providerConfigRef(profile),
+			StageKind:         stagecommon.StageKindPromotion,
+			Params:            params,
 		})
 		if err != nil {
 			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
@@ -276,6 +280,21 @@ func (r *ModelRequestReconciler) promotionPipelineNameOrDefault(profile *modelop
 		return profile.Spec.Workflow.PromotionPipelineRef
 	}
 	return "model-intake-promotion"
+}
+
+// providerConfigRef passes profile.Spec.ProviderConfigRef through to the
+// StageRunner unmodified (see stagecommon.StageSpec.ProviderConfigRef's
+// doc comment: the reconciler never fetches or interprets the object
+// this points at -- only a StageRunner implementation, e.g.
+// internal/stages/tekton, does). A nil profile (already an error path
+// elsewhere in Reconcile, but defensively handled here too) or a
+// profile with no ProviderConfigRef set both yield nil, which every
+// StageRunner must treat as "use the deprecated WorkflowRef fallback."
+func providerConfigRef(profile *modelopsv1alpha1.ModelLifecycleProfile) *modelopsv1alpha1.ProviderConfigRef {
+	if profile == nil {
+		return nil
+	}
+	return profile.Spec.ProviderConfigRef
 }
 
 // buildPipelineRun, and the PipelineRun construction/condition-reading

@@ -1,0 +1,17 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: IntakeProviderConfig
+metadata:
+  name: standard-generative-onboarding-provider
+  namespace: sandbox
+spec:
+  providerType: tekton
+  sandboxPipelineName: model-intake-sandbox
+  promotionPipelineName: model-intake-promotion
+  serviceAccountName: pipeline
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim: guidellm-output-pvc
+    - name: manifests
+      configMap: mmlu-manifest
+    - name: custom-mmlu
+      configMap: custom-mmlu
