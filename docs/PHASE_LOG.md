@@ -2957,3 +2957,155 @@ but the bad input should never have been accepted in the first place.
   `compliance-artifact-scan` does respect) -- a separate, pre-existing
   inconsistency noticed during this investigation but out of scope for
   this fix.
+
+---
+
+## Out-of-band follow-up #3 — gpu-advisor's OCI/modelcar model-id producing wildly inflated GPU memory estimates
+
+**Commit:** `e019a0a` on `feat/model-request-controller` -- "gpu-advisor:
+use model-tokenizer for architecture sizing, flag low-confidence
+estimates". Reported immediately after follow-up #2: an oci-sourced
+sandbox `PipelineRun` (`model-intake-ba9d47665f`,
+`spec.model.uri="granite-3.3-2b-instruct"`) was `BLOCKED` by
+`gpu-advisor` with an estimated 73.32 GB per-replica requirement
+against a single 20.2 GB L4 GPU -- for what is actually a 2B model.
+
+### Diagnosis
+
+`advisor.py`'s `local_recommendation()` calls
+`transformers.AutoConfig.from_pretrained(model_id)` to resolve real
+architecture shape (layers/hidden size/heads/KV-heads) for KV-cache
+sizing. For an oci-sourced `ModelRequest`, `model-id` (the Tekton
+param, sourced from `spec.model.uri`) is the deployment artifact
+reference -- here a bare modelcar tag `"granite-3.3-2b-instruct"`,
+missing its `"ibm-granite/"` org prefix (the modelcar catalog's naming
+convention drops it) -- never a resolvable Hugging Face id. The lookup
+therefore always fails for oci sources, falling back to a hardcoded
+generic ~7B-class shape (32 layers, 4096 hidden, 32 heads) for the
+KV-cache term specifically. Meanwhile a separate, independent
+name-parsing heuristic (matching size hints like `"2b"` directly out
+of the tag string) still correctly estimated the *weight* size at 2B.
+The mismatch -- 2B weights combined with a 7B-shaped KV cache -- is
+what produced the inflated 73.32 GB estimate and the resulting
+`BLOCKED` verdict. Confirmed by reproducing the exact numbers with a
+standalone call to the unmodified function before touching any code.
+
+Found that the CRD already has a `spec.model.tokenizer` field, and the
+controller already builds a `model-tokenizer` Tekton param from it
+(`stagecommon.BuildCommonModelParams`) -- but nothing downstream ever
+consumed it: `gpu-advisor-task.yaml` had no `model-tokenizer` param at
+all, and `sandbox-pipeline.yaml`/`promotion-pipeline.yaml` declared
+`model-tokenizer` as a *Pipeline* param (with a description literally
+saying "Hugging Face tokenizer ID for GuideLLM benchmarks") but never
+forwarded it into their `gpu-advisor`/`gpu-advisor-sandbox` Task
+invocation. The param existed at every layer except the one that
+actually needed it.
+
+### Fixes
+
+1. `gpu-advisor-task.yaml`: added a `model-tokenizer` Task param
+   (default `""`, non-breaking) wired to a new `MODEL_TOKENIZER` env
+   var.
+2. `sandbox-pipeline.yaml`, `promotion-pipeline.yaml`: forward the
+   already-declared `model-tokenizer` Pipeline param into their
+   `gpu-advisor`/`gpu-advisor-sandbox` Task invocation.
+3. `advisor.py`'s `local_recommendation()` (and
+   `remote_recommendation()`'s payload) now take an optional
+   `hf_config_id` (falling back to `model_id`, matching prior behavior
+   when unset) used specifically for the `AutoConfig.from_pretrained()`
+   call -- the param-count name-heuristic keeps using the original
+   `model_id` string, since that heuristic was already working
+   correctly and needs no real HF id.
+4. Per the capacity-planning skill's guidance to record assumptions and
+   confidence: when the config lookup still fails, the result now
+   carries an explicit `confidence: "low"` and a human-readable
+   `assumptions` list, surfaced in the step's console log (a `WARN`
+   block immediately after the existing blocked debug line), the
+   human-readable `gpu-advisor-summary.txt`, and the machine-readable
+   `deployment-options.json`. This deliberately does **not** change the
+   `BLOCKED` decision itself when the fallback numbers still say the
+   model doesn't fit -- it only makes a low-confidence block visibly
+   distinguishable from a high-confidence one; getting an accurate
+   *estimate* (and thus a correct decision) depends on the
+   `model-tokenizer` value actually being a real HF id, which is a data
+   quality/UI concern, not something this fix can force.
+5. `model-intake-ui/wizard.html`: corrected the Tokenizer field's hint
+   text (previously "for GuideLLM", which -- confirmed by reading
+   `guidellm-benchmark-task.yaml`'s underlying `benchmark.py` in full --
+   was never accurate; see below) to describe its actual purpose:
+   GPU-sizing accuracy, particularly for S3/OCI sources whose `model-id`
+   isn't a real HF id.
+6. Bumped `quay.io/jhurlocker/gpu-advisor` `v0.1.3` -> `v0.1.4`
+   (immutable version, not `latest`) and updated the Task's image
+   reference.
+
+**Note:** the exact previously-`BLOCKED` live request
+(`model-intake-ba9d47665f`) already had `spec.model.tokenizer` set to
+`"ibm-granite/granite-3.3-2b-instruct"` (the UI's static form default,
+which the user happened not to have cleared) -- so this fix alone,
+with **no UI data-entry change required**, resolves that specific case
+merely by actually consuming a field that was already being correctly
+populated and already present on the CRD.
+
+### Investigated but explicitly NOT done: wiring `model-tokenizer` into `guidellm-benchmark-task.yaml`
+
+This was one of the approved fix-scope items going in, but investigating
+`guidellm-benchmark-task.yaml` and its underlying `benchmark.py` in
+full found it has **no consumer for a tokenizer id at all**: GuideLLM
+benchmarks are submitted to EvalHub using only `MODEL_NAME` (the
+registered model name); EvalHub resolves the model/tokenizer itself
+since the model is already deployed and known to it by that name.
+There is no `AutoTokenizer` call, tokenizer param, or tokenizer field
+anywhere in that Task's script or its EvalHub payload to plug a
+tokenizer id into. Adding the param there regardless would just create
+a second dead param -- the exact class of problem this fix addresses
+elsewhere -- so it was deliberately not added. Both Pipelines'
+`model-tokenizer` param descriptions were corrected to state this
+plainly instead of repeating the previous inaccurate "for GuideLLM
+benchmarks" claim.
+
+### Verification
+
+- Reproduced the exact reported numbers (73.32 GB, `Could not load
+  config` message) via a standalone call to the unmodified
+  `local_recommendation()` before writing any fix, confirming the
+  diagnosis.
+- Unit-level, both before/after: called the fixed
+  `local_recommendation("granite-3.3-2b-instruct", ...)` once with no
+  `hf_config_id` (old behavior: 73.32 GB, `confidence: "low"`, the new
+  assumption message) and once with
+  `hf_config_id="ibm-granite/granite-3.3-2b-instruct"` (new behavior:
+  real config loaded -- 2048 hidden, 40 layers, 8 KV heads -- 15.34 GB,
+  `confidence: "high"`).
+- Rebuilt/pushed `gpu-advisor:v0.1.4` and the UI image; forced an
+  ArgoCD refresh/sync for the GitOps-managed Pipeline/Task changes and
+  confirmed the live `Task`/`Pipeline` objects contain the new
+  `model-tokenizer` param and `v0.1.4` image reference before testing.
+- **Full live end-to-end reproduction of the original bug's exact
+  scenario**: applied a raw `ModelRequest` with
+  `sourceType: oci`, `uri: "granite-3.3-2b-instruct"`,
+  `tokenizer: "ibm-granite/granite-3.3-2b-instruct"` (the same shape as
+  the original failing request) directly to the cluster. The
+  `gpu-advisor-sandbox` `TaskRun` -- previously the one that failed --
+  now `Succeeded`; its logs show `Loaded config
+  (ibm-granite/granite-3.3-2b-instruct): 2048 hidden, 40 layers, 32
+  heads, 8 KV heads`, `Total per replica: 15.34 GB`, `Confidence:
+  HIGH`, `Status: RECOMMENDED` (was `BLOCKED`); the `ModelRequest`
+  progressed to `sandboxRunning` with 3 tasks completed and 0 failed
+  (was: 2 completed, 1 failed at this exact step). Deleted the test
+  object afterward.
+
+### Known follow-up NOT done here
+
+- The Tokenizer field is still a free-text input with no validation
+  against `model-source`/`model-id` (unlike the URL/OCI-ref validation
+  added in follow-up #2 for `model-id` itself) -- a user can still
+  leave it blank or put in a non-HF value for an OCI/S3 submission,
+  which will silently fall back to the low-confidence path (now at
+  least visibly flagged as such, per this fix, rather than presented
+  as precise).
+- `remote_recommendation()`'s new `model_hf_config_id` payload field is
+  unvalidated against the external advisor endpoint's actual schema --
+  no live remote-advisor-endpoint test was performed (this cluster's
+  `advisor-endpoint` param is empty, so only the local heuristic path
+  was exercised end-to-end).
