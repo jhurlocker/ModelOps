@@ -107,11 +107,32 @@ func (e *secretLookupError) Unwrap() error { return e.err }
 // internal/stages/tekton.StageRunner's own marker (this file no longer
 // imports tektonv1 at all -- see SetupWithManager's generalized .Owns()
 // below); capacityplans' create/update/patch/delete verbs and the
-// capacityplans/finalizers and modelrequests/finalizers markers (dead:
-// no finalizer is registered on either type, confirmed by grep -- GC is
-// entirely owner-reference-based) were dropped as part of the same
-// pass. See docs/PHASE_LOG.md Phase 7 for the full split rationale.
+// capacityplans/finalizers marker were dropped as part of the same pass
+// (nothing ever creates a child object owned by a CapacityPlan, so
+// capacityplans/finalizers has no live purpose -- confirmed by removing
+// it and verifying against the sandbox cluster).
+//
+// modelrequests/finalizers is NOT dead, despite no finalizer literally
+// being registered on ModelRequest in this codebase -- a real,
+// live-cluster-only regression caught only by cluster verification, not
+// envtest (whose admin-equivalent client bypasses this check, the same
+// shape of gap Phase 1's RBAC-escalation incident already demonstrated):
+// both tekton.StageRunner.buildPipelineRun and
+// capacityplanning.StageRunner.EnsureRun call
+// controllerutil.SetControllerReference(modelRequest, child, scheme),
+// which sets OwnerReference.BlockOwnerDeletion=true by default. The API
+// server's admission control requires `update` permission on
+// modelrequests/finalizers to set blockOwnerDeletion:true on ANY owner
+// reference pointing at a ModelRequest, regardless of whether the
+// ModelRequest controller itself ever uses a finalizer -- this is a
+// generic Kubernetes owner-reference safety check, not tied to this
+// codebase's own finalizer usage. Removing this marker broke every
+// CapacityPlan/PipelineRun creation on the sandbox cluster with
+// "cannot set blockOwnerDeletion if an ownerReference refers to a
+// resource you can't set finalizers on"; restored after being caught by
+// live verification. See docs/PHASE_LOG.md's Phase 7 entry.
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests/finalizers,verbs=update
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modellifecycleprofiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=modelops.example.io,resources=platformconfigs,verbs=get;list;watch

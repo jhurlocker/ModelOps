@@ -58,9 +58,33 @@ actual GPU-sizing heuristic and the `CapacityPlan` object's status:
   `delete`: it never creates a `CapacityPlan`, only reads and later writes
   its status).
 - `capacityplans/status` (`get;update;patch`).
-- (The `capacityplans/finalizers` marker was removed this phase: no
-  finalizer is registered on `CapacityPlan` anywhere — garbage collection
-  is entirely owner-reference-based.)
+- (The `capacityplans/finalizers` marker was removed this phase and
+  confirmed safe against the sandbox cluster: nothing in this codebase
+  ever creates a child object with a `CapacityPlan` as its owner, so no
+  `blockOwnerDeletion` admission check ever needs it — see the important
+  caveat about `modelrequests/finalizers` below, which is the opposite
+  case.)
+
+### A real, live-cluster-only regression: `modelrequests/finalizers` is NOT dead
+
+Despite no finalizer being literally registered on `ModelRequest`
+anywhere in this codebase, the `modelrequests/finalizers` marker is
+**required**, and removing it (the first draft of this phase's RBAC
+tightening did) broke every `CapacityPlan`/`PipelineRun` creation on the
+sandbox cluster — caught only by live verification, not `envtest` (whose
+admin-equivalent client bypasses this check entirely, the same shape of
+gap Phase 1's RBAC-escalation incident already demonstrated for a
+different resource). Both `tekton.StageRunner.buildPipelineRun` and
+`capacityplanning.StageRunner.EnsureRun` call
+`controllerutil.SetControllerReference(modelRequest, child, scheme)`,
+which sets `OwnerReference.BlockOwnerDeletion = true` by default. The API
+server's admission control requires `update` permission on
+`modelrequests/finalizers` to set `blockOwnerDeletion: true` on *any*
+owner reference pointing at a `ModelRequest` — a generic Kubernetes
+owner-reference safety check, unrelated to whether the `ModelRequest`
+controller itself ever uses a finalizer. Restored on the core
+reconciler's marker block after being caught live; see
+`docs/PHASE_LOG.md`'s Phase 7 entry for the exact error and fix.
 
 ### `internal/stages/capacityplanning.StageRunner`
 

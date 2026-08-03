@@ -20,6 +20,12 @@ rules:
   - apiGroups:
       - modelops.example.io
     resources:
+      - modelrequests/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - modelops.example.io
+    resources:
       - modelrequests/status
     verbs:
       - get

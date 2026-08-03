@@ -87,6 +87,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - modelops.example.io
+  resources:
+  - modelrequests/finalizers
+  verbs:
+  - update
+- apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
