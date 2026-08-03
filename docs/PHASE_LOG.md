@@ -2827,3 +2827,133 @@ template/route code only):
   reported and found, not a general sweep. The explicit-map pattern
   now used for secret-name fields is a reasonable model for auditing
   the rest, if a similar report comes in.
+
+---
+
+## Out-of-band follow-up #2 — URL-shaped model-id crashing the compliance-inspect artifact resolution
+
+**Commit:** `45100b7` on `feat/model-request-controller` -- "model-intake-ui,
+compliance-artifact-scan-task, deploy_model: reject and harden against
+URL-shaped model-id". Reported minutes after the previous follow-up:
+the user hit a scary-looking `level=fatal msg="Error parsing image
+name ... invalid reference format"` from `skopeo` in a fresh sandbox
+`PipelineRun`.
+
+### Diagnosis
+
+Found the exact `ModelRequest` (`model-intake-5652d230f1`,
+created `2026-08-03T20:05:23Z`, matching the log timestamps):
+`spec.model.sourceType` was `"huggingface"` but `spec.model.uri` was a
+full URL
+(`https://quay.io/redhat-ai-services/modelcar-catalog:granite-3.3-2b-instruct`)
+-- pasted into the wizard's single shared "Model ID" input while
+"Model Source" was left at its Hugging Face default. There is no
+validation anywhere that the two are consistent.
+
+`compliance-artifact-scan-task.yaml`'s `compliance-inspect` step
+derives two candidate modelcar tags from `MODEL_ID`
+(`SHORT_TAG`/`ORG_TAG`) assuming it is always a bare HF `org/name`; it
+only replaces `/` with `--` and never strips a URL scheme or handles
+an embedded `:`. Fed the URL above, both derived candidates still
+contained a stray scheme/colon, producing a *second*, more mangled
+attempt appended onto `quay.io/<modelcar-repo>:`, which is what
+`skopeo` correctly rejected as an invalid reference. Independently
+confirmed via the `TaskRun`'s per-step statuses that this was **not**
+a crash: `compliance-inspect` itself finished with `exitCode: 0` (by
+design -- an unresolvable artifact is recorded as an empty inspect,
+per the code's own comment, and left for `evaluate-and-upload` to mark
+compliance FAILED); the actual `TaskRun` failure was the `gate` step
+(`exitCode: 1`), which is the intentional policy gate correctly halting
+the pipeline before deploy because the artifact could not be verified.
+So the pipeline behaved *correctly* given the bad input -- the alarming
+part was the confusing, mangled log line, not an actual malfunction --
+but the bad input should never have been accepted in the first place.
+
+### Fixes (three files, matching the three points in the chain)
+
+1. **`model_onboarding_pipeline/model-intake-ui/app/routes/intake.py`
+   (the actual root cause)**: added `_validate_model_source_uri()` --
+   if `model-source` is `"huggingface"` and `model-id` contains `"://"`
+   or `":"` (a bare HF repo id never does), the request is rejected
+   (`HTTP 400`) with an explanation and a pointer to switch to "OCI
+   Container Registry" instead. Generalized the error-rendering
+   mechanism added in follow-up #1 (which assumed all errors belonged
+   on the Review step) into a `FIELD_STEP` map + `error_fields` set, so
+   a re-render now lands on whichever step actually contains the
+   invalid field -- Model step for `model-id`, Review step for the
+   secret fields -- instead of always jumping to Review.
+2. **`compliance-artifact-scan-task.yaml`'s `compliance-inspect`
+   step**: strip any `http(s)://`/`docker://`/`oci://` scheme prefix
+   from `MODEL_ID` before deriving `SHORT_TAG`/`ORG_TAG`, mirroring the
+   scheme-strip already present for the explicit `modelcar-image`
+   override path a few lines above. Defense in depth for any
+   `ModelRequest` that reaches this stage with a URL-shaped `model-id`
+   regardless of how it got there (e.g. created directly via the API,
+   bypassing the UI). This does **not** make every URL resolvable --
+   a URL that already embeds its own `registry-path:tag` (as in the
+   reported case) still isn't a bare HF id and will still correctly
+   fail to resolve (and correctly fail the gate); it narrowly fixes
+   the case of a *bare* scheme-prefixed id (e.g.
+   `"https://ibm-granite/granite-3.3-2b-instruct"`), which now
+   resolves cleanly on the first (`SHORT_TAG`) attempt instead of
+   producing a mangled candidate.
+3. **`model_onboarding_pipeline/tools/deploy-model-task/deploy_model.py`'s
+   `_resolve_modelcar_uri()`**: identical scheme-strip fix applied to
+   the same duplicated derivation pattern used by the later
+   deploy-model stage.
+
+### Verification
+
+- Reproduced the reported `TaskRun`'s exact step-level statuses live
+  (`compliance-inspect` exitCode 0, `gate` exitCode 1), confirming the
+  diagnosis above before writing any fix.
+- Rebuilt/pushed the UI image, rolled it out; confirmed live via a
+  real POST to the Route that the identical huggingface+URL
+  `model-id` combination that produced the original report now
+  returns `HTTP 400`, with the error banner, `model-id` field
+  flagged, and `data-start-step="0"` (Model step) -- and that a normal
+  huggingface submission (bare `org/name`) and a normal oci submission
+  (URL sanitized via the pre-existing `model-source=="oci"` path) both
+  still succeed unchanged.
+- The `compliance-artifact-scan-task.yaml` change is GitOps-managed
+  (`gitops/components/pipelines`, `Application/modelops-pipelines`);
+  forced an ArgoCD refresh/sync after pushing and confirmed the live
+  `Task` object's script contains the new `sed` scheme-strip line
+  before testing it.
+- Verified the task-level fix directly (bypassing the UI entirely) by
+  applying a raw `ModelRequest` with
+  `spec.model.uri: "https://ibm-granite/granite-3.3-2b-instruct"` --
+  confirmed via the resulting pod's `step-compliance-inspect` logs
+  that it now resolves on the first (`SHORT_TAG`) attempt with no
+  scheme/colon mangling.
+- Verified the `deploy_model.py` fix directly via a standalone Python
+  invocation of `_resolve_modelcar_uri()` with a scheme-prefixed
+  `MODEL_ID` and a mocked `_tag_exists()`, confirming it resolves to
+  the correct `oci://` URI.
+- All disposable `ModelRequest` objects created during this
+  verification were deleted afterward.
+
+### Known follow-up NOT done here
+
+- An OCI-sourced `ModelRequest` whose sanitized URI is already a
+  fully-qualified `org/repo:tag` reference (not a bare HF id) still
+  hits the same `SHORT_TAG`/`ORG_TAG` derivation, since there is no
+  source-type branching anywhere in this call chain: confirmed
+  `modelcar-image` is unconditionally hardcoded to `""` in
+  `stagecommon.BuildCommonModelParams` (so the explicit-override path
+  is never taken by controller-driven runs), and `sandbox-pipeline.yaml`
+  declares a `model-source-type` param that is never actually
+  forwarded to `compliance-artifact-scan`. A legitimate oci-sourced
+  request with a colon-tag in its URI would still produce a malformed,
+  double-tagged candidate. Correctly handling that requires
+  recognizing an already-tagged reference and inspecting it directly
+  instead of combining it with `modelcar-repo` -- a larger change than
+  the scheme-strip fixed here, deliberately left out of this fix's
+  scope.
+- No equivalent audit was done of `deploy-model-task.yaml`'s own
+  `modelcar-repo`/`modelcar-image` param wiring (it has no
+  `modelcar-repo` param at all; `deploy_model.py` hardcodes the repo
+  string, ignoring any `PlatformConfig.Spec.ModelCarRepo` override that
+  `compliance-artifact-scan` does respect) -- a separate, pre-existing
+  inconsistency noticed during this investigation but out of scope for
+  this fix.
