@@ -827,3 +827,319 @@ expected.
   import check" above) and expected to happen as part of Phase 4's
   `StageRunner` relocation work, not silently deferred without
   explanation.
+
+---
+
+## Phase 4 — Decouple the core reconciler from Tekton
+
+**Commit:** `3d336bb` on `feat/model-request-controller` — "Phase 4:
+decouple ModelRequestReconciler from Tekton via StageRunner". Not a
+breaking API/CRD change -- no `_types.go` file touched, `make manifests
+generate` confirmed a no-op.
+
+This phase went through an explicit design review first (per the user's
+request, the same as Phase 0) before any code was written; the approved
+design is what's summarized below. See the design-review conversation
+for the full rationale on each shape decision.
+
+### What changed
+
+- **`internal/stagecommon/stage.go`** (new): `StagePhase`
+  (`StageRunning`/`StageSucceeded`/`StageFailed`), `StageStatus`
+  (`Phase`/`Reason`/`Message`/`RunRef`), `StageSpec`
+  (`Name`/`RunName`/`WorkflowRef`/`Params map[string]string`), and the
+  `StageRunner` interface (`EnsureRun(ctx, *ModelRequest, StageSpec)
+  (StageStatus, error)`) -- the generic status/execution contract
+  `ModelRequestReconciler` now depends on instead of `tektonv1` directly.
+- **`internal/stagecommon/fake.go`** (new): `FakeStageRunner`, an
+  in-memory `StageRunner` for tests. Deliberately a real (non-`_test.go`)
+  file, since Go can't import another package's `_test.go` files across
+  a package boundary and `internal/controller`'s tests need to construct
+  one. Records every `StageSpec` it's called with (`Calls`) and serves
+  scripted `StageStatus` values per stage name (`ScriptStage`), with the
+  last scripted value repeating once its queue drains -- fixed one bug
+  in this repeat logic during development (see "TDD" section below).
+- **`internal/stagecommon/params.go`**: `BuildCommonModelParams` and
+  `AddParam` now build/take `map[string]string` instead of
+  `tektonv1.Params`. This is what actually lets
+  `ModelRequestReconciler` stop importing `tektonv1` to build a stage's
+  inputs -- previously `stagecommon` (and therefore anything calling
+  it) was Tekton-typed even though none of the param *values* are
+  Tekton-specific. `AddParam`'s doc comment now explains a deliberate
+  side effect: building directly into a map means a second `AddParam`
+  call for an already-set name silently overwrites rather than
+  producing a duplicate slice entry -- a *stronger* structural fix for
+  the Phase 1/3 duplicate-param bug class (a duplicate literally cannot
+  reach a real `PipelineRun`'s `Spec.Params` now) at the cost of losing
+  the old tests' loud "duplicate detected" failure for a *different*
+  mistake (two unrelated params accidentally sharing a name overwriting
+  silently instead of erroring). Flagged, not silently traded away.
+- **`internal/stages/tekton`** (new package): `StageRunner`, the
+  Tekton-backed `stagecommon.StageRunner` implementation. Holds,
+  verbatim-relocated from `modelrequest_controller.go`: `buildPipelineRun`
+  (workspace bindings -- `shared-workspace`/`guidellm-output-pvc` PVC,
+  `manifests`/`mmlu-manifest` and `custom-mmlu` ConfigMaps,
+  `ServiceAccountName: "pipeline"`, unbounded pipeline timeout),
+  condition-reading (`mapCondition`: no condition or `Unknown` ->
+  `StageRunning`; `False` -> `StageFailed`; `True` -> `StageSucceeded`,
+  `Reason`/`Message` passed through verbatim), and the new
+  `toTektonParams` conversion (`map[string]string` -> `tektonv1.Params`,
+  same empty-value-omitted guard as `AddParam`).
+- **`internal/controller/modelrequest_controller.go`**:
+  `ModelRequestReconciler` gains a `StageRunner stagecommon.StageRunner`
+  field. The sandbox phase and the per-namespace promotion loop now call
+  `r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{...})`
+  and switch on the returned `StageStatus.Phase`, instead of
+  `r.Get`/`buildPipelineRun`/`createIgnoringAlreadyExists`/
+  `GetCondition("Succeeded")` inline. `buildSandboxPipelineParams`/
+  `buildPromotionPipelineParams` stay in `internal/controller` for this
+  phase -- only their return type changed
+  (`tektonv1.Params` -> `map[string]string`) -- see "Deliberately not
+  done this phase" below. The old private `buildPipelineRun` function
+  was deleted from this file (moved to `internal/stages/tekton`).
+  `tektonv1` is still imported here for exactly one thing:
+  `SetupWithManager`'s `.Owns(&tektonv1.PipelineRun{})` watch
+  registration -- manager-wiring code, not `Reconcile`'s domain logic,
+  and out of this phase's stated goal ("`ModelRequestReconciler` should
+  never import `tektonv1` directly **or read a Tekton condition**" --
+  `Reconcile` itself now does neither). Flagged as a known residual, a
+  natural candidate for Phase 5/7 once a provider-agnostic "which types
+  does this `StageRunner` own" hook exists.
+- **`main.go`**: wires the real `tektonstage.StageRunner{Client:
+  mgr.GetClient(), Scheme: mgr.GetScheme()}` into
+  `ModelRequestReconciler.StageRunner` at manager setup.
+
+### TDD: what was genuinely new vs. relocated
+
+Per the guiding principle ("every new interface must ship with a
+fake... every stage handler must be testable... without any real stage
+implementation"):
+
+- **Written first, before the implementation existed**:
+  `internal/stages/tekton/stagerunner_test.go`'s
+  `TestToTektonParams_*` (the `map[string]string` -> `tektonv1.Params`
+  conversion didn't exist anywhere before this phase) and
+  `TestBuildPipelineRun_WorkspaceBindings_MatchTodaysHardcodedShape`
+  (nothing in the pre-Phase-4 suite asserted on workspace bindings
+  directly -- only `PipelineRef`/`OwnerReferences`/`Params` were ever
+  checked -- so this closes a real, previously-uncovered gap while
+  relocating `buildPipelineRun`, not just re-testing what Phase 0-3
+  already covered). Also new:
+  `TestEnsureRun_*` directly isolating the condition-mapping table
+  (freshly-created/no-condition, `Unknown`, `True`, `False`) that used
+  to only be exercised indirectly, inline in `Reconcile`.
+- **A real bug caught by this TDD process, not just a hypothetical
+  benefit of it**: the first draft of `FakeStageRunner`'s "last
+  scripted value repeats" behavior kept the already-served single-item
+  queue in place after serving it (so it could keep "repeating"); a
+  later `ScriptStage` call for the same stage appended *after* that
+  stale item instead of replacing it, so the next `EnsureRun` call
+  served the *old* value again instead of the newly-scripted one. Caught
+  immediately by
+  `TestModelRequest_FullLifecycle_DrivenEntirelyByFakeStageRunner_NoTektonInvolved`
+  failing its second assertion (expected `PromotionRunning`, got
+  `SandboxRunning` again). Fixed by splitting `FakeStageRunner`'s state
+  into a `pending` queue (always consumed front-to-back) and a separate
+  `last`-served value used only once `pending` is empty, so a fresh
+  `ScriptStage` call always takes priority over a stale repeat.
+- **Characterization-verified relocation** (not new logic): the
+  `buildPipelineRun` body itself, and the four-way condition branch,
+  are unchanged line-for-line from `modelrequest_controller.go`'s
+  pre-Phase-4 version -- proven by every pre-existing
+  `internal/controller` characterization test still passing unmodified
+  once `newModelRequestReconciler()` was wired to construct the real
+  `tekton.StageRunner` instead of leaving `StageRunner` nil.
+
+### The two proof tests (plus a failure-path variant)
+
+`internal/controller/modelrequest_stagerunner_test.go` (new file):
+
+1. `TestModelRequest_FullLifecycle_DrivenEntirelyByFakeStageRunner_NoTektonInvolved`
+   -- runs against this package's shared `envtest` apiserver (which
+   does have the `PipelineRun` CRD installed, since other tests in this
+   package need it), reconciles through
+   `SandboxRunning -> PromotionRunning -> Succeeded` using only a
+   `stagecommon.FakeStageRunner`, and after **every** reconcile asserts
+   a `tektonv1.PipelineRunList` for the test's namespace comes back
+   empty. Also asserts the `StageSpec` the reconciler actually built for
+   the promotion stage (`WorkflowRef`, `Params["model-id"]`,
+   `Params["target-namespace"]`, `Params["run-register"]`) matches the
+   real `ModelRequest`/profile/`PlatformConfig`/`CapacityPlan` inputs --
+   proving only execution/status-reading is faked, not the domain logic
+   that decides what to run.
+2. `TestModelRequest_SandboxFails_UsingFakeStageRunner_ReportsFailedPhase_NoTektonInvolved`
+   -- the failure-path companion: a scripted `StageFailed` status
+   produces `ModelRequest.Status.Phase == "Failed"` with the fake's
+   message surfaced, still with zero `PipelineRun`s ever created.
+3. `TestModelRequest_FullLifecycle_FakeClientWithoutTektonScheme` -- the
+   strongest form of the proof, exactly as proposed in the design
+   review: builds its own `controller-runtime/pkg/client/fake` client
+   whose `runtime.Scheme` registers `client-go`'s scheme and
+   `api/v1alpha1`, but **never** `tektonv1.AddToScheme`. Seeds the
+   `Namespace`/`Secret`/`PlatformConfig`/`ModelLifecycleProfile`/
+   `ModelRequest`/`CapacityPlan` (pre-set to `Succeeded`) objects
+   directly, scripts both stages to `StageSucceeded`, reconciles once,
+   and asserts the overall phase reaches `Succeeded` with exactly 2
+   `FakeStageRunner.Calls` (`sandbox`, `promotion-staging`). Since the
+   scheme never learned what a `tektonv1.PipelineRun` is,
+   this is stronger than "zero were created" -- the reconciler
+   literally could not have constructed one even if some code path had
+   tried.
+
+### Reconciler-level regression net: mechanical harness change, same assertions
+
+`newModelRequestReconciler()` (`modelrequest_controller_test.go`) now
+wires `StageRunner: &tektonstage.StageRunner{Client: k8sClient, Scheme:
+scheme}` instead of leaving the field nil. Every pre-existing
+characterization test in this package (sandbox creation, pending/no-op,
+failure, promotion creation/multi-namespace/failure/success, the
+profile-override end-to-end test) passed **unmodified** once this one
+helper function changed -- confirming the Tekton-specific behavior
+really was relocated, not altered. This is the concrete Phase 0
+regression net doing its job for Phases 4-6, per `REFACTOR_PLAN.md`'s
+own description of what it's for.
+
+The param-builder-focused tests needed **mechanical, signature-only**
+updates (no assertion values changed), since
+`buildSandboxPipelineParams`/`buildPromotionPipelineParams` now return
+`map[string]string` directly instead of `tektonv1.Params`:
+`TestBuildSandboxPipelineParams_ExplicitOverride_TakesPrecedenceAndAppearsExactlyOnce`/
+`_NoOverride_FallsBackToPlanDerivedGPUCount`/`_NoOverrideAndNoPlan_OmitsParam`
+switched from `findAllParams(params, ...)` to direct map lookups; the
+two full-fixture characterization tests
+(`TestBuildSandboxPipelineParams_FullFixture_CharacterizesCurrentOutput`,
+`TestBuildPromotionPipelineParams_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput`,
+`TestBuildPromotionPipelineParams_MiddleNamespace_OmitsApprovalURL_AndRunRegisterFalse`)
+dropped their `paramsToMap(t, params)` conversion step since the
+function's own return value already is that map now -- the `want`
+maps and every asserted value are byte-identical to before this phase.
+Same treatment for `internal/stagecommon/params_test.go`'s two direct
+`BuildCommonModelParams` tests.
+
+### Deliberately NOT done this phase (see REFACTOR_PLAN.md Phase 6 note)
+
+`buildSandboxPipelineParams`/`buildPromotionPipelineParams`/
+`sandboxPipelineNameOrDefault`/`promotionPipelineNameOrDefault`/
+`getPromotionNamespaces` still live in `internal/controller`, not
+`internal/stages/sandbox`/`internal/stages/promotion` -- only their
+Tekton-typed return values changed. `REFACTOR_PLAN.md`'s own Phase 4
+text only names "PipelineRun construction, workspace bindings, and
+condition-reading" as what moves into `TektonStageRunner`; the param
+*values* were never Tekton-specific, only the type they were expressed
+in, so changing that type was sufficient to meet this phase's stated
+goal. Physically relocating these functions into their per-stage
+packages is now an explicit numbered step in `REFACTOR_PLAN.md`'s
+Phase 6 (added by this phase's edit to that file), since Phase 6's
+stage-handler dispatch needs real per-stage logic behind
+`profile.Spec.Stages` anyway -- the natural point to finish the move,
+rather than doing it disconnected from that work now.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all four packages under
+`internal/stages/*` (`sandbox`, `promotion`, `capacityplanning`,
+`tekton`): none imports another. `internal/stages/tekton` imports only
+`internal/stagecommon` (for the `StageRunner`/`StageSpec`/`StageStatus`
+contract) and `api/v1alpha1` -- never `internal/controller` or a
+sibling stage package.
+
+### Manifest regeneration
+
+No `_types.go` file was touched. `make manifests generate`
+(controller-gen v0.16.5) run anyway per this phase's instructions;
+`git status` showed zero diff under `operator/config/` or
+`operator/api/` -- confirmed a no-op, as expected.
+
+### `go.mod` note
+
+`gopkg.in/evanphx/json-patch.v4` moved from an indirect-only mention to
+an explicit `// indirect` require line -- `internal/stages/tekton`'s
+test file is the first place in this module to import
+`sigs.k8s.io/controller-runtime/pkg/client/fake` directly, which pulls
+this transitively. `go.sum` unchanged; the module was already present
+in the graph.
+
+### Test coverage added
+
+- `internal/stagecommon`: no new test file for `stage.go` itself (a
+  pure type/interface declaration has nothing to unit test in
+  isolation); `fake.go`'s behavior is exercised indirectly by every
+  `internal/controller` test that uses `FakeStageRunner`, per the
+  "genuinely new" TDD section above.
+- `internal/stages/tekton/stagerunner_test.go` (new, 8 tests): 3 for
+  `toTektonParams`, 1 for `buildPipelineRun`'s workspace bindings, 4 for
+  `EnsureRun`'s condition-mapping (freshly-created, existing+`Unknown`,
+  existing+`True`, existing+`False`). Plain `go test` against a
+  `controller-runtime/pkg/client/fake` client -- no `envtest` needed for
+  this package.
+- `internal/controller/modelrequest_stagerunner_test.go` (new, 3
+  tests): the two `envtest`-backed proof tests and the
+  no-tekton-scheme fake-client variant, described above.
+- Total suite: 49 tests passing in `internal/controller` (46 from Phase
+  3 + 3 new), all still passing unmodified except the mechanical
+  signature-only updates described above; 2 in `internal/stagecommon`
+  (unchanged from Phase 3, mechanically updated); 8 new in
+  `internal/stages/tekton`. `go build ./...`/`go vet ./...` clean.
+
+### Sandbox cluster verification
+
+- Pushed this phase's commit (`3d336bb`) to
+  `feat/model-request-controller`; `Application/modelops-operator`
+  (branch-tracked, auto-sync + self-heal) synced automatically --
+  confirmed `Synced`/`Healthy` at `3d336bb` (no manifest changes this
+  phase, so nothing new to actually apply beyond the revision marker).
+- Rebuilt and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image from this phase's code (same pattern as Phases 1-3 -- the
+  `Deployment` runs from this pre-built tag with `imagePullPolicy:
+  Always`; `kubectl rollout restart` picked it up). Manager started
+  cleanly, all three `EventSource`s (`ModelRequest`, `PipelineRun`,
+  `CapacityPlan`) registered without error.
+- Created a disposable `ModelRequest` (`phase4-verify`, `sandbox`
+  namespace, referencing the pre-existing `scan-s3-credentials`/
+  `result-s3-credentials` secrets and the
+  `standard-generative-onboarding` profile,
+  `requirements.gpuCountOverride: "3"`). Reconciled cleanly to
+  `SandboxRunning` via the new `tekton.StageRunner`; the sandbox
+  `PipelineRun`'s `pipelineRef.name` (`model-intake-sandbox`) and
+  params (`gpu-count-override=3`, `model-id`, `context-length=4096`)
+  matched expectations, and `Status.Message` carried the real Tekton
+  condition's message through (`"Tasks Completed: 0 ... Incomplete: 6
+  ..."`) exactly as the pre-Phase-4 inline logic did.
+- Manually flipped the sandbox `PipelineRun`'s `Succeeded` condition to
+  `True` (`status` subresource patch) -- request moved to
+  `PromotionRunning`; the promotion `PipelineRun` was created with
+  `pipelineRef.name=model-intake-promotion`,
+  `gpu-count-override=1` (the `CapacityPlan`-derived value, correctly
+  **ignoring** the `"3"` override -- confirming the documented
+  sandbox/promotion divergence still holds through the new code path),
+  `target-namespace=staging`, `run-register=true`, the same three
+  workspace bindings (`shared-workspace`/`manifests`/`custom-mmlu`),
+  and a correct owner reference back to the `ModelRequest`.
+  Flipped that condition to `True` as well -- request reached
+  `Succeeded` with `Status.Message == "Model onboarding completed
+  successfully"`.
+- Deleted the test `ModelRequest`; both `PipelineRun`s were
+  garbage-collected automatically via owner references (confirmed
+  gone on a follow-up `get`) -- disposable verification, not a
+  permanent cluster change. `Application/modelops-operator` remained
+  `Synced`/`Healthy` throughout.
+
+### Known follow-up NOT done in this phase
+
+- `SetupWithManager`'s `.Owns(&tektonv1.PipelineRun{})` is the one
+  remaining `tektonv1` import in `internal/controller` -- manager
+  wiring, not `Reconcile`'s domain logic, and out of this phase's
+  stated scope. A natural candidate for Phase 5 (once a provider config
+  exists) or Phase 7 (RBAC/permission scoping) to address with a
+  provider-agnostic "which child types does this `StageRunner` own"
+  hook.
+- `buildSandboxPipelineParams`/`buildPromotionPipelineParams` and their
+  neighboring helpers still live in `internal/controller`, not their
+  per-stage packages -- confirmed intentional, now an explicit Phase 6
+  step (see "Deliberately NOT done this phase" above), not silently
+  deferred.
+- The Phase 0 known-behavior quirk (promotion namespaces not gated
+  sequentially on each other's success) is untouched by this phase --
+  still exactly the same loop structure, just calling `StageRunner`
+  instead of building `PipelineRun`s inline. Unchanged on purpose; not
+  this phase's concern.
