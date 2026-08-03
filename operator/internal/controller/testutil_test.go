@@ -14,6 +14,11 @@ import (
 	"testing"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
+	"github.com/jhurlocker/modelops-operator/internal/stagecommon"
+	"github.com/jhurlocker/modelops-operator/internal/stages/capacityplanning"
+	"github.com/jhurlocker/modelops-operator/internal/stages/promotion"
+	"github.com/jhurlocker/modelops-operator/internal/stages/sandbox"
+	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -21,7 +26,38 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+// newStageHandlers returns the real StageHandlers registry (keyed by
+// ProfileStageSpec.Name, matching defaultStages' "capacity"/"sandbox"/
+// "promotion" names) every test in this package uses -- these build
+// *what* to run and never touch Tekton/a CapacityPlan object
+// themselves, so it's safe to use the real handlers even in tests that
+// fake the StageRunner side (e.g. modelrequest_stagerunner_test.go).
+func newStageHandlers() map[string]stagecommon.StageHandler {
+	return map[string]stagecommon.StageHandler{
+		defaultCapacityStageName:  capacityplanning.Handler{},
+		defaultSandboxStageName:   sandbox.Handler{},
+		defaultPromotionStageName: promotion.Handler{},
+	}
+}
+
+// newStageRunners returns the StageRunners registry (keyed by
+// ProfileStageSpec.Kind): "CapacityPlan" always maps to the real
+// capacityplanning.StageRunner (it never touches Tekton, so there's no
+// reason to fake it), "PipelineRun" maps to pipelineRunner -- pass nil
+// for the real tekton.StageRunner, or a stagecommon.FakeStageRunner/
+// noop.StageRunner to swap it out.
+func newStageRunners(c client.Client, scheme *runtime.Scheme, pipelineRunner stagecommon.StageRunner) map[string]stagecommon.StageRunner {
+	if pipelineRunner == nil {
+		pipelineRunner = &tektonstage.StageRunner{Client: c, Scheme: scheme}
+	}
+	return map[string]stagecommon.StageRunner{
+		"CapacityPlan": &capacityplanning.StageRunner{Client: c, Scheme: scheme},
+		"PipelineRun":  pipelineRunner,
+	}
+}
 
 func nsName(namespace, name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: namespace, Name: name}

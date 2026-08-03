@@ -6,16 +6,24 @@ import (
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 )
 
-// Secrets holds the resolved credential/endpoint fields BuildCommonModelParams
-// needs (deliberately excludes scan-specific S3 credentials, which are
-// sandbox-only). Callers build one of these from their own resolved-secrets
-// type, so this package never needs to import internal/controller.
+// Secrets holds the resolved credential/endpoint fields
+// BuildCommonModelParams needs, plus (as of Phase 6) the scan-specific
+// S3 credentials internal/stages/sandbox.Handler reads directly --
+// BuildCommonModelParams itself still never reads ScanS3*, only
+// sandbox's own handler does. Callers build one of these from their own
+// resolved-secrets type, so this package never needs to import
+// internal/controller.
 type Secrets struct {
 	EvalHubToken      string
 	HuggingFaceToken  string
 	ResultS3Endpoint  string
 	ResultS3AccessKey string
 	ResultS3SecretKey string
+	// ScanS3* are sandbox-stage-only (compliance/security scan result
+	// storage) -- BuildCommonModelParams never reads these.
+	ScanS3Endpoint  string
+	ScanS3AccessKey string
+	ScanS3SecretKey string
 }
 
 // BuildCommonModelParams builds the params identical, byte-for-byte,

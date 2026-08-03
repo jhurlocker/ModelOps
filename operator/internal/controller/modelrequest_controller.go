@@ -2,13 +2,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 	"github.com/jhurlocker/modelops-operator/internal/stagecommon"
+	"github.com/jhurlocker/modelops-operator/internal/stages/promotion"
+	"github.com/jhurlocker/modelops-operator/internal/stagewalk"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -20,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -50,14 +50,42 @@ func createIgnoringAlreadyExists(ctx context.Context, c client.Client, obj clien
 type ModelRequestReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// StageRunner drives sandbox and promotion stage execution
-	// (Tekton PipelineRuns today via internal/stages/tekton.StageRunner,
-	// injected at manager setup; a fake implementation in tests -- see
-	// internal/stagecommon.StageRunner/REFACTOR_PLAN.md Phase 4). The
-	// reconciler never constructs a PipelineRun or reads a Tekton
-	// condition directly.
-	StageRunner stagecommon.StageRunner
+	// StageHandlers/StageRunners are the dual registry the Phase 6
+	// generic stage walker (internal/stagewalk) dispatches through:
+	// StageHandlers is keyed by ProfileStageSpec.Name (builds *what* to
+	// run), StageRunners is keyed by ProfileStageSpec.Kind (builds/
+	// tracks *how* it runs -- Tekton PipelineRuns via
+	// internal/stages/tekton.StageRunner, CapacityPlan objects via
+	// internal/stages/capacityplanning.StageRunner, a fake of either in
+	// tests). See internal/stagewalk.Walk and docs/REFACTOR_PLAN.md
+	// Phase 6 for the design. The reconciler itself never constructs a
+	// PipelineRun/CapacityPlan or reads a Tekton condition directly.
+	StageHandlers map[string]stagecommon.StageHandler
+	StageRunners  map[string]stagecommon.StageRunner
 }
+
+// namespaceSetupError distinguishes an RBAC-provisioning failure from a
+// namespace-labeling failure inside the generic SetupNamespace callback
+// below, so Reconcile can still surface the exact pre-Phase-6 status
+// reasons ("RBACSetupFailed"/"NamespaceSetupFailed") without
+// internal/stagewalk needing to know either concept exists.
+type namespaceSetupError struct {
+	reason string
+	err    error
+}
+
+func (e *namespaceSetupError) Error() string { return e.err.Error() }
+func (e *namespaceSetupError) Unwrap() error { return e.err }
+
+// secretLookupError marks a resolveSecrets failure surfaced through the
+// walker's BuildContext callback, so Reconcile can map it to the
+// pre-Phase-6 "SecretLookupFailed" status reason.
+type secretLookupError struct {
+	err error
+}
+
+func (e *secretLookupError) Error() string { return e.err.Error() }
+func (e *secretLookupError) Unwrap() error { return e.err }
 
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=modelops.example.io,resources=modelrequests/status,verbs=get;update;patch
@@ -96,132 +124,319 @@ func (r *ModelRequestReconciler) Reconcile(
 		return r.failRequest(ctx, &modelRequest, "PlatformConfigLookupFailed", err.Error())
 	}
 
-	capacityPlanName := fmt.Sprintf("%s-capacity", modelRequest.Name)
-	sandboxRunName := fmt.Sprintf("%s-sandbox", modelRequest.Name)
+	stages := profile.Spec.Stages
+	usingDefaultStages := len(stages) == 0
+	if usingDefaultStages {
+		stages = defaultStages(profile)
+	}
 
-	var capacityPlan modelopsv1alpha1.CapacityPlan
-	if err := r.Get(ctx, types.NamespacedName{
-		Name: capacityPlanName, Namespace: modelRequest.Namespace,
-	}, &capacityPlan); apierrors.IsNotFound(err) {
-		capacityPlan = r.buildCapacityPlan(&modelRequest, capacityPlanName, profile, platformConfig)
-		if err := controllerutil.SetControllerReference(&modelRequest, &capacityPlan, r.Scheme); err != nil {
-			return ctrl.Result{}, err
+	// Best-effort capacity plan lookup: find the declared CapacityPlan-
+	// kind stage (if any) and fetch its deterministic child object, so
+	// later stages' handlers (sandbox/promotion) can read its
+	// Status.GPUsNeeded. Nil (not found, or no CapacityPlan-kind stage
+	// declared at all) is tolerated -- a stage handler that wants it
+	// must handle a nil StageContext.CapacityPlan.
+	var capacityPlan *modelopsv1alpha1.CapacityPlan
+	if name, ok := capacityPlanRunName(&modelRequest, stages); ok {
+		var plan modelopsv1alpha1.CapacityPlan
+		if getErr := r.Get(ctx, types.NamespacedName{Name: name, Namespace: modelRequest.Namespace}, &plan); getErr == nil {
+			capacityPlan = &plan
 		}
-		if created, err := createIgnoringAlreadyExists(ctx, r.Client, &capacityPlan); err != nil {
-			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
-		} else if created {
-			logger.Info("created CapacityPlan", "name", capacityPlan.Name)
+	}
+
+	// Secrets are resolved at most once per Reconcile call, lazily --
+	// only once a stage's context actually needs them (see
+	// buildContext below). This preserves the pre-Phase-6 ordering
+	// guarantee (resolveSecrets is never even attempted while capacity
+	// planning hasn't succeeded yet), since the CapacityPlan-kind
+	// stage's own handler never reads StageContext.Secrets.
+	var (
+		secretsTried bool
+		secretsVal   *resolvedSecrets
+		secretsErr   error
+	)
+	resolveSecretsOnce := func() (*resolvedSecrets, error) {
+		if !secretsTried {
+			secretsTried = true
+			secretsVal, secretsErr = r.resolveSecrets(ctx, &modelRequest)
 		}
-		modelRequest.Status.Phase = "CapacityPlanning"
-		modelRequest.Status.Message = "Capacity plan created, waiting for GPU advisor"
-		if err := r.Status().Update(ctx, &modelRequest); err != nil {
-			return ctrl.Result{}, err
+		return secretsVal, secretsErr
+	}
+
+	buildContext := func(stage modelopsv1alpha1.ProfileStageSpec, ns string, idx, count int) (stagecommon.StageContext, error) {
+		sc := stagecommon.StageContext{
+			ModelRequest:   &modelRequest,
+			Profile:        profile,
+			PlatformConfig: platformConfig,
+			CapacityPlan:   capacityPlan,
+			Stage:          stage,
+			Namespace:      ns,
+			NamespaceIndex: idx,
+			NamespaceCount: count,
 		}
+		if stage.Kind != "CapacityPlan" {
+			secrets, err := resolveSecretsOnce()
+			if err != nil {
+				return stagecommon.StageContext{}, &secretLookupError{err: err}
+			}
+			sc.Secrets = toStagecommonSecrets(secrets)
+		}
+		return sc, nil
+	}
+
+	namespaces := func(stage modelopsv1alpha1.ProfileStageSpec) []string {
+		if !stage.PerNamespace {
+			return []string{modelRequest.Namespace}
+		}
+		return promotion.GetNamespaces(&modelRequest)
+	}
+
+	setupNamespace := func(ctx context.Context, ns string, stage modelopsv1alpha1.ProfileStageSpec) error {
+		setup := stage.NamespaceSetup
+		if setup == nil {
+			return nil
+		}
+		if setup.EnsureRBAC {
+			if err := r.ensurePromotionNamespaceRBAC(ctx, ns, modelRequest.Namespace); err != nil {
+				return &namespaceSetupError{reason: "RBACSetupFailed", err: err}
+			}
+		}
+		if len(setup.Labels) > 0 {
+			if err := r.ensureNamespaceLabels(ctx, ns, setup.Labels); err != nil {
+				return &namespaceSetupError{reason: "NamespaceSetupFailed", err: err}
+			}
+		}
+		return nil
+	}
+
+	result, walkErr := stagewalk.Walk(ctx, &modelRequest, stagewalk.Input{
+		Stages:         stages,
+		Handlers:       r.StageHandlers,
+		Runners:        r.StageRunners,
+		Namespaces:     namespaces,
+		SetupNamespace: setupNamespace,
+		BuildContext:   buildContext,
+	})
+	if walkErr != nil {
+		var nsErr *namespaceSetupError
+		if errors.As(walkErr, &nsErr) {
+			return r.failRequest(ctx, &modelRequest, nsErr.reason, nsErr.err.Error())
+		}
+		var secErr *secretLookupError
+		if errors.As(walkErr, &secErr) {
+			return r.failRequest(ctx, &modelRequest, "SecretLookupFailed", secErr.err.Error())
+		}
+		logger.Error(walkErr, "stage walk failed")
+		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, walkErr
+	}
+
+	return r.persistWalkResult(ctx, &modelRequest, usingDefaultStages, result)
+}
+
+// capacityPlanRunName finds the declared CapacityPlan-kind stage (if
+// any) in stages and returns the deterministic RunName its StageRunner
+// uses (see internal/stages/capacityplanning.Handler.BuildSpec:
+// "<ModelRequest.Name>-<stage.Name>"), without needing the reconciler
+// to actually invoke that stage's handler first. This is the one place
+// Reconcile knows anything about a specific Kind -- reconciler-level
+// glue for a genuine cross-stage data dependency (later stages' params
+// want the CapacityPlan's derived GPU count), not part of the walker's
+// own advance/stop/skip decision logic (see internal/stagewalk.Walk,
+// which never inspects Kind beyond registry dispatch).
+func capacityPlanRunName(mr *modelopsv1alpha1.ModelRequest, stages []modelopsv1alpha1.ProfileStageSpec) (string, bool) {
+	for _, s := range stages {
+		if s.Kind == "CapacityPlan" {
+			return fmt.Sprintf("%s-%s", mr.Name, s.Name), true
+		}
+	}
+	return "", false
+}
+
+// walkStatus is the pure computed result of translating a
+// stagewalk.Result into ModelRequest.Status field values -- kept
+// separate from persistWalkResult so "what should the new status be"
+// (this function) and "is a write actually needed, compared against
+// what's currently persisted" (persistWalkResult) can't accidentally be
+// compared against each other after mutation, the way a single
+// mutate-then-compare-the-same-object bug would.
+type walkStatus struct {
+	phase                    string
+	message                  string
+	currentStage             string
+	stages                   []modelopsv1alpha1.StageProgress
+	pipelineRunName          string
+	sandboxPipelineRunName   string
+	promotionPipelineRunName string
+}
+
+// computeWalkStatus translates a stagewalk.Result into the new
+// ModelRequest.Status field values. CurrentStage/Stages are always
+// generic (Phase 6). Phase/Message/*PipelineRunName additionally
+// reproduce the exact pre-Phase-6 values when usingDefaultStages is
+// true -- a deliberate, isolated compatibility shim (see
+// docs/REFACTOR_PLAN.md Phase 6 design review) so every Phase 0-5
+// characterization test keeps passing unmodified. A profile with
+// explicit Spec.Stages gets fully generic Phase values instead, since
+// there's no pre-existing behavior to preserve for it. Deprecating this
+// shim once profiles migrate off the default list is tracked in
+// REFACTOR_PLAN.md Phase 7.
+func computeWalkStatus(mr *modelopsv1alpha1.ModelRequest, usingDefaultStages bool, result stagewalk.Result) walkStatus {
+	ws := walkStatus{
+		currentStage: result.CurrentStage,
+		stages:       toStageProgressList(result.Progress),
+		// Carry forward existing RunName fields by default; only
+		// overwritten below when a fresher one was actually recorded
+		// this pass.
+		pipelineRunName:          mr.Status.PipelineRunName,
+		sandboxPipelineRunName:   mr.Status.SandboxPipelineRunName,
+		promotionPipelineRunName: mr.Status.PromotionPipelineRunName,
+	}
+
+	if sandboxProgress, ok := lastProgressNamed(result.Progress, defaultSandboxStageName); ok && sandboxProgress.RunRef != "" {
+		ws.sandboxPipelineRunName = sandboxProgress.RunRef
+		ws.pipelineRunName = sandboxProgress.RunRef
+	}
+	if promoProgress, ok := lastPromotionProgress(result.Progress); ok && promoProgress.RunRef != "" {
+		ws.promotionPipelineRunName = promoProgress.RunRef
+		ws.pipelineRunName = promoProgress.RunRef
+	}
+
+	if !usingDefaultStages {
+		switch result.Outcome {
+		case stagewalk.OutcomeSucceeded:
+			ws.phase = "Succeeded"
+			ws.message = "Model onboarding completed successfully"
+		case stagewalk.OutcomeFailed:
+			ws.phase = "Failed"
+			ws.message = result.Message
+		case stagewalk.OutcomeRunning:
+			ws.phase = fmt.Sprintf("%sRunning", result.CurrentStage)
+			ws.message = result.Message
+		}
+		return ws
+	}
+
+	switch result.CurrentStage {
+	case defaultCapacityStageName:
+		ws.phase = "CapacityPlanning"
+		ws.message = result.Message
+	case defaultSandboxStageName:
+		if result.Outcome == stagewalk.OutcomeFailed {
+			ws.phase = "Failed"
+			ws.message = "Sandbox pipeline failed: " + result.Message
+		} else {
+			ws.phase = "SandboxRunning"
+			ws.message = result.Message
+		}
+	case defaultPromotionStageName:
+		if result.Outcome == stagewalk.OutcomeFailed {
+			ns := ""
+			if len(result.Progress) > 0 {
+				ns = result.Progress[len(result.Progress)-1].Namespace
+			}
+			ws.phase = "Failed"
+			ws.message = fmt.Sprintf("Promotion to %s failed: %s", ns, result.Message)
+		} else {
+			ws.phase = "PromotionRunning"
+			ws.message = "Promotion pipeline(s) running"
+		}
+	default:
+		// Outcome == Succeeded: CurrentStage is empty (see
+		// internal/stagewalk.Walk's final return).
+		ws.phase = "Succeeded"
+		ws.message = "Model onboarding completed successfully"
+	}
+	return ws
+}
+
+// persistWalkResult computes the new status (against mr.Status as
+// currently persisted) and writes it only if something relevant
+// actually changed -- widened, on purpose, beyond the older
+// Phase+Message-only comparison ModelRequestReconciler.updateStatus
+// still uses for its other (non-walker) call sites: Phase 6 adds
+// CurrentStage/Stages[], which can change even while Phase/Message
+// repeat (e.g. one promotion namespace's individual outcome changing
+// while the overall phase is still "PromotionRunning"), so comparing
+// only Phase+Message would silently let that go unpersisted.
+func (r *ModelRequestReconciler) persistWalkResult(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, usingDefaultStages bool, result stagewalk.Result) (ctrl.Result, error) {
+	ws := computeWalkStatus(mr, usingDefaultStages, result)
+
+	if mr.Status.Phase == ws.phase &&
+		mr.Status.Message == ws.message &&
+		mr.Status.CurrentStage == ws.currentStage &&
+		mr.Status.PipelineRunName == ws.pipelineRunName &&
+		mr.Status.SandboxPipelineRunName == ws.sandboxPipelineRunName &&
+		mr.Status.PromotionPipelineRunName == ws.promotionPipelineRunName &&
+		stageProgressEqual(mr.Status.Stages, ws.stages) {
 		return ctrl.Result{}, nil
-	} else if err != nil {
+	}
+
+	mr.Status.Phase = ws.phase
+	mr.Status.Message = ws.message
+	mr.Status.CurrentStage = ws.currentStage
+	mr.Status.Stages = ws.stages
+	mr.Status.PipelineRunName = ws.pipelineRunName
+	mr.Status.SandboxPipelineRunName = ws.sandboxPipelineRunName
+	mr.Status.PromotionPipelineRunName = ws.promotionPipelineRunName
+
+	if err := r.Status().Update(ctx, mr); err != nil {
 		return ctrl.Result{}, err
 	}
+	return ctrl.Result{}, nil
+}
 
-	if capacityPlan.Status.Phase != "Succeeded" {
-		modelRequest.Status.Phase = "CapacityPlanning"
-		modelRequest.Status.Message = fmt.Sprintf("Waiting for capacity plan: %s", capacityPlan.Status.Phase)
-		if err := r.Status().Update(ctx, &modelRequest); err != nil {
-			return ctrl.Result{}, err
+func stageProgressEqual(a, b []modelopsv1alpha1.StageProgress) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
 		}
-		return ctrl.Result{}, nil
 	}
+	return true
+}
 
-	if labelErr := r.ensureEvalHubTenantLabel(ctx, modelRequest.Namespace); labelErr != nil {
-		logger.Error(labelErr, "failed to label namespace for EvalHub")
-	}
-
-	secrets, secretErr := r.resolveSecrets(ctx, &modelRequest)
-	if secretErr != nil {
-		return r.failRequest(ctx, &modelRequest, "SecretLookupFailed", secretErr.Error())
-	}
-
-	// PHASE 1: Sandbox stage
-	if rbacErr := r.ensurePromotionNamespaceRBAC(ctx, modelRequest.Namespace, modelRequest.Namespace); rbacErr != nil {
-		return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", rbacErr.Error())
-	}
-	sandboxStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
-		Name:              "sandbox",
-		RunName:           sandboxRunName,
-		WorkflowRef:       r.sandboxPipelineNameOrDefault(profile, &modelRequest),
-		ProviderConfigRef: providerConfigRef(profile),
-		StageKind:         stagecommon.StageKindSandbox,
-		Params:            r.buildSandboxPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets),
-	})
-	if err != nil {
-		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
-	}
-	modelRequest.Status.SandboxPipelineRunName = sandboxRunName
-	modelRequest.Status.PipelineRunName = sandboxRunName
-
-	switch sandboxStatus.Phase {
-	case stagecommon.StageRunning:
-		logger.Info("sandbox stage running", "runName", sandboxRunName)
-		return r.updateStatus(ctx, &modelRequest, "SandboxRunning", sandboxStatus.Message)
-	case stagecommon.StageFailed:
-		return r.updateStatus(ctx, &modelRequest, "Failed", "Sandbox pipeline failed: "+sandboxStatus.Message)
-	}
-	// stagecommon.StageSucceeded: fall through to promotion.
-
-	// PHASE 2: Promotion stages (one per namespace)
-	promoNamespaces := r.getPromotionNamespaces(&modelRequest)
-	planID := fmt.Sprintf("%s-promotion", modelRequest.Name)
-	pipelineName := r.promotionPipelineNameOrDefault(profile, &modelRequest)
-
-	allSucceeded := true
-	anyRunning := false
-
-	for i, ns := range promoNamespaces {
-		if err := r.ensurePromotionNamespaceRBAC(ctx, ns, modelRequest.Namespace); err != nil {
-			return r.failRequest(ctx, &modelRequest, "RBACSetupFailed", err.Error())
-		}
-		if err := r.ensureMaaSNamespaceLabels(ctx, ns); err != nil {
-			return r.failRequest(ctx, &modelRequest, "NamespaceSetupFailed", err.Error())
-		}
-
-		prName := fmt.Sprintf("%s-promotion-%s", modelRequest.Name, ns)
-		isFirst := i == 0
-		isLast := i == len(promoNamespaces)-1
-		params := r.buildPromotionPipelineParams(&modelRequest, profile, platformConfig, &capacityPlan, secrets, ns, planID, isFirst, isLast)
-
-		promoStatus, err := r.StageRunner.EnsureRun(ctx, &modelRequest, stagecommon.StageSpec{
-			Name:              fmt.Sprintf("promotion-%s", ns),
-			RunName:           prName,
-			WorkflowRef:       pipelineName,
-			ProviderConfigRef: providerConfigRef(profile),
-			StageKind:         stagecommon.StageKindPromotion,
-			Params:            params,
+func toStageProgressList(progress []stagewalk.Progress) []modelopsv1alpha1.StageProgress {
+	out := make([]modelopsv1alpha1.StageProgress, 0, len(progress))
+	for _, p := range progress {
+		out = append(out, modelopsv1alpha1.StageProgress{
+			Name:      p.Name,
+			Namespace: p.Namespace,
+			Phase:     string(p.Phase),
+			RunRef:    p.RunRef,
+			Message:   p.Message,
 		})
-		if err != nil {
-			return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, err
-		}
-		modelRequest.Status.PromotionPipelineRunName = prName
-		modelRequest.Status.PipelineRunName = prName
+	}
+	return out
+}
 
-		switch promoStatus.Phase {
-		case stagecommon.StageFailed:
-			return r.updateStatus(ctx, &modelRequest, "Failed", fmt.Sprintf("Promotion to %s failed: %s", ns, promoStatus.Message))
-		case stagecommon.StageRunning:
-			anyRunning = true
-			allSucceeded = false
-		case stagecommon.StageSucceeded:
-			// this one succeeded, continue checking others
+func lastProgressNamed(progress []stagewalk.Progress, name string) (stagewalk.Progress, bool) {
+	var found stagewalk.Progress
+	ok := false
+	for _, p := range progress {
+		if p.Name == name {
+			found = p
+			ok = true
 		}
 	}
+	return found, ok
+}
 
-	if anyRunning {
-		return r.updateStatus(ctx, &modelRequest, "PromotionRunning", "Promotion pipeline(s) running")
+// lastPromotionProgress finds the last progress entry whose Name is
+// "<promotion-stage-name>-<namespace>" -- i.e. any PerNamespace
+// promotion-kind invocation, without hardcoding the exact default name.
+func lastPromotionProgress(progress []stagewalk.Progress) (stagewalk.Progress, bool) {
+	var found stagewalk.Progress
+	ok := false
+	prefix := defaultPromotionStageName + "-"
+	for _, p := range progress {
+		if len(p.Name) > len(prefix) && p.Name[:len(prefix)] == prefix {
+			found = p
+			ok = true
+		}
 	}
-
-	if allSucceeded {
-		return r.updateStatus(ctx, &modelRequest, "Succeeded", "Model onboarding completed successfully")
-	}
-
-	return r.updateStatus(ctx, &modelRequest, "PromotionRunning", "Promotion pipeline(s) initiated")
+	return found, ok
 }
 
 func (r *ModelRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -265,44 +480,6 @@ func (r *ModelRequestReconciler) lookupPlatformConfig(ctx context.Context, mr *m
 	return &cfg, nil
 }
 
-func (r *ModelRequestReconciler) sandboxPipelineNameOrDefault(profile *modelopsv1alpha1.ModelLifecycleProfile, mr *modelopsv1alpha1.ModelRequest) string {
-	if mr.Spec.PipelineRef != "" {
-		return mr.Spec.PipelineRef
-	}
-	if profile != nil && profile.Spec.Workflow.PipelineRef != "" {
-		return profile.Spec.Workflow.PipelineRef
-	}
-	return "model-intake-sandbox"
-}
-
-func (r *ModelRequestReconciler) promotionPipelineNameOrDefault(profile *modelopsv1alpha1.ModelLifecycleProfile, mr *modelopsv1alpha1.ModelRequest) string {
-	if profile != nil && profile.Spec.Workflow.PromotionPipelineRef != "" {
-		return profile.Spec.Workflow.PromotionPipelineRef
-	}
-	return "model-intake-promotion"
-}
-
-// providerConfigRef passes profile.Spec.ProviderConfigRef through to the
-// StageRunner unmodified (see stagecommon.StageSpec.ProviderConfigRef's
-// doc comment: the reconciler never fetches or interprets the object
-// this points at -- only a StageRunner implementation, e.g.
-// internal/stages/tekton, does). A nil profile (already an error path
-// elsewhere in Reconcile, but defensively handled here too) or a
-// profile with no ProviderConfigRef set both yield nil, which every
-// StageRunner must treat as "use the deprecated WorkflowRef fallback."
-func providerConfigRef(profile *modelopsv1alpha1.ModelLifecycleProfile) *modelopsv1alpha1.ProviderConfigRef {
-	if profile == nil {
-		return nil
-	}
-	return profile.Spec.ProviderConfigRef
-}
-
-// buildPipelineRun, and the PipelineRun construction/condition-reading
-// it used to be paired with inline in Reconcile, moved to
-// internal/stages/tekton.StageRunner in Phase 4 of REFACTOR_PLAN.md.
-// ModelRequestReconciler now drives both the sandbox and promotion
-// stages through r.StageRunner (stagecommon.StageRunner) instead.
-
 type resolvedSecrets struct {
 	evalhubToken      string
 	huggingfaceToken  string
@@ -312,7 +489,25 @@ type resolvedSecrets struct {
 	resultS3Endpoint  string
 	resultS3AccessKey string
 	resultS3SecretKey string
-	advisorAPIKey     string
+}
+
+// toStagecommonSecrets converts the reconciler-private resolvedSecrets
+// into the stagecommon.Secrets shape stage handlers (sandbox/promotion)
+// consume via StageContext.Secrets.
+func toStagecommonSecrets(s *resolvedSecrets) stagecommon.Secrets {
+	if s == nil {
+		return stagecommon.Secrets{}
+	}
+	return stagecommon.Secrets{
+		EvalHubToken:      s.evalhubToken,
+		HuggingFaceToken:  s.huggingfaceToken,
+		ResultS3Endpoint:  s.resultS3Endpoint,
+		ResultS3AccessKey: s.resultS3AccessKey,
+		ResultS3SecretKey: s.resultS3SecretKey,
+		ScanS3Endpoint:    s.scanS3Endpoint,
+		ScanS3AccessKey:   s.scanS3AccessKey,
+		ScanS3SecretKey:   s.scanS3SecretKey,
+	}
 }
 
 func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelopsv1alpha1.ModelRequest) (*resolvedSecrets, error) {
@@ -423,26 +618,16 @@ func ptrInt64(i int64) *int64 {
 	return &i
 }
 
-func (r *ModelRequestReconciler) ensureEvalHubTenantLabel(ctx context.Context, namespace string) error {
-	var ns corev1.Namespace
-	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
-		return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
-	}
-	if ns.Labels == nil {
-		ns.Labels = map[string]string{}
-	}
-	if _, ok := ns.Labels["evalhub.trustyai.opendatahub.io/tenant"]; ok {
-		return nil
-	}
-	ns.Labels["evalhub.trustyai.opendatahub.io/tenant"] = ""
-	if err := r.Update(ctx, &ns); err != nil {
-		return fmt.Errorf("failed to label namespace %s: %w", namespace, err)
-	}
-	log.FromContext(ctx).Info("added evalhub tenant label to namespace", "namespace", namespace)
-	return nil
-}
-
-func (r *ModelRequestReconciler) ensureMaaSNamespaceLabels(ctx context.Context, namespace string) error {
+// ensureNamespaceLabels applies labels to namespace idempotently: a key
+// is only added/updated if it's currently absent or set to a different
+// value. Generalizes the pre-Phase-6 ensureEvalHubTenantLabel (a single
+// presence-only-checked label) and ensureMaaSNamespaceLabels (three
+// value-checked labels) into one data-driven helper -- which labels get
+// applied to which namespace, for which stage, is now entirely
+// controlled by ProfileStageSpec.NamespaceSetup.Labels (see
+// defaultStages), not by a Go function hardcoded to "the sandbox stage
+// gets evalhub, the promotion stage gets MaaS."
+func (r *ModelRequestReconciler) ensureNamespaceLabels(ctx context.Context, namespace string, labels map[string]string) error {
 	var ns corev1.Namespace
 	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
 		return fmt.Errorf("failed to get namespace %s: %w", namespace, err)
@@ -451,13 +636,9 @@ func (r *ModelRequestReconciler) ensureMaaSNamespaceLabels(ctx context.Context, 
 		ns.Labels = map[string]string{}
 	}
 	needsUpdate := false
-	for _, l := range []struct{ k, v string }{
-		{"opendatahub.io/generated-namespace", "true"},
-		{"maas.opendatahub.io/gateway-access", "true"},
-		{"opendatahub.io/dashboard", "true"},
-	} {
-		if ns.Labels[l.k] != l.v {
-			ns.Labels[l.k] = l.v
+	for k, v := range labels {
+		if existing, ok := ns.Labels[k]; !ok || existing != v {
+			ns.Labels[k] = v
 			needsUpdate = true
 		}
 	}
@@ -465,9 +646,9 @@ func (r *ModelRequestReconciler) ensureMaaSNamespaceLabels(ctx context.Context, 
 		return nil
 	}
 	if err := r.Update(ctx, &ns); err != nil {
-		return fmt.Errorf("failed to label namespace %s for MaaS: %w", namespace, err)
+		return fmt.Errorf("failed to label namespace %s: %w", namespace, err)
 	}
-	log.FromContext(ctx).Info("added MaaS labels to namespace", "namespace", namespace)
+	log.FromContext(ctx).Info("applied namespace labels", "namespace", namespace, "labels", labels)
 	return nil
 }
 
@@ -476,104 +657,6 @@ func fromMap(val, fallback string) string {
 		return val
 	}
 	return fallback
-}
-
-func (r *ModelRequestReconciler) buildCapacityPlan(
-	mr *modelopsv1alpha1.ModelRequest,
-	planName string,
-	profile *modelopsv1alpha1.ModelLifecycleProfile,
-	cfg *modelopsv1alpha1.PlatformConfig,
-) modelopsv1alpha1.CapacityPlan {
-	spec := mr.Spec
-	reqs := spec.Requirements
-	if reqs == nil {
-		reqs = &modelopsv1alpha1.ModelRequirements{}
-	}
-
-	plan := modelopsv1alpha1.CapacityPlan{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      planName,
-			Namespace: mr.Namespace,
-			Labels: map[string]string{
-				"modelops.example.io/model-request": mr.Name,
-			},
-		},
-		Spec: modelopsv1alpha1.CapacityPlanSpec{
-			ModelRef: modelopsv1alpha1.CapacityPlanModelRef{
-				ModelRequestName: mr.Name,
-			},
-			ContextLength:         stagecommon.IntOrDefault(reqs.BenchmarkTargets.ContextLength, 32768),
-			Concurrency:           stagecommon.IntOrDefault(reqs.BenchmarkTargets.ExpectedConcurrency, 4),
-			AllowTimeSlicing:      stagecommon.BoolOrDefault(reqs.GPUConfig.AllowTimeSlicing, true),
-			AllowMIG:              stagecommon.BoolOrDefault(reqs.GPUConfig.AllowMIG, false),
-			IsolationPolicy:       stagecommon.StrOrDefault(reqs.GPUConfig.GPUIsolationPolicy, "dedicated"),
-			AdvisorEndpoint:       reqs.AdvisorEndpoint,
-			AdvisorSecretName:     cfg.Spec.AdvisorSecretName,
-			AdvisorTimeoutSeconds: cfg.Spec.AdvisorTimeoutSeconds,
-			GPUOperatorNamespace:  cfg.Spec.GPUOperatorNamespace,
-			ClusterPolicyName:     cfg.Spec.ClusterPolicyName,
-			TimeSlicingConfigMap:  cfg.Spec.TimeSlicingConfigMap,
-			MaxTimeSlices:         stagecommon.IntOrDefault(cfg.Spec.MaxTimeSlices, 8),
-		},
-	}
-
-	return plan
-}
-
-func (r *ModelRequestReconciler) buildSandboxPipelineParams(
-	mr *modelopsv1alpha1.ModelRequest,
-	profile *modelopsv1alpha1.ModelLifecycleProfile,
-	cfg *modelopsv1alpha1.PlatformConfig,
-	plan *modelopsv1alpha1.CapacityPlan,
-	secrets *resolvedSecrets,
-) map[string]string {
-	spec := mr.Spec
-	reqs := spec.Requirements
-	if reqs == nil {
-		reqs = &modelopsv1alpha1.ModelRequirements{}
-	}
-
-	p := stagecommon.BuildCommonModelParams(spec, reqs, cfg, stagecommon.Secrets{
-		EvalHubToken:      secrets.evalhubToken,
-		HuggingFaceToken:  secrets.huggingfaceToken,
-		ResultS3Endpoint:  secrets.resultS3Endpoint,
-		ResultS3AccessKey: secrets.resultS3AccessKey,
-		ResultS3SecretKey: secrets.resultS3SecretKey,
-	})
-
-	stagecommon.AddParam(p, "target-namespace", stagecommon.StrOrDefault(reqs.SandboxNamespace, "sandbox"))
-
-	stagecommon.AddParam(p, "artifact-scan-image", stagecommon.StrOrDefault(cfg.Spec.ComplianceScanImage, "registry.access.redhat.com/ubi9/python-311:latest"))
-	stagecommon.AddParam(p, "artifact-cve-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.CVEThreshold, "critical"))
-	stagecommon.AddParam(p, "ignore-unfixed", stagecommon.StrOrDefault(cfg.Spec.ComplianceIgnoreUnfixed, "true"))
-	stagecommon.AddParam(p, "allowed-architectures", strings.Join(cfg.Spec.ComplianceAllowedArch, ","))
-
-	// Exactly one gpu-count-override param: an explicit
-	// reqs.GPUConfig.GPUCountOverride always wins over the
-	// CapacityPlan-derived value; the plan-derived value is only used as
-	// a fallback when no override was set. This stays here (not in
-	// stagecommon.BuildCommonModelParams) because buildPromotionPipelineParams
-	// computes this param differently -- see stagecommon/params.go's doc
-	// comment for why folding it into the shared helper isn't safe.
-	if reqs.GPUConfig.GPUCountOverride != "" {
-		stagecommon.AddParam(p, "gpu-count-override", reqs.GPUConfig.GPUCountOverride)
-	} else if plan != nil && plan.Status.GPUsNeeded > 0 {
-		stagecommon.AddParam(p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
-	}
-
-	stagecommon.AddParam(p, "severity-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
-	stagecommon.AddParam(p, "tenant-ns", stagecommon.StrOrDefault(reqs.SandboxNamespace, "vllm"))
-
-	stagecommon.AddParam(p, "scan-s3-endpoint", secrets.scanS3Endpoint)
-	stagecommon.AddParam(p, "scan-s3-access-key-id", secrets.scanS3AccessKey)
-	stagecommon.AddParam(p, "scan-s3-secret-access-key", secrets.scanS3SecretKey)
-	compBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
-	secBucket := stagecommon.StrOrDefault(spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
-	stagecommon.AddParam(p, "compliance-s3-bucket", compBucket)
-	stagecommon.AddParam(p, "security-s3-bucket", secBucket)
-	stagecommon.AddParam(p, "s3-ui-route", "")
-
-	return p
 }
 
 func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Context, targetNS, sourceNS string) error {
@@ -693,104 +776,6 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 	return nil
 }
 
-func (r *ModelRequestReconciler) getPromotionNamespaces(mr *modelopsv1alpha1.ModelRequest) []string {
-	reqs := mr.Spec.Requirements
-	if reqs == nil {
-		return []string{"staging"}
-	}
-	if len(reqs.PromotionNamespaces) > 0 {
-		return reqs.PromotionNamespaces
-	}
-	if reqs.StagingNamespace != "" {
-		return []string{reqs.StagingNamespace}
-	}
-	return []string{"staging"}
-}
-
-func (r *ModelRequestReconciler) buildPromotionPipelineParams(
-	mr *modelopsv1alpha1.ModelRequest,
-	profile *modelopsv1alpha1.ModelLifecycleProfile,
-	cfg *modelopsv1alpha1.PlatformConfig,
-	plan *modelopsv1alpha1.CapacityPlan,
-	secrets *resolvedSecrets,
-	targetNamespace string,
-	planID string,
-	isFirst bool,
-	isLast bool,
-) map[string]string {
-	spec := mr.Spec
-	reqs := spec.Requirements
-	if reqs == nil {
-		reqs = &modelopsv1alpha1.ModelRequirements{}
-	}
-
-	p := stagecommon.BuildCommonModelParams(spec, reqs, cfg, stagecommon.Secrets{
-		EvalHubToken:      secrets.evalhubToken,
-		HuggingFaceToken:  secrets.huggingfaceToken,
-		ResultS3Endpoint:  secrets.resultS3Endpoint,
-		ResultS3AccessKey: secrets.resultS3AccessKey,
-		ResultS3SecretKey: secrets.resultS3SecretKey,
-	})
-
-	stagecommon.AddParam(p, "target-namespace", targetNamespace)
-	stagecommon.AddParam(p, "plan-id", planID)
-
-	// KNOWN BEHAVIOR, unchanged by this refactor: unlike
-	// buildSandboxPipelineParams, this never checks
-	// reqs.GPUConfig.GPUCountOverride -- only the CapacityPlan-derived
-	// value is ever used here. See stagecommon/params.go's doc comment
-	// for why gpu-count-override is deliberately kept out of the shared
-	// helper instead of being unified with sandbox's override-aware
-	// logic.
-	if plan != nil && plan.Status.GPUsNeeded > 0 {
-		stagecommon.AddParam(p, "gpu-count-override", strconv.Itoa(plan.Status.GPUsNeeded))
-	}
-
-	approvalURL := stagecommon.StrOrDefault(cfg.Spec.ApprovalApiUrl, "")
-	if !isFirst {
-		approvalURL = ""
-	}
-	stagecommon.AddParam(p, "approval-api-url", approvalURL)
-	stagecommon.AddParam(p, "approval-poll-interval-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalPollIntervalSeconds, 15)))
-	stagecommon.AddParam(p, "approval-timeout-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.ApprovalTimeoutSeconds, 3600)))
-
-	stagecommon.AddParam(p, "guidellm-profile", stagecommon.StrOrDefault(cfg.Spec.BenchmarkProfile, "constant"))
-	stagecommon.AddParam(p, "guidellm-rate", fmt.Sprintf("%.1f", floatOrDefault(cfg.Spec.BenchmarkRate, 4.0)))
-	stagecommon.AddParam(p, "guidellm-max-seconds", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxSeconds, 15)))
-	stagecommon.AddParam(p, "guidellm-max-requests", strconv.Itoa(stagecommon.IntOrDefault(cfg.Spec.BenchmarkMaxRequests, 2)))
-	if cfg.Spec.BenchmarkTargetUrl != "" {
-		stagecommon.AddParam(p, "benchmark-target-url", cfg.Spec.BenchmarkTargetUrl)
-	} else if spec.MaaS != nil && spec.MaaS.Enabled {
-		stagecommon.AddParam(p, "benchmark-target-url", fmt.Sprintf("https://%s-kserve-workload-svc.%s.svc.cluster.local:8000/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
-	} else {
-		stagecommon.AddParam(p, "benchmark-target-url", fmt.Sprintf("http://%s-predictor.%s.svc.cluster.local:8080/v1", stagecommon.StrOrDefault(spec.Model.Name, "unknown"), targetNamespace))
-	}
-	stagecommon.AddParam(p, "custom-data", strconv.FormatBool(reqs.SecurityConfig.CustomBenchmarkData))
-	stagecommon.AddParam(p, "custom-filename", stagecommon.StrOrDefault(reqs.SecurityConfig.CustomBenchmarkFile, "no-file"))
-
-	if spec.Access != nil {
-		stagecommon.AddParam(p, "authorized-viewers", spec.Access.AuthorizedViewers)
-		stagecommon.AddParam(p, "access-role", stagecommon.StrOrDefault(spec.Access.AccessRole, "view"))
-	}
-
-	maasGPU := stagecommon.StrOrDefault(cfg.Spec.MaaSGPUCount, "1")
-	if spec.MaaS != nil {
-		stagecommon.AddParam(p, "deploy-maas", strconv.FormatBool(spec.MaaS.Enabled))
-		maasGPU = stagecommon.StrOrDefault(spec.MaaS.GPUCount, maasGPU)
-	} else {
-		stagecommon.AddParam(p, "deploy-maas", "false")
-	}
-	stagecommon.AddParam(p, "maas-serving-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSServingNS, targetNamespace))
-	stagecommon.AddParam(p, "maas-policy-ns", stagecommon.StrOrDefault(cfg.Spec.MaaSPolicyNS, targetNamespace))
-	stagecommon.AddParam(p, "maas-gpu-count", maasGPU)
-	stagecommon.AddParam(p, "maas-runtime-image", stagecommon.StrOrDefault(cfg.Spec.MaaSRuntimeImage, "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"))
-	stagecommon.AddParam(p, "maas-authorized-group", stagecommon.StrOrDefault(cfg.Spec.MaaSAuthorizedGroup, "system:authenticated"))
-
-	stagecommon.AddParam(p, "run-register", strconv.FormatBool(isLast))
-
-	return p
-}
-
 func (r *ModelRequestReconciler) failRequest(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, phase, message string) (ctrl.Result, error) {
 	if mr.Status.Phase == phase && mr.Status.Message == message {
 		return ctrl.Result{}, nil
@@ -813,18 +798,4 @@ func (r *ModelRequestReconciler) updateStatus(ctx context.Context, request *mode
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-// addParam, strOrDefault, intOrDefault, and boolOrDefault used to be
-// defined here. Phase 3 moved them to internal/stagecommon (exported as
-// AddParam/StrOrDefault/IntOrDefault/BoolOrDefault) as the single source
-// of truth, since buildSandboxPipelineParams, buildPromotionPipelineParams,
-// and buildCapacityPlan all need them. floatOrDefault stays here: it's
-// only used by buildPromotionPipelineParams's guidellm-rate formatting,
-// never part of the sandbox/promotion-shared param set.
-func floatOrDefault(val, def float64) float64 {
-	if val == 0.0 {
-		return def
-	}
-	return val
 }

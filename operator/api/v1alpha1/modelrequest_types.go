@@ -113,12 +113,44 @@ type MaaSOverride struct {
 }
 
 type ModelRequestStatus struct {
-	Phase                       string             `json:"phase,omitempty"`
-	PipelineRunName             string             `json:"pipelineRunName,omitempty"`
-	SandboxPipelineRunName      string             `json:"sandboxPipelineRunName,omitempty"`
-	PromotionPipelineRunName    string             `json:"promotionPipelineRunName,omitempty"`
-	Message                     string             `json:"message,omitempty"`
-	Conditions                  []metav1.Condition `json:"conditions,omitempty"`
+	// Phase is the coarse-grained onboarding phase. For the synthesized
+	// default 3-stage sequence (see defaultStages in
+	// internal/controller), this retains its pre-Phase-6 values exactly
+	// ("CapacityPlanning"/"SandboxRunning"/"PromotionRunning"/
+	// "Succeeded"/"Failed"/the *LookupFailed reasons) for backward
+	// compatibility with existing tooling/dashboards. A profile that
+	// sets Spec.Stages explicitly gets fully generic values instead
+	// ("<CurrentStage>Running"/"Succeeded"/"Failed") -- see
+	// docs/REFACTOR_PLAN.md Phase 6.
+	Phase string `json:"phase,omitempty"`
+	// CurrentStage is the ProfileStageSpec.Name the generic stage
+	// walker is currently on (or was on when the ModelRequest reached
+	// a terminal phase). Introduced in Phase 6 -- additive, not a
+	// replacement for Phase.
+	CurrentStage string `json:"currentStage,omitempty"`
+	// Stages records, in profile order, the most recent outcome for
+	// every (stage, namespace) pair the walker has attempted -- one
+	// entry per namespace for a PerNamespace stage. This is what makes
+	// `kubectl get modelrequest` show meaningful progress against the
+	// profile's declared stage list. Introduced in Phase 6.
+	Stages                   []StageProgress    `json:"stages,omitempty"`
+	PipelineRunName          string             `json:"pipelineRunName,omitempty"`
+	SandboxPipelineRunName   string             `json:"sandboxPipelineRunName,omitempty"`
+	PromotionPipelineRunName string             `json:"promotionPipelineRunName,omitempty"`
+	Message                  string             `json:"message,omitempty"`
+	Conditions               []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// StageProgress is one (stage, namespace) outcome recorded by the
+// generic stage walker. Phase mirrors stagecommon.StagePhase's string
+// values ("Running"/"Succeeded"/"Failed") as a plain string so this API
+// package doesn't depend on internal/stagecommon.
+type StageProgress struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Phase     string `json:"phase"`
+	RunRef    string `json:"runRef,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true

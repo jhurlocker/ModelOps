@@ -185,7 +185,12 @@ func TestModelRequest_FullLifecycle_TektonAndNoopStageRunners_ReachSameTerminalP
 		newModelRequest(t, ns, "mr-1", "profile-1", nil)
 		setupSucceededCapacityPlan(t, ns, "mr-1")
 
-		r := &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme(), StageRunner: &noop.StageRunner{}}
+		r := &ModelRequestReconciler{
+			Client:        k8sClient,
+			Scheme:        testRuntimeScheme(),
+			StageHandlers: newStageHandlers(),
+			StageRunners:  newStageRunners(k8sClient, testRuntimeScheme(), &noop.StageRunner{}),
+		}
 		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nsName(ns, "mr-1")})
 		require.NoError(t, err)
 

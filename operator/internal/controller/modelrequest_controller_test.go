@@ -23,7 +23,8 @@ import (
 	"testing"
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
-	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
+	"github.com/jhurlocker/modelops-operator/internal/stagecommon"
+	"github.com/jhurlocker/modelops-operator/internal/stages/capacityplanning"
 
 	"github.com/stretchr/testify/require"
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
@@ -35,23 +36,22 @@ import (
 )
 
 // newModelRequestReconciler wires the reconciler with the REAL
-// tekton.StageRunner (not a fake), so all of this file's
-// PipelineRun-shaped assertions (PipelineRef, OwnerReferences, Params,
-// conditions) continue to exercise genuine Tekton behavior end-to-end --
-// this is Phase 4's regression net for "relocate, don't change" (see
-// docs/PHASE_LOG.md). Tests that specifically want to prove the
-// reconciler works with zero Tekton involvement construct a
+// tekton.StageRunner (not a fake) for the "PipelineRun" kind and the
+// real capacityplanning.StageRunner for "CapacityPlan", so all of this
+// file's PipelineRun-shaped assertions (PipelineRef, OwnerReferences,
+// Params, conditions) continue to exercise genuine Tekton behavior
+// end-to-end -- this is Phase 4/6's regression net for "relocate, don't
+// change" (see docs/PHASE_LOG.md). Tests that specifically want to
+// prove the reconciler works with zero Tekton involvement construct a
 // ModelRequestReconciler directly with a stagecommon.FakeStageRunner
-// instead of using this helper.
+// registered under "PipelineRun" instead of using this helper.
 func newModelRequestReconciler() *ModelRequestReconciler {
 	scheme := testRuntimeScheme()
 	return &ModelRequestReconciler{
-		Client: k8sClient,
-		Scheme: scheme,
-		StageRunner: &tektonstage.StageRunner{
-			Client: k8sClient,
-			Scheme: scheme,
-		},
+		Client:        k8sClient,
+		Scheme:        scheme,
+		StageHandlers: newStageHandlers(),
+		StageRunners:  newStageRunners(k8sClient, scheme, nil),
 	}
 }
 
@@ -506,416 +506,9 @@ func TestModelRequest_NoS3CredentialsConfigured_SetsSecretLookupFailedPhase(t *t
 	require.Contains(t, mr.Status.Message, "no scan storage credentials configured")
 }
 
-// --- Param builder golden tests (regression net for Phase 3's dedup) ---
-
-func TestBuildSandboxPipelineParams_ExplicitOverride_TakesPrecedenceAndAppearsExactlyOnce(t *testing.T) {
-	// Phase 1 fix: when both the CapacityPlan's derived GPU count and an
-	// explicit reqs.GPUCountOverride are set, exactly ONE
-	// "gpu-count-override" param must be added, using the override.
-	r := newModelRequestReconciler()
-	mr := &modelopsv1alpha1.ModelRequest{
-		Spec: modelopsv1alpha1.ModelRequestSpec{
-			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
-			Requirements: &modelopsv1alpha1.ModelRequirements{
-				GPUConfig: modelopsv1alpha1.GPUConfig{GPUCountOverride: "7"},
-			},
-		},
-	}
-	cfg := &modelopsv1alpha1.PlatformConfig{}
-	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
-	secrets := &resolvedSecrets{}
-
-	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
-
-	// Since buildSandboxPipelineParams now returns map[string]string
-	// (Phase 4), a duplicate AddParam call for the same name can no
-	// longer produce two entries by construction -- see
-	// stagecommon.AddParam's doc comment. Asserting the single value is
-	// therefore the meaningful check here; the "appears exactly once"
-	// guarantee moved from a runtime test assertion to a structural
-	// property of the map type itself.
-	require.Equal(t, "7", params["gpu-count-override"], "explicit override must win over the plan-derived value")
-}
-
-func TestBuildSandboxPipelineParams_NoOverride_FallsBackToPlanDerivedGPUCount(t *testing.T) {
-	r := newModelRequestReconciler()
-	mr := &modelopsv1alpha1.ModelRequest{
-		Spec: modelopsv1alpha1.ModelRequestSpec{
-			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
-		},
-	}
-	cfg := &modelopsv1alpha1.PlatformConfig{}
-	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
-	secrets := &resolvedSecrets{}
-
-	params := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
-
-	require.Equal(t, "4", params["gpu-count-override"])
-}
-
-func TestBuildSandboxPipelineParams_NoOverrideAndNoPlan_OmitsParam(t *testing.T) {
-	r := newModelRequestReconciler()
-	mr := &modelopsv1alpha1.ModelRequest{
-		Spec: modelopsv1alpha1.ModelRequestSpec{
-			Model: modelopsv1alpha1.ModelIdentity{URI: "some/model"},
-		},
-	}
-	cfg := &modelopsv1alpha1.PlatformConfig{}
-	secrets := &resolvedSecrets{}
-
-	params := r.buildSandboxPipelineParams(mr, nil, cfg, nil, secrets)
-
-	_, ok := params["gpu-count-override"]
-	require.False(t, ok)
-}
-
-// --- Phase 3 dedup regression net: full-fixture characterization tests ---
-//
-// buildSandboxPipelineParams and buildPromotionPipelineParams share a lot
-// of param-building logic (model identity, GPU/benchmark config,
-// deployment/chart config, registry config, result-S3 config). Phase 3
-// extracts that shared logic into a common helper. These tests populate
-// every relevant field on the inputs (so no addParam call is skipped for
-// being empty) and pin the *complete* resulting param set -- name and
-// value, and a check that no name appears more than once -- for both
-// functions as they exist today, BEFORE the extraction. After Phase 3's
-// refactor, these tests must still pass unmodified: same params in, same
-// params out, just produced with less duplicated code.
-
-func boolPtr(b bool) *bool { return &b }
-
-// paramsToMap used to convert a tektonv1.Params into a map[string]string
-// here, failing the test outright if any param name appeared more than
-// once (the exact shape of the Phase 1 gpu-count-override duplicate-param
-// bug this suite guards against). Phase 4 changed
-// buildSandboxPipelineParams/buildPromotionPipelineParams to return
-// map[string]string directly, so that conversion -- and the duplicate
-// check, which is now a structural property of the map type itself
-// rather than something a test needs to detect -- is no longer needed.
-
-// fullCharacterizationFixture returns a ModelRequest/PlatformConfig/
-// CapacityPlan/resolvedSecrets tuple with every field buildSandboxPipelineParams
-// and buildPromotionPipelineParams read from populated with a distinct,
-// non-empty/non-zero value, so the full param set both functions produce
-// (nothing skipped by addParam's empty-string guard) can be pinned
-// exactly.
-func fullCharacterizationFixture() (*modelopsv1alpha1.ModelRequest, *modelopsv1alpha1.PlatformConfig, *modelopsv1alpha1.CapacityPlan, *resolvedSecrets) {
-	mr := &modelopsv1alpha1.ModelRequest{
-		Spec: modelopsv1alpha1.ModelRequestSpec{
-			Model: modelopsv1alpha1.ModelIdentity{
-				SourceType: "oci",
-				URI:        "quay.io/models/foo:v1",
-				Name:       "foo-model",
-				Version:    "v2",
-				Tokenizer:  "foo-tokenizer",
-			},
-			DisplayName:           "Foo Model",
-			BusinessJustification: "Because reasons",
-			RequestedBy:           "jane@example.com",
-			ResultS3Bucket:        "custom-result-bucket",
-			Requirements: &modelopsv1alpha1.ModelRequirements{
-				GPUConfig: modelopsv1alpha1.GPUConfig{
-					GPUIsolationPolicy: "shared",
-					AllowTimeSlicing:   boolPtr(false),
-					AllowMIG:           boolPtr(true),
-					GPUCountOverride:   "7",
-				},
-				BenchmarkTargets: modelopsv1alpha1.BenchmarkTargets{
-					ContextLength:       8192,
-					ExpectedConcurrency: 16,
-					RequestRate:         "5.0",
-					TargetTTFT:          "250ms",
-					TargetThroughput:    "200",
-				},
-				SecurityConfig: modelopsv1alpha1.SecurityConfig{
-					CVEThreshold:        "high",
-					SecurityThreshold:   "warn",
-					CustomBenchmarkData: true,
-					CustomBenchmarkFile: "custom.json",
-				},
-				DeploymentConfig: modelopsv1alpha1.DeploymentConfig{
-					ValuesContent:          "replicaCount: 3",
-					OpenShiftConsoleDomain: "apps.example.com",
-				},
-				SandboxNamespace:    "my-sandbox",
-				StagingNamespace:    "my-staging",
-				PromotionNamespaces: []string{"my-staging", "prod"},
-				AdvisorEndpoint:     "http://advisor.example.com",
-			},
-			Access: &modelopsv1alpha1.ModelAccess{
-				AuthorizedViewers: "team-a,team-b",
-				AccessRole:        "admin",
-			},
-			MaaS: &modelopsv1alpha1.MaaSOverride{
-				Enabled:         true,
-				GPUCount:        "3",
-				RuntimeImage:    "custom-runtime:latest",
-				AuthorizedGroup: "custom-group",
-			},
-		},
-	}
-
-	cfg := &modelopsv1alpha1.PlatformConfig{
-		Spec: modelopsv1alpha1.PlatformConfigSpec{
-			ComplianceS3Bucket:          "comp-bucket",
-			SecurityS3Bucket:            "sec-bucket",
-			RegistryServer:              "http://registry.example.com",
-			RegistryPort:                "9090",
-			RegistryAuthor:              "Team Author",
-			ComplianceScanImage:         "scan-image:latest",
-			ComplianceIgnoreUnfixed:     "false",
-			ComplianceAllowedArch:       []string{"amd64", "arm64"},
-			ModelCarRepo:                "custom/modelcar-catalog",
-			GPUOperatorNamespace:        "custom-gpu-ns",
-			ClusterPolicyName:           "custom-cluster-policy",
-			TimeSlicingConfigMap:        "custom-ts-cm",
-			MaxTimeSlices:               16,
-			AdvisorSecretName:           "custom-advisor-secret",
-			AdvisorTimeoutSeconds:       600,
-			ChartURL:                    "https://charts.example.com/",
-			ChartVersion:                "1.2.3",
-			HardwareProfileName:         "custom-hw-profile",
-			HardwareProfileNamespace:    "custom-hw-ns",
-			EvalHubURL:                  "http://evalhub.example.com",
-			ApprovalApiUrl:              "http://approval.example.com",
-			ApprovalPollIntervalSeconds: 30,
-			ApprovalTimeoutSeconds:      7200,
-			BenchmarkProfile:            "sweep",
-			BenchmarkRate:               8.5,
-			BenchmarkMaxSeconds:         60,
-			BenchmarkMaxRequests:        10,
-			BenchmarkTargetUrl:          "http://custom-benchmark-target/v1",
-			MaaSServingNS:               "custom-maas-serving",
-			MaaSPolicyNS:                "custom-maas-policy",
-			MaaSGPUCount:                "2",
-			MaaSRuntimeImage:            "default-runtime:latest",
-			MaaSAuthorizedGroup:         "default-group",
-		},
-	}
-
-	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
-
-	secrets := &resolvedSecrets{
-		evalhubToken:      "evalhub-tok",
-		huggingfaceToken:  "hf-tok",
-		scanS3Endpoint:    "http://scan-s3:9000",
-		scanS3AccessKey:   "scan-access",
-		scanS3SecretKey:   "scan-secret",
-		resultS3Endpoint:  "http://result-s3:9000",
-		resultS3AccessKey: "result-access",
-		resultS3SecretKey: "result-secret",
-	}
-
-	return mr, cfg, plan, secrets
-}
-
-func TestBuildSandboxPipelineParams_FullFixture_CharacterizesCurrentOutput(t *testing.T) {
-	r := newModelRequestReconciler()
-	mr, cfg, plan, secrets := fullCharacterizationFixture()
-
-	got := r.buildSandboxPipelineParams(mr, nil, cfg, plan, secrets)
-
-	want := map[string]string{
-		"model-id":                   "quay.io/models/foo:v1",
-		"model-name":                 "foo-model",
-		"model-version":              "v2",
-		"model-tokenizer":            "foo-tokenizer",
-		"model-source-type":          "oci",
-		"display-name":               "Foo Model",
-		"business-justification":     "Because reasons",
-		"requested-by":               "jane@example.com",
-		"target-namespace":           "my-sandbox",
-		"modelcar-repo":              "custom/modelcar-catalog",
-		"artifact-scan-image":        "scan-image:latest",
-		"artifact-cve-threshold":     "high",
-		"ignore-unfixed":             "false",
-		"allowed-architectures":      "amd64,arm64",
-		"gpu-count-override":         "7", // explicit override wins over plan-derived (4)
-		"context-length":             "8192",
-		"concurrency":                "16",
-		"allow-time-slicing":         "false",
-		"allow-mig":                  "true",
-		"gpu-isolation-policy":       "shared",
-		"request-rate":               "5.0",
-		"target-ttft":                "250ms",
-		"target-throughput":          "200",
-		"gpu-operator-namespace":     "custom-gpu-ns",
-		"clusterpolicy-name":         "custom-cluster-policy",
-		"time-slicing-configmap":     "custom-ts-cm",
-		"max-time-slices":            "16",
-		"advisor-endpoint":           "http://advisor.example.com",
-		"advisor-secret-name":        "custom-advisor-secret",
-		"advisor-timeout-seconds":    "600",
-		"release-name":               "foo-model",
-		"chart-url":                  "https://charts.example.com/",
-		"chart-version":              "1.2.3",
-		"values-content":             "replicaCount: 3",
-		"hardware-profile-name":      "custom-hw-profile",
-		"hardware-profile-namespace": "custom-hw-ns",
-		"severity-threshold":         "warn",
-		"evalhub-url":                "http://evalhub.example.com",
-		"evalhub-token":              "evalhub-tok",
-		"tenant-ns":                  "my-sandbox",
-		"openshift-console-domain":   "apps.example.com",
-		"huggingface-token":          "hf-tok",
-		"scan-s3-endpoint":           "http://scan-s3:9000",
-		"scan-s3-access-key-id":      "scan-access",
-		"scan-s3-secret-access-key":  "scan-secret",
-		"compliance-s3-bucket":       "custom-result-bucket", // spec.ResultS3Bucket wins over cfg.Spec.ComplianceS3Bucket
-		"security-s3-bucket":         "custom-result-bucket", // spec.ResultS3Bucket wins over cfg.Spec.SecurityS3Bucket
-		"s3-api-endpoint":            "http://result-s3:9000",
-		"s3-access-key-id":           "result-access",
-		"s3-secret-access-key":       "result-secret",
-		"mr-server":                  "http://registry.example.com",
-		"mr-port":                    "9090",
-		"model-reg-author":           "Team Author",
-		// "modelcar-image" and "s3-ui-route" are always hardcoded "" in
-		// this function, so addParam's empty-value guard always omits
-		// them -- they must NOT appear in the output.
-	}
-
-	require.Equal(t, want, got)
-}
-
-func TestBuildPromotionPipelineParams_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput(t *testing.T) {
-	r := newModelRequestReconciler()
-	mr, cfg, plan, secrets := fullCharacterizationFixture()
-
-	got := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "prod-ns", "plan-123", true, true)
-
-	want := map[string]string{
-		"model-id":               "quay.io/models/foo:v1",
-		"model-name":             "foo-model",
-		"model-version":          "v2",
-		"model-tokenizer":        "foo-tokenizer",
-		"model-source-type":      "oci",
-		"display-name":           "Foo Model",
-		"business-justification": "Because reasons",
-		"requested-by":           "jane@example.com",
-		"target-namespace":       "prod-ns",
-		"plan-id":                "plan-123",
-		"modelcar-repo":          "custom/modelcar-catalog",
-		// KNOWN BEHAVIOR (see below): unlike buildSandboxPipelineParams,
-		// buildPromotionPipelineParams does NOT check
-		// reqs.GPUConfig.GPUCountOverride at all -- it always uses the
-		// CapacityPlan-derived value. Fixture sets GPUCountOverride="7"
-		// but the plan-derived value (4) is what appears here.
-		"gpu-count-override":             "4",
-		"context-length":                 "8192",
-		"concurrency":                    "16",
-		"allow-time-slicing":             "false",
-		"allow-mig":                      "true",
-		"gpu-isolation-policy":           "shared",
-		"request-rate":                   "5.0",
-		"target-ttft":                    "250ms",
-		"target-throughput":              "200",
-		"gpu-operator-namespace":         "custom-gpu-ns",
-		"clusterpolicy-name":             "custom-cluster-policy",
-		"time-slicing-configmap":         "custom-ts-cm",
-		"max-time-slices":                "16",
-		"advisor-endpoint":               "http://advisor.example.com",
-		"advisor-secret-name":            "custom-advisor-secret",
-		"advisor-timeout-seconds":        "600",
-		"release-name":                   "foo-model",
-		"chart-url":                      "https://charts.example.com/",
-		"chart-version":                  "1.2.3",
-		"values-content":                 "replicaCount: 3",
-		"hardware-profile-name":          "custom-hw-profile",
-		"hardware-profile-namespace":     "custom-hw-ns",
-		"approval-api-url":               "http://approval.example.com",
-		"approval-poll-interval-seconds": "30",
-		"approval-timeout-seconds":       "7200",
-		"evalhub-url":                    "http://evalhub.example.com",
-		"evalhub-token":                  "evalhub-tok",
-		"openshift-console-domain":       "apps.example.com",
-		"guidellm-profile":               "sweep",
-		"guidellm-rate":                  "8.5",
-		"guidellm-max-seconds":           "60",
-		"guidellm-max-requests":          "10",
-		"benchmark-target-url":           "http://custom-benchmark-target/v1",
-		"custom-data":                    "true",
-		"custom-filename":                "custom.json",
-		"huggingface-token":              "hf-tok",
-		"s3-api-endpoint":                "http://result-s3:9000",
-		"s3-access-key-id":               "result-access",
-		"s3-secret-access-key":           "result-secret",
-		"mr-server":                      "http://registry.example.com",
-		"mr-port":                        "9090",
-		"model-reg-author":               "Team Author",
-		"authorized-viewers":             "team-a,team-b",
-		"access-role":                    "admin",
-		"deploy-maas":                    "true",
-		"maas-serving-ns":                "custom-maas-serving",
-		"maas-policy-ns":                 "custom-maas-policy",
-		"maas-gpu-count":                 "3", // spec.MaaS.GPUCount wins over cfg.Spec.MaaSGPUCount
-		"maas-runtime-image":             "default-runtime:latest",
-		"maas-authorized-group":          "default-group",
-		"run-register":                   "true", // isLast=true
-		// "modelcar-image" is always hardcoded "" in this function, so
-		// addParam's empty-value guard always omits it.
-	}
-
-	require.Equal(t, want, got)
-}
-
-func TestBuildPromotionPipelineParams_MiddleNamespace_OmitsApprovalURL_AndRunRegisterFalse(t *testing.T) {
-	// isFirst=false, isLast=false: only the first promotion namespace
-	// gets an approval gate, and only the last has run-register=true.
-	// This is the current behavior for every namespace between the
-	// first and last in a multi-namespace promotion sequence.
-	r := newModelRequestReconciler()
-	mr, cfg, plan, secrets := fullCharacterizationFixture()
-
-	got := r.buildPromotionPipelineParams(mr, nil, cfg, plan, secrets, "staging-ns", "plan-123", false, false)
-
-	_, hasApprovalURL := got["approval-api-url"]
-	require.False(t, hasApprovalURL, "approval-api-url must be omitted (empty string) when isFirst=false")
-	require.Equal(t, "false", got["run-register"], "run-register must be false when isLast=false")
-	require.Equal(t, "staging-ns", got["target-namespace"])
-	// approval-poll-interval-seconds/approval-timeout-seconds are NOT
-	// gated on isFirst -- they're always present.
-	require.Equal(t, "30", got["approval-poll-interval-seconds"])
-	require.Equal(t, "7200", got["approval-timeout-seconds"])
-}
-
-func TestPromotionPipelineNameOrDefault_UsesProfileOverrideWhenSet(t *testing.T) {
-	// Phase 1 fix: promotionPipelineNameOrDefault must actually select a
-	// per-profile promotion pipeline name via
-	// profile.Spec.Workflow.PromotionPipelineRef, rather than ignoring
-	// the profile argument entirely.
-	r := newModelRequestReconciler()
-	profile := &modelopsv1alpha1.ModelLifecycleProfile{
-		Spec: modelopsv1alpha1.ModelLifecycleProfileSpec{
-			Workflow: modelopsv1alpha1.WorkflowRef{
-				Engine:               "tekton",
-				PipelineRef:          "some-sandbox-pipeline",
-				PromotionPipelineRef: "a-totally-different-promotion-pipeline",
-			},
-		},
-	}
-	mr := &modelopsv1alpha1.ModelRequest{}
-
-	require.Equal(t, "a-totally-different-promotion-pipeline", r.promotionPipelineNameOrDefault(profile, mr))
-}
-
-func TestPromotionPipelineNameOrDefault_DefaultsWhenProfileHasNoOverride(t *testing.T) {
-	r := newModelRequestReconciler()
-	profile := &modelopsv1alpha1.ModelLifecycleProfile{
-		Spec: modelopsv1alpha1.ModelLifecycleProfileSpec{
-			Workflow: modelopsv1alpha1.WorkflowRef{Engine: "tekton", PipelineRef: "some-sandbox-pipeline"},
-		},
-	}
-	mr := &modelopsv1alpha1.ModelRequest{}
-
-	require.Equal(t, "model-intake-promotion", r.promotionPipelineNameOrDefault(profile, mr))
-}
-
-func TestPromotionPipelineNameOrDefault_NilProfile_Defaults(t *testing.T) {
-	r := newModelRequestReconciler()
-	mr := &modelopsv1alpha1.ModelRequest{}
-
-	require.Equal(t, "model-intake-promotion", r.promotionPipelineNameOrDefault(nil, mr))
-}
+// --- Param-builder golden tests relocated (Phase 6) to internal/stages/sandbox
+// and internal/stages/promotion -- same assertions, new packages. See
+// docs/REFACTOR_PLAN.md Phase 6/docs/PHASE_LOG.md for the relocation.
 
 func TestModelRequest_PromotionUsesProfilePromotionPipelineRef_EndToEnd(t *testing.T) {
 	ns := newTestNamespace(t)
@@ -1046,19 +639,32 @@ func TestModelRequest_CapacityPlanCreateRace_AlreadyExists_DoesNotFailReconcile(
 	// earlier/concurrent reconcile) creates the CapacityPlan the
 	// controller is about to create, between the controller's Get
 	// (NotFound) and its Create call. Exercised directly against the
-	// idempotency helper using the exact object the reconciler would
-	// build, proving the reconciler's own Create call site is safe
-	// against this race without needing genuine goroutine concurrency.
+	// idempotency helper using the exact object
+	// capacityplanning.StageRunner would build (Phase 6 relocated
+	// buildCapacityPlan into capacityplanning.Handler/StageRunner; see
+	// that package's own TestEnsureRun_SecondCall_DoesNotRecreate for
+	// the EnsureRun-level regression net this test used to be, now
+	// exercised at the shared createIgnoringAlreadyExists level).
 	ns := newTestNamespace(t)
 	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
-	profile := newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
+	newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
 	mr := newModelRequest(t, ns, "mr-1", "profile-1", nil)
 
 	r := newModelRequestReconciler()
 	var cfg modelopsv1alpha1.PlatformConfig
 	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, "cfg-1"), &cfg))
 
-	plan := r.buildCapacityPlan(mr, "mr-1-capacity", profile, &cfg)
+	spec, err := capacityplanning.Handler{}.BuildSpec(stagecommon.StageContext{
+		ModelRequest:   mr,
+		PlatformConfig: &cfg,
+		Stage:          modelopsv1alpha1.ProfileStageSpec{Name: "capacity"},
+	})
+	require.NoError(t, err)
+	native := spec.NativeSpec.(*modelopsv1alpha1.CapacityPlanSpec)
+	plan := modelopsv1alpha1.CapacityPlan{
+		ObjectMeta: metav1.ObjectMeta{Name: "mr-1-capacity", Namespace: ns},
+		Spec:       *native,
+	}
 	// Someone else creates it first.
 	winner := plan
 	require.NoError(t, k8sClient.Create(context.Background(), &winner))

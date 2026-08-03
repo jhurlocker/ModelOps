@@ -54,7 +54,7 @@ func TestModelRequest_FullLifecycle_DrivenEntirelyByFakeStageRunner_NoTektonInvo
 	setupSucceededCapacityPlan(t, ns, "mr-1")
 
 	fakeRunner := stagecommon.NewFakeStageRunner()
-	r := &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme(), StageRunner: fakeRunner}
+	r := &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme(), StageHandlers: newStageHandlers(), StageRunners: newStageRunners(k8sClient, testRuntimeScheme(), fakeRunner)}
 
 	reconcile := func() *modelopsv1alpha1.ModelRequest {
 		t.Helper()
@@ -118,7 +118,7 @@ func TestModelRequest_SandboxFails_UsingFakeStageRunner_ReportsFailedPhase_NoTek
 		Phase:   stagecommon.StageFailed,
 		Message: "fake compliance scan failed",
 	})
-	r := &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme(), StageRunner: fakeRunner}
+	r := &ModelRequestReconciler{Client: k8sClient, Scheme: testRuntimeScheme(), StageHandlers: newStageHandlers(), StageRunners: newStageRunners(k8sClient, testRuntimeScheme(), fakeRunner)}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nsName(ns, "mr-1")})
 	require.NoError(t, err)
@@ -197,7 +197,7 @@ func TestModelRequest_FullLifecycle_FakeClientWithoutTektonScheme(t *testing.T) 
 	fakeRunner.ScriptStage("sandbox", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
 	fakeRunner.ScriptStage("promotion-staging", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
 
-	r := &ModelRequestReconciler{Client: c, Scheme: scheme, StageRunner: fakeRunner}
+	r := &ModelRequestReconciler{Client: c, Scheme: scheme, StageHandlers: newStageHandlers(), StageRunners: newStageRunners(c, scheme, fakeRunner)}
 
 	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "mr-1", Namespace: ns}})
 	require.NoError(t, err)

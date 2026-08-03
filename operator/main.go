@@ -6,6 +6,10 @@ import (
 
 	modelopsv1alpha1 "github.com/jhurlocker/modelops-operator/api/v1alpha1"
 	"github.com/jhurlocker/modelops-operator/internal/controller"
+	"github.com/jhurlocker/modelops-operator/internal/stagecommon"
+	"github.com/jhurlocker/modelops-operator/internal/stages/capacityplanning"
+	"github.com/jhurlocker/modelops-operator/internal/stages/promotion"
+	"github.com/jhurlocker/modelops-operator/internal/stages/sandbox"
 	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
@@ -60,9 +64,28 @@ func main() {
 	if err = (&controller.ModelRequestReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-		StageRunner: &tektonstage.StageRunner{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+		// StageHandlers/StageRunners: the Phase 6 dual registry the
+		// generic stage walker dispatches through (see
+		// internal/stagewalk.Walk and docs/REFACTOR_PLAN.md Phase 6).
+		// Keyed to match defaultStages' "capacity"/"sandbox"/
+		// "promotion" names and "CapacityPlan"/"PipelineRun" kinds --
+		// a profile setting its own Spec.Stages must reference these
+		// same names/kinds (or register additional ones here) to be
+		// dispatchable.
+		StageHandlers: map[string]stagecommon.StageHandler{
+			"capacity":  capacityplanning.Handler{},
+			"sandbox":   sandbox.Handler{},
+			"promotion": promotion.Handler{},
+		},
+		StageRunners: map[string]stagecommon.StageRunner{
+			"CapacityPlan": &capacityplanning.StageRunner{
+				Client: mgr.GetClient(),
+				Scheme: mgr.GetScheme(),
+			},
+			"PipelineRun": &tektonstage.StageRunner{
+				Client: mgr.GetClient(),
+				Scheme: mgr.GetScheme(),
+			},
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "ModelRequest")

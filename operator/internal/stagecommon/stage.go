@@ -103,6 +103,18 @@ type StageSpec struct {
 	// parameter type a specific engine needs (e.g. tektonv1.Param) is
 	// solely the StageRunner implementation's job.
 	Params map[string]string
+	// NativeSpec is an escape hatch (Phase 6) for stage kinds whose
+	// StageRunner needs a typed Go value instead of the common-case
+	// string param bag -- today, exactly one: CapacityPlan, whose
+	// CapacityPlanSpec has real typed fields (ContextLength int,
+	// AllowMIG bool, ...), not Tekton-param-shaped ones. The Handler
+	// for that kind sets NativeSpec to a *modelopsv1alpha1.CapacityPlanSpec;
+	// its StageRunner type-asserts it back. Every other stage kind
+	// leaves this nil and uses Params -- this field must not become
+	// the common case, and the walker never inspects it (dispatch to
+	// Handler/Runner stays uniform regardless of which payload shape a
+	// given kind uses).
+	NativeSpec any
 }
 
 // StageRunner ensures a single lifecycle stage's execution object
@@ -112,4 +124,55 @@ type StageSpec struct {
 // today; a future SageMaker/Databricks equivalent later).
 type StageRunner interface {
 	EnsureRun(ctx context.Context, req *modelopsv1alpha1.ModelRequest, stage StageSpec) (StageStatus, error)
+}
+
+// StageContext is everything a StageHandler needs to build the
+// StageSpec for one invocation of a named stage (once per namespace,
+// for a PerNamespace stage). Introduced in Phase 6 (REFACTOR_PLAN.md)
+// as the seam that replaces ModelRequestReconciler calling
+// buildSandboxPipelineParams/buildPromotionPipelineParams by name.
+type StageContext struct {
+	ModelRequest   *modelopsv1alpha1.ModelRequest
+	Profile        *modelopsv1alpha1.ModelLifecycleProfile
+	PlatformConfig *modelopsv1alpha1.PlatformConfig
+	// CapacityPlan is the most recent CapacityPlan for this
+	// ModelRequest, if one exists yet (nil otherwise). Best-effort,
+	// read-only input -- a stage handler must tolerate it being nil.
+	CapacityPlan *modelopsv1alpha1.CapacityPlan
+	// Secrets holds resolved credentials/endpoints (Phase 3), reused
+	// as-is here.
+	Secrets Secrets
+	// Stage is the raw declared ProfileStageSpec entry this invocation
+	// is for.
+	Stage modelopsv1alpha1.ProfileStageSpec
+	// Namespace is the target namespace for this invocation:
+	// ModelRequest.Namespace unless Stage.PerNamespace, in which case
+	// it's one of the ModelRequest's own selected promotion namespaces.
+	Namespace string
+	// NamespaceIndex/NamespaceCount let a PerNamespace stage's handler
+	// compute isFirst/isLast-style behavior (e.g. promotion's
+	// approval-gate/run-register params) without the walker itself
+	// knowing anything about what "first"/"last" means for a given
+	// stage.
+	NamespaceIndex int
+	NamespaceCount int
+}
+
+// StageHandler builds *what* to run for one invocation of a named
+// stage (params, WorkflowRef, RunName, and, for kinds that need it,
+// NativeSpec) from a StageContext. StageRunner (Phase 4) builds/tracks
+// *how* it runs. This is the seam the generic stage walker (Phase 6)
+// calls instead of the reconciler calling
+// buildSandboxPipelineParams/buildPromotionPipelineParams by name.
+type StageHandler interface {
+	BuildSpec(sc StageContext) (StageSpec, error)
+}
+
+// IsRequired reports whether stage.Required is unset (defaults to true)
+// or explicitly true. The generic stage walker uses this, and only
+// this, to decide whether a StageFailed outcome stops the whole walk
+// (true) or is recorded and tolerated (false) -- see
+// docs/REFACTOR_PLAN.md Phase 6.
+func IsRequired(stage modelopsv1alpha1.ProfileStageSpec) bool {
+	return stage.Required == nil || *stage.Required
 }
