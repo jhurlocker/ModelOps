@@ -1143,3 +1143,315 @@ in the graph.
   still exactly the same loop structure, just calling `StageRunner`
   instead of building `PipelineRun`s inline. Unchanged on purpose; not
   this phase's concern.
+
+---
+
+## Phase 5 — Provider-specific configuration CRDs
+
+**Commit:** `8a24641` on `feat/model-request-controller` — "Phase 5:
+provider-specific configuration CRDs". Additive CRD/API change (see
+below for exactly what's additive vs. new).
+
+This phase went through an explicit design review first (per the
+user's request, same as Phase 0/4) before any code was written; the
+approved design is what's summarized below.
+
+### What changed
+
+- **`api/v1alpha1/intakeproviderconfig_types.go`** (new): `IntakeProviderConfig`,
+  one generic CRD kind with a `providerType` discriminator
+  (`+kubebuilder:validation:Enum=tekton` -- restricted to `"tekton"` for
+  now, per the user's explicit choice) rather than a separate typed kind
+  per backend. `IntakeProviderConfigSpec` holds exactly what used to be
+  hardcoded Go constants in `internal/stages/tekton.StageRunner`
+  (`ServiceAccountName`, workspace bindings, pipeline timeout) or
+  embedded directly in `ModelLifecycleProfile`
+  (`WorkflowRef.PipelineRef`/`PromotionPipelineRef`):
+  `SandboxPipelineName`, `PromotionPipelineName`, `ServiceAccountName`,
+  `PipelineTimeout`, `Workspaces` (`[]IntakeProviderWorkspace`, reduced
+  to the two binding kinds `buildPipelineRun` has ever produced --
+  PVC-by-name or ConfigMap-by-name). `IntakeProviderConfigStatus` is a
+  `Conditions`-only field, matching the same (currently unwritten)
+  precedent already set by `ModelLifecycleProfileStatus`/
+  `PlatformConfigStatus`.
+- **`api/v1alpha1/modellifecycleprofile_types.go`**:
+  `ModelLifecycleProfileSpec` gains `ProviderConfigRef *ProviderConfigRef`
+  (a new `{Name, Kind}` reference type, `Kind` defaulting to
+  `"IntakeProviderConfig"`). `WorkflowRef.PipelineRef` loses its
+  `required` marker (now `omitempty`) and, along with
+  `PromotionPipelineRef`, is documented as DEPRECATED: honored only as a
+  fallback when `ProviderConfigRef` is nil. **Additive, not breaking**:
+  every existing `ModelLifecycleProfile` (including every Phase 0-4
+  characterization-test fixture and the live
+  `gitops/components/runtime-config/lifecycleprofile.yaml`) needs zero
+  changes to keep working -- confirmed by running the full pre-Phase-5
+  suite unmodified (see "TDD" section below) and, live, by the
+  sandbox-cluster distinct-value test described further down.
+- **`internal/stagecommon/stage.go`**: `StageSpec` gains
+  `ProviderConfigRef *modelopsv1alpha1.ProviderConfigRef` (a straight
+  passthrough of `profile.Spec.ProviderConfigRef`, set by the
+  reconciler without any interpretation -- see its doc comment) and
+  `StageKind` (`StageKindSandbox`/`StageKindPromotion`), a new, small,
+  deliberate widening of the contract: `StageSpec.Name` stays
+  "logging/status purposes only" per its existing doc comment, so a
+  separate field is used for anything a `StageRunner` actually branches
+  on (which of `IntakeProviderConfigSpec`'s two pipeline-name fields to
+  resolve).
+- **`internal/stages/tekton/providerconfig.go`** (new):
+  `resolveProviderDetails` -- the one place in the whole codebase that
+  interprets `stage.ProviderConfigRef`. `internal/controller` never
+  fetches or inspects an `IntakeProviderConfig` object itself. Behavior:
+  nil ref -> `defaultProviderDetails(stage.WorkflowRef)` (the DEPRECATED
+  fallback, reproducing the exact pre-Phase-5 hardcoded shape --
+  service account `"pipeline"`, unbounded timeout, the 3 workspace
+  bindings -- now the single source of truth for those defaults,
+  referenced by both the fallback path and `buildPipelineRun`'s own test);
+  `Kind` other than `"IntakeProviderConfig"` (or empty) -> explicit error
+  without attempting a `Get` at all; missing/otherwise-failing `Get` ->
+  error propagated to `EnsureRun`'s caller (see "Known follow-up," this
+  still hits the generic transient-retry path, not a dedicated status
+  reason); `Spec.ProviderType != "tekton"` -> explicit error (a Go-level
+  guard, since the CRD's own enum only enforces this through a real API
+  server, not the fake client used in unit tests); any individual field
+  left unset on an otherwise-resolved CR falls back to
+  `defaultProviderDetails`'s value for that field specifically, not as
+  an all-or-nothing choice.
+- **`internal/stages/tekton/stagerunner.go`**: `EnsureRun`'s
+  not-found branch now calls `resolveProviderDetails` before
+  `buildPipelineRun`. `buildPipelineRun`'s signature changed from
+  `(name, namespace, pipelineName string, ...)` to
+  `(name, namespace string, details providerDetails, ...)` -- the
+  function's own body is otherwise unchanged, just reading from
+  `details` instead of 3 hardcoded literals. New RBAC marker:
+  `+kubebuilder:rbac:groups=modelops.example.io,resources=intakeproviderconfigs,verbs=get;list;watch`,
+  placed on `StageRunner` itself (not the core reconciler), per Phase
+  4's own flagged direction ("a natural candidate for Phase 5/7").
+- **`internal/controller/modelrequest_controller.go`**: both
+  `StageSpec` construction sites (sandbox, promotion) gain
+  `ProviderConfigRef: providerConfigRef(profile)` and the appropriate
+  `StageKind`. The new `providerConfigRef` helper is a one-line nil-safe
+  passthrough of `profile.Spec.ProviderConfigRef` -- the reconciler
+  still never interprets what it points at.
+- **`internal/stages/noop`** (new package): `StageRunner`, the trivial
+  second `StageRunner` the plan asked for -- logs the stage it was
+  asked to run and unconditionally returns `StageSucceeded`
+  immediately, creating no child object of any kind. Deliberately not a
+  real second execution-engine integration.
+- **`docs/REFACTOR_PLAN.md`**: two bullets added to Phase 7, per the
+  user's explicit request: (4) resolve the `WorkflowRef.Engine` vs.
+  `IntakeProviderConfigSpec.ProviderType` redundancy this phase
+  introduced; (5) give `ProviderConfigRef` resolution failures a real
+  `ModelRequest` status reason instead of the generic silent-retry
+  error path every other `EnsureRun` error currently falls into.
+
+### TDD: resolveProviderDetails and the parity test written first
+
+Per the guiding principle, `internal/stages/tekton/providerconfig_test.go`
+(9 tests) was written and confirmed failing (`undefined:
+resolveProviderDetails`) *before* `providerconfig.go` existed: nil-ref
+defaults, sandbox/promotion CR resolution, full-CR override of
+service-account/timeout/workspaces, partial-CR per-field fallback,
+missing-CR error, unsupported-`Kind` error (asserted to short-circuit
+*without* attempting a `Get`, by using a fake client with no object
+seeded at all), empty-`Kind` defaulting, and the Go-level
+unsupported-`providerType` guard (deliberately seeding a value the
+CRD's own enum would reject at a real API server, to prove this
+package's own defensive check independent of that enum).
+`internal/stages/noop`'s 2 tests and the reconciler-level parity test
+were written the same way, against the not-yet-existing `noop.StageRunner`.
+
+### The parity test: the actual evidence the provider abstraction is real
+
+`TestModelRequest_FullLifecycle_TektonAndNoopStageRunners_ReachSameTerminalPhase`
+(`internal/controller/providerconfig_test.go`) runs the identical
+fixture (profile, `PlatformConfig`, `ModelRequest`, a pre-succeeded
+`CapacityPlan`) through `Reconcile` twice, as subtests: once wired to
+the real `tekton.StageRunner` (requiring the usual condition-flip
+dance between reconciles, same as every other test in this file), once
+wired to `noop.StageRunner` (completes in one `Reconcile` call, since
+it reports every stage `StageSucceeded` immediately). Both reach
+`Status.Phase == "Succeeded"`, and both provision the exact same RBAC
+side effects (a `"pipeline"` `ServiceAccount` in both the request's own
+namespace and `"staging"`) -- proving the reconciler's actual decision
+logic (RBAC provisioning, phase transitions) ran identically regardless
+of which concrete `StageRunner` is injected, not just that the
+interface type-checks against two implementations. The differing
+reconcile-call-count between the two subtests is explicitly documented
+in the test's own comment as expected, not a discrepancy the test is
+papering over.
+
+### Existing suite: verified, not assumed, to need zero modification
+
+Ran the full pre-Phase-5 suite (59 tests) before writing any Phase 5
+code to establish a clean baseline, then again after each major step.
+Confirmed via `git status` that no file under `internal/controller`
+needed *any* change until the two new Phase-5 test files were added
+(`providerconfig_test.go` in both `internal/controller` and
+`internal/stages/tekton`) -- every pre-existing characterization and
+proof test in this package passed completely unmodified, including all
+of Phase 4's `FakeStageRunner`/no-Tekton-scheme tests and every
+param-builder golden-value test.
+
+**One exception, exactly as anticipated in the design review and
+flagged rather than silently absorbed**: `internal/stages/tekton`'s
+pre-existing `TestBuildPipelineRun_WorkspaceBindings_MatchTodaysHardcodedShape`
+needed a mechanical, signature-only update (`buildPipelineRun`'s new
+`providerDetails` parameter instead of a bare pipeline-name string,
+constructed via the new `defaultProviderDetails` helper) -- no
+assertion value changed, same category of update Phase 4's own log
+called out for the param-builder tests when their return type changed
+from `tektonv1.Params` to `map[string]string`. All 5 of
+`internal/stages/tekton`'s other pre-existing `EnsureRun`/`toTektonParams`
+tests needed zero changes at all, since a nil `ProviderConfigRef`
+(their default `StageSpec{}` zero value) makes `resolveProviderDetails`
+skip any CR lookup and reproduce the identical hardcoded shape those
+tests already asserted on.
+
+### A real RBAC-marker gotcha caught during manifest regeneration
+
+The first draft of the new `+kubebuilder:rbac` marker on
+`tekton.StageRunner` was placed as a doc comment directly attached to
+the `type StageRunner struct` declaration (no blank line separating the
+marker from the declaration) -- and `controller-gen rbac` silently
+produced *zero* diff to `config/rbac/role.yaml`, no error at all.
+Comparing against every existing `+kubebuilder:rbac` marker in this
+codebase (`capacityplan_controller.go`, `modelrequest_controller.go`)
+showed they all have a **blank line** between the marker comment block
+and the following declaration. Moving the new marker to match (blank
+line before `type StageRunner struct`) fixed it immediately --
+confirmed via `controller-gen rbac ... output:stdout` in isolation
+before regenerating the real manifests. Flagging this as a real,
+previously-undocumented `controller-gen` gotcha for whoever adds the
+next RBAC marker to this codebase: a marker directly attached as a
+Go doc comment (no blank line) to a declaration is apparently not
+picked up by the `rbac` generator the same way a free-floating comment
+is, and it fails **silently** (no error, just an empty diff) -- the
+same failure-mode shape as Phase 0's `+groupName=` marker gotcha, just
+for a different generator.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all five packages under
+`internal/stages/*` (`sandbox`, `promotion`, `capacityplanning`,
+`tekton`, `noop`): none imports another. `internal/stages/noop` imports
+only `internal/stagecommon` and `api/v1alpha1` (plus
+`sigs.k8s.io/controller-runtime/pkg/log`) -- never `internal/stages/tekton`
+or `internal/controller`.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) picked up
+`IntakeProviderConfig` (new CRD:
+`config/crd/bases/modelops.example.io_intakeproviderconfigs.yaml`) and
+`ModelLifecycleProfileSpec.ProviderConfigRef`/the now-optional
+`WorkflowRef.PipelineRef` (diffed
+`config/crd/bases/modelops.example.io_modellifecycleprofiles.yaml`:
+`pipelineRef` moved out of `required`, `providerConfigRef` added --
+no field removed). `config/rbac/role.yaml` gained
+`intakeproviderconfigs` in the existing `get;list;watch` rule
+(alongside `modellifecycleprofiles`/`platformconfigs`, since they share
+identical apiGroup+verbs). `zz_generated.deepcopy.go` gained
+`DeepCopyInto`/`DeepCopy` for the 4 new types
+(`IntakeProviderConfig(List/Spec/Status)`, `IntakeProviderWorkspace`,
+`ProviderConfigRef`) and `ModelLifecycleProfileSpec.DeepCopyInto` now
+deep-copies the new `*ProviderConfigRef` pointer field.
+
+### GitOps manifests (all committed, following the Phase 0/1 pattern)
+
+- `gitops/components/operator/crd-intakeproviderconfigs.yaml` (new,
+  verbatim copy of the generated base CRD, added to
+  `gitops/components/operator/kustomization.yaml`) and
+  `crd-lifecycleprofiles.yaml` re-synced (was already an exact copy per
+  Phase 1's precedent; re-verified byte-identical after copying).
+- `gitops/components/operator/clusterrole.yaml`: added the
+  hand-maintained `intakeproviderconfigs` `get;list;watch` rule
+  (matching this file's existing per-resource-group style, distinct
+  from `config/rbac/role.yaml`'s generated aggregated style -- same
+  hand-sync debt Phase 1 flagged and left alone, not addressed here).
+- `gitops/components/runtime-config/intakeproviderconfig.yaml` (new):
+  the live sample `IntakeProviderConfig`
+  (`standard-generative-onboarding-provider`), setting only the two
+  pipeline names (`sandboxPipelineName`/`promotionPipelineName`) and
+  deliberately leaving `serviceAccountName`/`pipelineTimeout`/`workspaces`
+  unset, to also prove the partial-CR-falls-back-per-field path live,
+  not just in `envtest`. Added to
+  `gitops/components/runtime-config/kustomization.yaml`.
+- `gitops/components/runtime-config/lifecycleprofile.yaml`: migrated to
+  set `providerConfigRef: {name: standard-generative-onboarding-provider}`,
+  with `workflow.pipelineRef`/`engine` left in place but commented as
+  inert -- exactly as the user requested, so sandbox-cluster
+  verification exercises the real `ProviderConfigRef` resolution path,
+  not the deprecated fallback.
+- `operator/config/samples/intakeproviderconfig-sample.yaml` (new,
+  kubebuilder convention, not ArgoCD-tracked): a fully-populated sample
+  showing every field, unlike the deliberately-partial live runtime-config
+  copy.
+- `kustomize build` run locally against both
+  `gitops/components/operator` and `gitops/components/runtime-config`
+  before pushing, confirming no rendering errors and the expected new
+  resources appear in the output.
+
+### Sandbox cluster verification
+
+- Pushed this phase's commit (`8a24641`) to
+  `feat/model-request-controller`; rebuilt and pushed a new
+  `quay.io/jhurlocker/modelops-operator:latest` image (same pattern as
+  every prior phase -- the `Deployment` runs from this pre-built tag).
+- `Application/modelops-operator`: needed an explicit hard-refresh
+  annotation to pick up the new commit promptly (routine polling would
+  have caught it; this just avoided waiting) -- reached `Synced`/`Healthy`
+  at `8a24641`, confirmed the new `intakeproviderconfigs.modelops.example.io`
+  CRD is `Established` on-cluster.
+- `Application/modelops-runtime-config`: also reached
+  `Synced`/`Healthy` at `8a24641`, confirming the new live
+  `IntakeProviderConfig` and the migrated `ModelLifecycleProfile` (now
+  showing `providerConfigRef: {name: ..., kind: IntakeProviderConfig}`,
+  with `kind` defaulted by the API server from the CRD's own
+  `+kubebuilder:default`, confirming that default actually works
+  against a real API server, not just `envtest`) applied cleanly.
+- `kubectl rollout restart` on the operator `Deployment`; manager
+  started cleanly, all `EventSource`s registered without error.
+- Created a disposable `ModelRequest` (`phase5-verify`, `sandbox`
+  namespace, referencing the existing `scan-s3-credentials`/
+  `result-s3-credentials` secrets and the now-migrated
+  `standard-generative-onboarding` profile). Reconciled to
+  `SandboxRunning`; the sandbox `PipelineRun`'s `pipelineRef.name`
+  (`model-intake-sandbox`), `serviceAccountName` (`pipeline`, the
+  fallback default since the live CR leaves it unset), and workspace
+  bindings (the 3 hardcoded-default bindings, same reason) all matched
+  expectations for a CR that only sets the two pipeline-name fields.
+- **A real ArgoCD self-heal race was hit and worked around, exactly the
+  gotcha `REFACTOR_PLAN.md`'s guiding principles warn about**: the
+  first attempt at a decisive "prove this is genuinely resolved from
+  the CR, not coincidentally identical to the inert fallback" test
+  (patch the live `IntakeProviderConfig`'s `sandboxPipelineName` to a
+  distinct value, delete+recreate the `PipelineRun`) silently failed --
+  the resulting `PipelineRun` still showed the old pipeline name.
+  Investigation showed `Application/modelops-runtime-config`'s
+  auto-sync+self-heal reverted the manual patch back to the
+  Git-committed value before the reconciler ever read it. Worked around
+  by temporarily clearing that Application's `syncPolicy.automated`,
+  re-running the exact same patch+delete+recreate sequence (this time
+  the resulting `PipelineRun`'s `pipelineRef.name` was
+  `phase5-distinct-check-pipeline`, the patched value -- decisive proof
+  the live reconciler genuinely resolves `ProviderConfigRef`, not a
+  coincidence of both paths agreeing), then reverting the CR patch,
+  deleting the disposable `ModelRequest`/`PipelineRun`/`CapacityPlan`,
+  and restoring `syncPolicy.automated` (confirmed `Synced`/`Healthy`
+  again afterward, matching Git with no drift left behind).
+
+### Known follow-up NOT done in this phase
+
+- Both items added to `REFACTOR_PLAN.md`'s Phase 7 (see above) are
+  deliberately deferred, not silently fixed: the `WorkflowRef.Engine`
+  vs. `providerType` redundancy, and giving `ProviderConfigRef`
+  resolution failures their own status reason instead of the generic
+  transient-retry error path every other `EnsureRun` error already
+  falls into.
+- `gitops/components/operator/clusterrole.yaml`'s hand-maintained
+  drift risk relative to the generated `config/rbac/role.yaml` (flagged
+  in Phase 1) is unchanged by this phase -- the new rule was added to
+  both by hand, not fixed at the tooling level.
+- No second real provider (SageMaker/Databricks) was implemented, per
+  the plan's explicit instruction; `internal/stages/noop` is the
+  trivial stand-in that exists solely to prove the seam.
