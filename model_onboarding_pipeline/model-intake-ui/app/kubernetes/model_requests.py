@@ -109,6 +109,17 @@ def list_lifecycle_profiles(namespace=None, limit=50):
     return resp.get("items", [])
 
 
+def get_lifecycle_profile(name, namespace=None):
+    ns = namespace or PIPELINE_NAMESPACE
+    return custom_api().get_namespaced_custom_object(
+        group=MODELREQUEST_GROUP,
+        version=MODELREQUEST_VERSION,
+        namespace=ns,
+        plural="modellifecycleprofiles",
+        name=name,
+    )
+
+
 def list_platform_configs(namespace=None, limit=50):
     ns = namespace or PIPELINE_NAMESPACE
     resp = custom_api().list_namespaced_custom_object(

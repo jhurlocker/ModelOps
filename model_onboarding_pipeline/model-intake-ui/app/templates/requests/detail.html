@@ -4,7 +4,6 @@
 {% set spec = request.spec %}
 {% set status = request.status or {} %}
 {% set conditions = status.conditions or [] %}
-{% set phase = status.phase or 'Unknown' %}
 {% set ready = False %}
 {% for c in conditions %}
     {% if c.type == 'Ready' and c.status == 'True' %}{% set ready = True %}{% endif %}
@@ -14,8 +13,8 @@
     <div>
         <h1>{{ meta.name }}</h1>
         <p>
-            <span class="badge {{ 'badge-success' if phase in ('Completed','Succeeded') else 'badge-danger' if phase == 'Failed' else 'badge-warning' if phase in ('Pending','Evaluating') else 'badge-info' }}" style="margin-right:8px">
-                {{ phase }}
+            <span class="badge {{ status|status_badge_class }}" style="margin-right:8px">
+                {{ status|status_label }}
             </span>
             {{ 'Ready' if ready else 'Not Ready' }}
         </p>
@@ -42,6 +41,59 @@
         </table>
     </div>
 </div>
+
+{% if status.stages %}
+<div class="card">
+    <div class="card-header">Stage Progress</div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table>
+                <thead><tr><th>#</th><th>Stage</th><th>Namespace</th><th>Phase</th><th>Message</th></tr></thead>
+                <tbody>
+                    {% for s in status.stages %}
+                    <tr>
+                        <td>{{ loop.index }}</td>
+                        <td><strong>{{ s.name|humanize_stage_name }}</strong></td>
+                        <td>{{ s.namespace or '—' }}</td>
+                        <td>
+                            <span class="badge {{ s.phase|stage_progress_badge_class }}">{{ s.phase }}</span>
+                        </td>
+                        <td>{{ s.message or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if provider_rows %}
+<div class="card">
+    <div class="card-header">
+        Provider
+        <span style="font-size:12px;color:var(--color-text-muted);font-weight:400">
+            (which execution engine/IntakeProviderConfig this request's profile resolves to per stage -- read-only)
+        </span>
+    </div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table>
+                <thead><tr><th>Stage</th><th>Kind</th><th>Provider</th></tr></thead>
+                <tbody>
+                    {% for row in provider_rows %}
+                    <tr>
+                        <td>{{ row.name|humanize_stage_name }}</td>
+                        <td>{{ row.kind }}</td>
+                        <td><code>{{ row.provider }}</code></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
 
 {% if spec.requirements %}
 <div class="card">

@@ -110,9 +110,14 @@ def submit():
     reqs["advisorEndpoint"] = form_data.get("advisor-endpoint", DEFAULT_ADVISOR_ENDPOINT)
 
     # Expert overrides
+    # gpuCountOverride is a string field on the CRD (ModelRequirements.
+    # GPUConfig.GPUCountOverride), not an int -- sending int() here was
+    # silently rejected by the API server (422, "must be of type
+    # string") on every submission that set this field. Send the raw
+    # string value straight through.
     gpu_override = form_data.get("gpu-count-override", "")
     if gpu_override:
-        reqs["gpuCountOverride"] = int(gpu_override)
+        reqs["gpuCountOverride"] = gpu_override
     values_content = form_data.get("values-content", "")
     if values_content:
         reqs["valuesContent"] = values_content

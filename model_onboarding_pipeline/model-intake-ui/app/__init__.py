@@ -28,6 +28,14 @@ def create_app():
     app.register_blueprint(platform_health_bp)
     app.register_blueprint(configuration_bp)
 
+    from app.status_display import (
+        humanize_stage_name, status_label, status_badge_class, stage_progress_badge_class,
+    )
+    app.jinja_env.filters["humanize_stage_name"] = humanize_stage_name
+    app.jinja_env.filters["status_label"] = status_label
+    app.jinja_env.filters["status_badge_class"] = status_badge_class
+    app.jinja_env.filters["stage_progress_badge_class"] = stage_progress_badge_class
+
     @app.route("/healthz")
     def healthz():
         from datetime import datetime, timezone
