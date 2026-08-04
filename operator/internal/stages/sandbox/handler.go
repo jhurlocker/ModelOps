@@ -50,9 +50,13 @@ func (Handler) BuildSpec(sc stagecommon.StageContext) (stagecommon.StageSpec, er
 	stagecommon.AddParam(p, "severity-threshold", stagecommon.StrOrDefault(reqs.SecurityConfig.SecurityThreshold, "block"))
 	stagecommon.AddParam(p, "tenant-ns", stagecommon.StrOrDefault(reqs.SandboxNamespace, "vllm"))
 
+	// scan-s3-secret-name is a Secret *reference*, never a value -- see
+	// stagecommon.Secrets' doc comment and docs/PHASE_LOG.md Phase 8.
+	// No Go-side default: resolveSecrets' fail-loud validation (Phase
+	// 1) guarantees a real ModelRequest never reaches this Handler
+	// without one.
 	stagecommon.AddParam(p, "scan-s3-endpoint", sc.Secrets.ScanS3Endpoint)
-	stagecommon.AddParam(p, "scan-s3-access-key-id", sc.Secrets.ScanS3AccessKey)
-	stagecommon.AddParam(p, "scan-s3-secret-access-key", sc.Secrets.ScanS3SecretKey)
+	stagecommon.AddParam(p, "scan-s3-secret-name", sc.Secrets.ScanS3SecretName)
 	compBucket := stagecommon.StrOrDefault(mr.Spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.ComplianceS3Bucket, "compliance-artifact-results"))
 	secBucket := stagecommon.StrOrDefault(mr.Spec.ResultS3Bucket, stagecommon.StrOrDefault(cfg.Spec.SecurityS3Bucket, "security-scan-results"))
 	stagecommon.AddParam(p, "compliance-s3-bucket", compBucket)

@@ -64,11 +64,10 @@ func TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams(t *test
 	}
 
 	secrets := Secrets{
-		EvalHubToken:      "evalhub-tok",
-		HuggingFaceToken:  "hf-tok",
-		ResultS3Endpoint:  "http://result-s3:9000",
-		ResultS3AccessKey: "result-access",
-		ResultS3SecretKey: "result-secret",
+		EvalHubSecretName:     "evalhub-creds-secret",
+		HuggingFaceSecretName: "hf-creds-secret",
+		ResultS3Endpoint:      "http://result-s3:9000",
+		ResultS3SecretName:    "result-s3-creds-secret",
 	}
 
 	got := BuildCommonModelParams(spec, reqs, cfg, secrets)
@@ -105,12 +104,11 @@ func TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams(t *test
 		"hardware-profile-name":      "custom-hw-profile",
 		"hardware-profile-namespace": "custom-hw-ns",
 		"evalhub-url":                "http://evalhub.example.com",
-		"evalhub-token":              "evalhub-tok",
+		"evalhub-secret-name":        "evalhub-creds-secret",
 		"openshift-console-domain":   "apps.example.com",
-		"huggingface-token":          "hf-tok",
+		"huggingface-secret-name":    "hf-creds-secret",
 		"s3-api-endpoint":            "http://result-s3:9000",
-		"s3-access-key-id":           "result-access",
-		"s3-secret-access-key":       "result-secret",
+		"result-s3-secret-name":      "result-s3-creds-secret",
 		"mr-server":                  "http://registry.example.com",
 		"mr-port":                    "9090",
 		"model-reg-author":           "Team Author",
@@ -121,6 +119,16 @@ func TestBuildCommonModelParams_FullFixture_ProducesExpectedSharedParams(t *test
 	require.Equal(t, want, got)
 	require.NotContains(t, got, "gpu-count-override",
 		"gpu-count-override is deliberately NOT part of the shared helper -- each stage owns its own logic for this param")
+
+	// Phase 8 (docs/PHASE_LOG.md): the actual credential VALUES must
+	// never appear in this map at all -- only Secret names/endpoints.
+	// This is the decisive per-function assertion that the leak
+	// (values flowing into PipelineRun.spec.params) is closed at the
+	// source, not just renamed.
+	for _, leaked := range []string{"evalhub-token", "huggingface-token", "s3-access-key-id", "s3-secret-access-key"} {
+		require.NotContains(t, got, leaked,
+			"%q must never be produced by BuildCommonModelParams -- credentials flow by Secret name only (see evalhub-secret-name/huggingface-secret-name/result-s3-secret-name)", leaked)
+	}
 }
 
 func TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty(t *testing.T) {
@@ -147,6 +155,14 @@ func TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty(t *testing.T) {
 	require.Equal(t, "8", got["max-time-slices"])
 	require.Equal(t, "gpu-advisor-credentials", got["advisor-secret-name"])
 	require.Equal(t, "300", got["advisor-timeout-seconds"])
+	// evalhub-secret-name/huggingface-secret-name always carry SOME
+	// name (never omitted, never empty) -- Kubernetes requires a
+	// non-empty Secret name in a valueFrom.secretKeyRef even when
+	// optional:true, so an unconfigured credential falls back to a
+	// conventional name rather than an empty string that would fail
+	// Pod admission. See docs/PHASE_LOG.md Phase 8.
+	require.Equal(t, "evalhub-credentials", got["evalhub-secret-name"])
+	require.Equal(t, "huggingface-credentials", got["huggingface-secret-name"])
 	require.Equal(t, "https://redhat-ai-services.github.io/helm-charts/", got["chart-url"])
 	require.Equal(t, "0.7.1", got["chart-version"])
 	require.Equal(t, "gpu-profile", got["hardware-profile-name"])
@@ -162,4 +178,11 @@ func TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty(t *testing.T) {
 	require.False(t, hasAdvisorEndpoint)
 	_, hasEvalHubURL := got["evalhub-url"]
 	require.False(t, hasEvalHubURL)
+	// result-s3-secret-name has no hardcoded Go-side default (unlike
+	// evalhub/huggingface): resolveSecrets' fail-loud validation
+	// guarantees a real ModelRequest never reaches this function
+	// without one, so there's no sensible placeholder to fall back to
+	// here -- omitted when empty, same as any other AddParam call.
+	_, hasResultS3SecretName := got["result-s3-secret-name"]
+	require.False(t, hasResultS3SecretName)
 }

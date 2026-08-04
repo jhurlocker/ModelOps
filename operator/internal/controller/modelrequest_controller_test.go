@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
@@ -481,20 +482,22 @@ func TestModelRequest_AllPromotionsSucceeded_SetsPromotionPipelineRunName(t *tes
 
 // --- resolveSecrets ---
 
-func TestResolveSecrets_SecretNamesConfigured_ReturnsSecretDerivedCredentials(t *testing.T) {
+func TestResolveSecrets_SecretNamesConfigured_ReturnsSecretNameReferencesNotValues(t *testing.T) {
 	// Phase 1 fix: with ScanS3SecretName/ResultS3SecretName set (the
-	// newModelRequest default), resolveSecrets returns the values from
-	// the referenced Secret -- never a hardcoded credential pair.
+	// newModelRequest default), resolveSecrets validates the referenced
+	// Secret -- never a hardcoded credential pair. Phase 8
+	// (docs/PHASE_LOG.md): the returned resolvedSecrets carries the
+	// Secret's own NAME, never the accessKeyId/secretAccessKey values
+	// themselves -- those never leave this function.
 	ns := newTestNamespace(t)
 	mr := newModelRequest(t, ns, "mr-1", "unused-profile", nil)
+	secretName := "mr-1-s3-credentials"
 
 	r := newModelRequestReconciler()
 	secrets, err := r.resolveSecrets(context.Background(), mr)
 	require.NoError(t, err)
-	require.Equal(t, "test-access-key", secrets.scanS3AccessKey)
-	require.Equal(t, "test-secret-key", secrets.scanS3SecretKey)
-	require.Equal(t, "test-access-key", secrets.resultS3AccessKey)
-	require.Equal(t, "test-secret-key", secrets.resultS3SecretKey)
+	require.Equal(t, secretName, secrets.scanS3SecretName)
+	require.Equal(t, secretName, secrets.resultS3SecretName)
 }
 
 func TestResolveSecrets_ResultS3EndpointOverride_StillHonored(t *testing.T) {
@@ -510,7 +513,7 @@ func TestResolveSecrets_ResultS3EndpointOverride_StillHonored(t *testing.T) {
 	secrets, err := r.resolveSecrets(context.Background(), mr)
 	require.NoError(t, err)
 	require.Equal(t, "http://custom-s3:9000", secrets.resultS3Endpoint)
-	require.Equal(t, "test-access-key", secrets.resultS3AccessKey, "credentials still come only from the Secret")
+	require.Equal(t, "mr-1-s3-credentials", secrets.resultS3SecretName, "the Secret's name still flows through unchanged")
 }
 
 func TestResolveSecrets_NoScanS3SecretNameConfigured_FailsWithClearError(t *testing.T) {
@@ -543,6 +546,155 @@ func TestResolveSecrets_MissingReferencedSecret_ReturnsError(t *testing.T) {
 	ns := newTestNamespace(t)
 	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
 		mr.Spec.ResultS3SecretName = "does-not-exist"
+	})
+
+	r := newModelRequestReconciler()
+	_, err := r.resolveSecrets(context.Background(), mr)
+	require.Error(t, err)
+}
+
+// --- resolveSecrets: EvalHub (Phase 8 bug fix + secret-reference design) ---
+
+// evalhubTokenSecretName mirrors the controller's own naming for the
+// ephemeral, owned EvalHub token Secret -- duplicated here (rather than
+// exported) so this test file pins the exact contract without needing
+// to reach into controller internals beyond what resolveSecrets itself
+// already returns.
+func evalhubTokenSecretNameForTest(mrName string) string {
+	return mrName + "-evalhub-token"
+}
+
+func TestResolveSecrets_EvalHubSecretHasURLAndToken_UsesTokenVerbatim_NeverGeneratesOrOverwrites(t *testing.T) {
+	// The original bug (docs/PHASE_LOG.md Phase 8): resolveSecrets read
+	// the Secret's "url" key into the wrong field (scanS3Endpoint) and
+	// never read "token" at all, always overwriting it with a freshly
+	// generated ServiceAccount token. This pins the corrected contract:
+	// url lands in evalhubURL, an explicit token in the Secret is
+	// honored verbatim, and no ephemeral token Secret is ever created.
+	ns := newTestNamespace(t)
+	newPipelineServiceAccount(t, ns)
+	newSecret(t, ns, "evalhub-creds", map[string]string{
+		"url":   "https://evalhub.example.com",
+		"token": "operator-provided-evalhub-token",
+	})
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.EvalHubSecretName = "evalhub-creds"
+	})
+
+	r := newModelRequestReconciler()
+	secrets, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Equal(t, "https://evalhub.example.com", secrets.evalhubURL,
+		"the Secret's \"url\" key must land in evalhubURL, not scanS3Endpoint (the original bug)")
+	require.Equal(t, "evalhub-creds", secrets.evalhubSecretName,
+		"an explicit token in the operator's own Secret must be honored by reusing that Secret's name, not a generated one")
+
+	// No ephemeral token Secret should have been created -- the
+	// operator's own Secret already has a token.
+	var ephemeral corev1.Secret
+	err = k8sClient.Get(context.Background(), nsName(ns, evalhubTokenSecretNameForTest("mr-1")), &ephemeral)
+	require.True(t, apierrors.IsNotFound(err), "no ephemeral EvalHub token Secret should be created when the operator's own Secret already has a token")
+}
+
+func TestResolveSecrets_EvalHubSecretHasURLButNoToken_GeneratesAndPersistsEphemeralSecret(t *testing.T) {
+	ns := newTestNamespace(t)
+	newPipelineServiceAccount(t, ns)
+	newSecret(t, ns, "evalhub-creds", map[string]string{
+		"url": "https://evalhub.example.com",
+		// no "token" key
+	})
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.EvalHubSecretName = "evalhub-creds"
+	})
+
+	r := newModelRequestReconciler()
+	secrets, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Equal(t, "https://evalhub.example.com", secrets.evalhubURL)
+
+	wantSecretName := evalhubTokenSecretNameForTest("mr-1")
+	require.Equal(t, wantSecretName, secrets.evalhubSecretName,
+		"no explicit token in the configured Secret -- must fall back to the generated, owned, ephemeral Secret")
+
+	var ephemeral corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, wantSecretName), &ephemeral))
+	require.NotEmpty(t, ephemeral.Data["token"], "the ephemeral Secret must actually hold the generated token")
+	require.Len(t, ephemeral.OwnerReferences, 1, "the ephemeral Secret must be owned by the ModelRequest for GC")
+	require.Equal(t, "mr-1", ephemeral.OwnerReferences[0].Name)
+}
+
+func TestResolveSecrets_NoEvalHubSecretConfigured_GeneratesAndPersistsEphemeralSecret(t *testing.T) {
+	ns := newTestNamespace(t)
+	newPipelineServiceAccount(t, ns)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", nil) // EvalHubSecretName left unset
+
+	r := newModelRequestReconciler()
+	secrets, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Empty(t, secrets.evalhubURL)
+
+	wantSecretName := evalhubTokenSecretNameForTest("mr-1")
+	require.Equal(t, wantSecretName, secrets.evalhubSecretName)
+
+	var ephemeral corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, wantSecretName), &ephemeral))
+	require.NotEmpty(t, ephemeral.Data["token"])
+}
+
+func TestResolveSecrets_EvalHubEphemeralSecret_UpsertIsIdempotentAcrossReconciles(t *testing.T) {
+	// The ephemeral EvalHub token Secret is refreshed (not duplicated)
+	// on every resolveSecrets call, mirroring the
+	// createIgnoringAlreadyExists pattern used elsewhere in this file
+	// for other owned child objects.
+	ns := newTestNamespace(t)
+	newPipelineServiceAccount(t, ns)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", nil)
+
+	r := newModelRequestReconciler()
+	secrets1, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+
+	var first corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, secrets1.evalhubSecretName), &first))
+
+	secrets2, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Equal(t, secrets1.evalhubSecretName, secrets2.evalhubSecretName)
+
+	var second corev1.Secret
+	require.NoError(t, k8sClient.Get(context.Background(), nsName(ns, secrets2.evalhubSecretName), &second))
+	require.Equal(t, first.UID, second.UID, "the second call must update the existing Secret in place, not create a duplicate")
+}
+
+// --- resolveSecrets: HuggingFace (name-only, Phase 8) ---
+
+func TestResolveSecrets_HuggingFaceSecretName_ReturnsNameNotValue(t *testing.T) {
+	ns := newTestNamespace(t)
+	newSecret(t, ns, "hf-creds", map[string]string{"token": "some-real-hf-token"})
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.HuggingFaceSecretName = "hf-creds"
+	})
+
+	r := newModelRequestReconciler()
+	secrets, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Equal(t, "hf-creds", secrets.huggingfaceSecretName)
+}
+
+func TestResolveSecrets_NoHuggingFaceSecretNameConfigured_LeavesItEmpty(t *testing.T) {
+	ns := newTestNamespace(t)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", nil) // HuggingFaceSecretName left unset
+
+	r := newModelRequestReconciler()
+	secrets, err := r.resolveSecrets(context.Background(), mr)
+	require.NoError(t, err)
+	require.Empty(t, secrets.huggingfaceSecretName)
+}
+
+func TestResolveSecrets_MissingHuggingFaceSecret_ReturnsError(t *testing.T) {
+	ns := newTestNamespace(t)
+	mr := newModelRequest(t, ns, "mr-1", "unused-profile", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.HuggingFaceSecretName = "does-not-exist"
 	})
 
 	r := newModelRequestReconciler()

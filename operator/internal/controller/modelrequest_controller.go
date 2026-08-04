@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -138,7 +139,14 @@ func (e *secretLookupError) Unwrap() error { return e.err }
 // +kubebuilder:rbac:groups=modelops.example.io,resources=platformconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=modelops.example.io,resources=capacityplans,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// secrets create;update;patch (Phase 8, docs/PHASE_LOG.md) is narrowly
+// for ensureEvalHubTokenSecret's upsert of a single, owned, ephemeral,
+// per-ModelRequest Secret (name "<ModelRequest>-evalhub-token") caching
+// a generated EvalHub bearer token -- NOT a general secret-writing
+// capability. The reconciler never creates/updates any other Secret;
+// every other *SecretName field (ScanS3/ResultS3/HuggingFace/EvalHub-
+// when-explicitly-configured) is read-only (get;list;watch).
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
@@ -568,15 +576,24 @@ func (r *ModelRequestReconciler) lookupPlatformConfig(ctx context.Context, mr *m
 	return &cfg, nil
 }
 
+// resolvedSecrets holds the outcome of resolveSecrets: Secret NAME
+// references and non-secret endpoint strings only, never credential
+// VALUES. This is a Phase 8 (docs/PHASE_LOG.md) change: resolveSecrets
+// still Gets/inspects the underlying Secret's data (to validate it
+// exists, has the expected keys, and to decide the EvalHub-token
+// fallback), but the raw accessKeyId/secretAccessKey/token values never
+// escape resolveSecrets itself -- see toStagecommonSecrets and
+// stagecommon.Secrets' doc comment for where these names end up
+// (Tekton params consumed via a Task's own env.valueFrom.secretKeyRef,
+// never PipelineRun.spec.params).
 type resolvedSecrets struct {
-	evalhubToken      string
-	huggingfaceToken  string
-	scanS3Endpoint    string
-	scanS3AccessKey   string
-	scanS3SecretKey   string
-	resultS3Endpoint  string
-	resultS3AccessKey string
-	resultS3SecretKey string
+	evalhubURL            string
+	evalhubSecretName     string
+	huggingfaceSecretName string
+	scanS3Endpoint        string
+	scanS3SecretName      string
+	resultS3Endpoint      string
+	resultS3SecretName    string
 }
 
 // toStagecommonSecrets converts the reconciler-private resolvedSecrets
@@ -587,79 +604,118 @@ func toStagecommonSecrets(s *resolvedSecrets) stagecommon.Secrets {
 		return stagecommon.Secrets{}
 	}
 	return stagecommon.Secrets{
-		EvalHubToken:      s.evalhubToken,
-		HuggingFaceToken:  s.huggingfaceToken,
-		ResultS3Endpoint:  s.resultS3Endpoint,
-		ResultS3AccessKey: s.resultS3AccessKey,
-		ResultS3SecretKey: s.resultS3SecretKey,
-		ScanS3Endpoint:    s.scanS3Endpoint,
-		ScanS3AccessKey:   s.scanS3AccessKey,
-		ScanS3SecretKey:   s.scanS3SecretKey,
+		EvalHubURL:            s.evalhubURL,
+		EvalHubSecretName:     s.evalhubSecretName,
+		HuggingFaceSecretName: s.huggingfaceSecretName,
+		ResultS3Endpoint:      s.resultS3Endpoint,
+		ResultS3SecretName:    s.resultS3SecretName,
+		ScanS3Endpoint:        s.scanS3Endpoint,
+		ScanS3SecretName:      s.scanS3SecretName,
 	}
+}
+
+// evalhubTokenSecretName is the deterministic name of the ephemeral,
+// owned Secret resolveSecrets upserts to hold a generated
+// ServiceAccount token, when no operator-configured EvalHub Secret (or
+// none with a "token" key) is available. Named/owned the same way every
+// other per-ModelRequest child object in this file is (see
+// TestModelRequest_FirstReconcile_CreatesCapacityPlan's
+// "<name>-capacity" convention).
+func evalhubTokenSecretName(mr *modelopsv1alpha1.ModelRequest) string {
+	return mr.Name + "-evalhub-token"
 }
 
 func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelopsv1alpha1.ModelRequest) (*resolvedSecrets, error) {
 	s := &resolvedSecrets{}
 
+	// EvalHub: read "url" (non-secret -- Phase 8 fix: this used to land
+	// in scanS3Endpoint, an unrelated field, entirely by mistake) and
+	// "token" (a credential -- Phase 8 fix: this key was never read at
+	// all; evalhubToken was unconditionally overwritten by a freshly
+	// generated token below, silently discarding any token an operator
+	// actually configured) from the Secret's own data, but only ever
+	// propagate the Secret's NAME onward, never the token value itself.
 	if mr.Spec.EvalHubSecretName != "" {
 		secret, err := r.readSecret(ctx, mr.Namespace, mr.Spec.EvalHubSecretName)
 		if err != nil {
 			return nil, err
 		}
 		if v, ok := secret.Data["url"]; ok {
-			s.scanS3Endpoint = string(v)
+			s.evalhubURL = string(v)
+		}
+		if v, ok := secret.Data["token"]; ok && len(v) > 0 {
+			// An explicit token was configured -- reuse the operator's
+			// own Secret by name; never overwrite it with a generated
+			// one.
+			s.evalhubSecretName = mr.Spec.EvalHubSecretName
 		}
 	}
-	if s.evalhubToken == "" {
+	if s.evalhubSecretName == "" {
+		// No explicit token was configured (or no EvalHubSecretName at
+		// all). Generate a short-lived ServiceAccount token for the
+		// pipeline's own identity and persist it in an owned, ephemeral
+		// Secret, so it too flows to Tekton by Secret reference -- never
+		// as a plaintext value in resolvedSecrets/StageSpec.Params.
 		token, err := r.generateServiceAccountToken(ctx, mr.Namespace, "pipeline")
 		if err != nil {
 			logger := log.FromContext(ctx)
 			logger.Error(err, "failed to generate EvalHub token for pipeline SA, falling back to empty")
 		} else {
-			s.evalhubToken = token
+			name, err := r.ensureEvalHubTokenSecret(ctx, mr, token)
+			if err != nil {
+				return nil, fmt.Errorf("failed to persist generated EvalHub token secret: %w", err)
+			}
+			s.evalhubSecretName = name
 		}
 	}
 
+	// HuggingFace: optional. Still Get the Secret to fail loudly on a
+	// typo'd/missing reference (matching readSecret's existing
+	// behavior), but only the Secret's own name is ever propagated --
+	// its "token" value is never read into a returned field.
 	if mr.Spec.HuggingFaceSecretName != "" {
-		secret, err := r.readSecret(ctx, mr.Namespace, mr.Spec.HuggingFaceSecretName)
-		if err != nil {
+		if _, err := r.readSecret(ctx, mr.Namespace, mr.Spec.HuggingFaceSecretName); err != nil {
 			return nil, err
 		}
-		s.huggingfaceToken = string(secret.Data["token"])
+		s.huggingfaceSecretName = mr.Spec.HuggingFaceSecretName
 	}
 
+	// Endpoint is not a credential -- a hardcoded default cluster-local
+	// service address is fine to fall back to. accessKeyId/
+	// secretAccessKey are credentials: resolveSecrets still validates
+	// their presence/non-emptiness (fail loudly per AGENTS.md/Phase 1,
+	// "no hardcoded credential fallback"), but only the Secret's own
+	// name -- never the key values -- is propagated onward (Phase 8).
+	var scanS3CredentialsPresent bool
 	if mr.Spec.ScanS3SecretName != "" {
 		secret, err := r.readSecret(ctx, mr.Namespace, mr.Spec.ScanS3SecretName)
 		if err != nil {
 			return nil, err
 		}
 		s.scanS3Endpoint = fromMap(string(secret.Data["endpoint"]), s.scanS3Endpoint)
-		s.scanS3AccessKey = string(secret.Data["accessKeyId"])
-		s.scanS3SecretKey = string(secret.Data["secretAccessKey"])
+		if len(secret.Data["accessKeyId"]) > 0 && len(secret.Data["secretAccessKey"]) > 0 {
+			s.scanS3SecretName = mr.Spec.ScanS3SecretName
+			scanS3CredentialsPresent = true
+		}
 	}
-
-	// Endpoint is not a credential -- a hardcoded default cluster-local
-	// service address is fine to fall back to. Access/secret keys are
-	// credentials and must come from a real Secret; no hardcoded
-	// credential fallback is allowed (see AGENTS.md: "Never store
-	// plaintext credentials..."). If no *SecretName was configured (or
-	// the referenced Secret didn't populate these keys), fail loudly
-	// instead of silently defaulting to a known credential pair.
 	if s.scanS3Endpoint == "" {
 		s.scanS3Endpoint = "http://minio.modelops-storage.svc.cluster.local:9000"
 	}
-	if s.scanS3AccessKey == "" || s.scanS3SecretKey == "" {
+	if !scanS3CredentialsPresent {
 		return nil, fmt.Errorf("no scan storage credentials configured: set spec.scanS3SecretName to a Secret with accessKeyId/secretAccessKey keys")
 	}
 
+	var resultS3CredentialsPresent bool
 	if mr.Spec.ResultS3SecretName != "" {
 		secret, err := r.readSecret(ctx, mr.Namespace, mr.Spec.ResultS3SecretName)
 		if err != nil {
 			return nil, err
 		}
 		s.resultS3Endpoint = fromMap(string(secret.Data["endpoint"]), s.resultS3Endpoint)
-		s.resultS3AccessKey = string(secret.Data["accessKeyId"])
-		s.resultS3SecretKey = string(secret.Data["secretAccessKey"])
+		if len(secret.Data["accessKeyId"]) > 0 && len(secret.Data["secretAccessKey"]) > 0 {
+			s.resultS3SecretName = mr.Spec.ResultS3SecretName
+			resultS3CredentialsPresent = true
+		}
 	}
 
 	if s.resultS3Endpoint == "" {
@@ -668,11 +724,61 @@ func (r *ModelRequestReconciler) resolveSecrets(ctx context.Context, mr *modelop
 	if mr.Spec.ResultS3Endpoint != "" {
 		s.resultS3Endpoint = mr.Spec.ResultS3Endpoint
 	}
-	if s.resultS3AccessKey == "" || s.resultS3SecretKey == "" {
+	if !resultS3CredentialsPresent {
 		return nil, fmt.Errorf("no result storage credentials configured: set spec.resultS3SecretName to a Secret with accessKeyId/secretAccessKey keys")
 	}
 
 	return s, nil
+}
+
+// ensureEvalHubTokenSecret upserts an owned, ephemeral Secret holding a
+// freshly generated ServiceAccount token, so a generated EvalHub token
+// flows to Tekton by Secret reference -- like every other credential
+// (Phase 8, docs/PHASE_LOG.md) -- rather than as a plaintext
+// resolvedSecrets/StageSpec.Params value. Idempotent: creates the
+// Secret if absent (mirroring the createIgnoringAlreadyExists pattern
+// used elsewhere in this file for other owned child objects), or
+// refreshes its token value in place if it already exists (the
+// underlying ServiceAccount token has a 24h TTL and is regenerated on
+// every resolveSecrets call). Owner-referenced to mr for garbage
+// collection, consistent with every other child object this reconciler
+// creates.
+func (r *ModelRequestReconciler) ensureEvalHubTokenSecret(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, token string) (string, error) {
+	name := evalhubTokenSecretName(mr)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: mr.Namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"token": []byte(token)},
+	}
+	if err := controllerutil.SetControllerReference(mr, secret, r.Scheme); err != nil {
+		return "", fmt.Errorf("failed to set owner reference on EvalHub token secret: %w", err)
+	}
+
+	created, err := createIgnoringAlreadyExists(ctx, r.Client, secret)
+	if err != nil {
+		return "", err
+	}
+	if created {
+		return name, nil
+	}
+
+	// Already existed: refresh its token value in place rather than
+	// leaving a stale/near-expiry token cached indefinitely.
+	var existing corev1.Secret
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: mr.Namespace}, &existing); err != nil {
+		return "", err
+	}
+	if existing.Data == nil {
+		existing.Data = map[string][]byte{}
+	}
+	existing.Data["token"] = []byte(token)
+	if err := r.Update(ctx, &existing); err != nil {
+		return "", fmt.Errorf("failed to refresh EvalHub token secret: %w", err)
+	}
+	return name, nil
 }
 
 func (r *ModelRequestReconciler) readSecret(ctx context.Context, namespace, name string) (*corev1.Secret, error) {

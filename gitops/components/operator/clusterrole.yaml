@@ -89,9 +89,18 @@ rules:
     resources:
       - secrets
     verbs:
+      # create;update;patch (Phase 8, docs/PHASE_LOG.md) is narrowly for
+      # ensureEvalHubTokenSecret's upsert of a single, owned, ephemeral,
+      # per-ModelRequest Secret ("<ModelRequest>-evalhub-token") caching
+      # a generated EvalHub bearer token -- NOT a general
+      # secret-writing capability. Every other *SecretName field
+      # remains read-only.
       - get
       - list
       - watch
+      - create
+      - update
+      - patch
   - apiGroups:
       - ""
     resources:

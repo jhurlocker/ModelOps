@@ -23,9 +23,13 @@ spec:
     - name: modelcar-image
       type: string
       default: ""
-    - name: huggingface-token
+    - name: huggingface-secret-name
       type: string
-      default: ""
+      default: "huggingface-credentials"
+      description: >-
+        Name of a Secret (in this Task's namespace) with a "token" key,
+        consumed via secretKeyRef (optional: true). Never a token value
+        itself.
     - name: release-name
       type: string
       default: "granite-2b"
@@ -65,9 +69,13 @@ spec:
     - name: evalhub-url
       type: string
       default: ""
-    - name: evalhub-token
+    - name: evalhub-secret-name
       type: string
-      default: ""
+      default: "evalhub-credentials"
+      description: >-
+        Name of a Secret (in this Task's namespace) with a "token" key,
+        consumed via secretKeyRef (optional: true). Never a token value
+        itself.
     - name: guidellm-profile
       type: string
       default: "constant"
@@ -89,12 +97,12 @@ spec:
     - name: s3-api-endpoint
       type: string
       default: "http://minio.modelops-storage.svc.cluster.local:9000"
-    - name: s3-access-key-id
+    - name: s3-secret-name
       type: string
-      default: "minio"
-    - name: s3-secret-access-key
-      type: string
-      default: "minioadmin"
+      description: >-
+        Name of a Secret (in this Task's namespace) with
+        accessKeyId/secretAccessKey keys, consumed via secretKeyRef.
+        Never a credential value itself.
   steps:
     - name: promote-and-benchmark
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
@@ -109,7 +117,11 @@ spec:
         - name: MODELCAR_IMAGE
           value: $(params.modelcar-image)
         - name: HF_TOKEN
-          value: $(params.huggingface-token)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.huggingface-secret-name)
+              key: token
+              optional: true
         - name: RELEASE_NAME
           value: $(params.release-name)
         - name: CHART_URL
@@ -137,7 +149,11 @@ spec:
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN
-          value: $(params.evalhub-token)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.evalhub-secret-name)
+              key: token
+              optional: true
         - name: GLM_PROFILE
           value: $(params.guidellm-profile)
         - name: GLM_RATE
@@ -153,9 +169,15 @@ spec:
         - name: S3_ENDPOINT
           value: $(params.s3-api-endpoint)
         - name: S3_ACCESS_KEY
-          value: $(params.s3-access-key-id)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: accessKeyId
         - name: S3_SECRET_KEY
-          value: $(params.s3-secret-access-key)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: secretAccessKey
       script: |
         #!/usr/bin/env bash
         set -euo pipefail

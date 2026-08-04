@@ -85,12 +85,13 @@ spec:
     - name: s3-api-endpoint
       type: string
       default: "http://minio.modelops-storage.svc.cluster.local:9000"
-    - name: s3-access-key-id
+    - name: s3-secret-name
       type: string
-      default: "minioadmin"
-    - name: s3-secret-access-key
-      type: string
-      default: "minioadmin"
+      description: >-
+        Name of a Secret (in this Task's namespace) with
+        accessKeyId/secretAccessKey keys, consumed via secretKeyRef by
+        the evaluate-and-upload/s3-upload steps below. Never a
+        credential value itself.
     - name: s3-bucket
       type: string
       default: "compliance-artifact-results"
@@ -251,9 +252,15 @@ spec:
         - name: S3_ENDPOINT_URL
           value: $(params.s3-api-endpoint)
         - name: S3_ACCESS_KEY_ID
-          value: $(params.s3-access-key-id)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: accessKeyId
         - name: S3_SECRET_ACCESS_KEY
-          value: $(params.s3-secret-access-key)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: secretAccessKey
         - name: S3_BUCKET
           value: $(params.s3-bucket)
         - name: S3_UI_ROUTE
@@ -319,9 +326,15 @@ spec:
         - name: S3_ENDPOINT_URL
           value: $(params.s3-api-endpoint)
         - name: S3_ACCESS_KEY_ID
-          value: $(params.s3-access-key-id)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: accessKeyId
         - name: S3_SECRET_ACCESS_KEY
-          value: $(params.s3-secret-access-key)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.s3-secret-name)
+              key: secretAccessKey
         - name: S3_BUCKET
           value: $(params.s3-bucket)
         - name: TIMESTAMP

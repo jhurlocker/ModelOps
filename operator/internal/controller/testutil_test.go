@@ -206,6 +206,40 @@ func newS3CredentialsSecret(t *testing.T, ns, name string) *corev1.Secret {
 	return secret
 }
 
+// newSecret creates an arbitrary Secret for tests exercising a shape
+// newS3CredentialsSecret doesn't cover (e.g. the EvalHub Secret's
+// url/token keys, or a HuggingFace token Secret).
+func newSecret(t *testing.T, ns, name string, data map[string]string) *corev1.Secret {
+	t.Helper()
+	byteData := map[string][]byte{}
+	for k, v := range data {
+		byteData[k] = []byte(v)
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Data:       byteData,
+	}
+	if err := k8sClient.Create(context.Background(), secret); err != nil {
+		t.Fatalf("failed to create Secret %s/%s: %v", ns, name, err)
+	}
+	return secret
+}
+
+// newPipelineServiceAccount creates the "pipeline" ServiceAccount
+// resolveSecrets' EvalHub-token-generation fallback (generateServiceAccountToken)
+// requires to exist before a TokenRequest against it can succeed.
+// Normally provisioned by ensurePromotionNamespaceRBAC as part of a
+// stage's NamespaceSetup during a full Reconcile; tests that call
+// r.resolveSecrets directly (bypassing Reconcile) must create it
+// themselves.
+func newPipelineServiceAccount(t *testing.T, ns string) {
+	t.Helper()
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "pipeline", Namespace: ns}}
+	if err := k8sClient.Create(context.Background(), sa); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("failed to create pipeline ServiceAccount in %s: %v", ns, err)
+	}
+}
+
 // newModelRequest creates a ModelRequest referencing profileName in ns,
 // with a minimal valid model identity, and returns it (with server-set
 // fields such as UID/ResourceVersion populated).

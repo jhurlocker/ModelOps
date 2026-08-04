@@ -81,12 +81,13 @@ spec:
     - name: scan-s3-endpoint
       type: string
       default: "http://minio.modelops-storage.svc.cluster.local:9000"
-    - name: scan-s3-access-key-id
+    - name: scan-s3-secret-name
       type: string
-      default: "minioadmin"
-    - name: scan-s3-secret-access-key
-      type: string
-      default: "minioadmin"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with
+        accessKeyId/secretAccessKey keys for scan-result storage.
+        Consumed via secretKeyRef by compliance-artifact-scan and
+        security-scan -- never passed as a literal credential value.
     - name: compliance-s3-bucket
       type: string
       default: "compliance-artifact-results"
@@ -171,18 +172,27 @@ spec:
     - name: evalhub-url
       type: string
       default: ""
-    - name: evalhub-token
+    - name: evalhub-secret-name
       type: string
-      default: ""
+      default: "evalhub-credentials"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with a
+        "token" key -- consumed via secretKeyRef (optional: true, so a
+        nonexistent Secret with this name is harmless). Never a token
+        value.
     - name: tenant-ns
       type: string
       default: ""
     - name: openshift-console-domain
       type: string
       default: ""
-    - name: huggingface-token
+    - name: huggingface-secret-name
       type: string
-      default: ""
+      default: "huggingface-credentials"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with a
+        "token" key -- consumed via secretKeyRef (optional: true).
+        Never a token value.
 
   tasks:
     - name: compliance-artifact-scan
@@ -213,10 +223,8 @@ spec:
           value: $(params.model-reg-author)
         - name: s3-api-endpoint
           value: $(params.scan-s3-endpoint)
-        - name: s3-access-key-id
-          value: $(params.scan-s3-access-key-id)
-        - name: s3-secret-access-key
-          value: $(params.scan-s3-secret-access-key)
+        - name: s3-secret-name
+          value: $(params.scan-s3-secret-name)
         - name: s3-bucket
           value: $(params.compliance-s3-bucket)
         - name: s3-ui-route
@@ -297,8 +305,8 @@ spec:
           value: $(params.model-id)
         - name: modelcar-image
           value: $(params.modelcar-image)
-        - name: huggingface-token
-          value: $(params.huggingface-token)
+        - name: huggingface-secret-name
+          value: $(params.huggingface-secret-name)
         - name: valuesContent
           value: $(params.values-content)
         - name: gpu-count-override
@@ -328,18 +336,16 @@ spec:
           value: $(params.model-version)
         - name: evalhub-url
           value: $(params.evalhub-url)
-        - name: evalhub-token
-          value: $(params.evalhub-token)
+        - name: evalhub-secret-name
+          value: $(params.evalhub-secret-name)
         - name: tenant-ns
           value: $(params.target-namespace)
         - name: severity-threshold
           value: $(params.severity-threshold)
         - name: s3-api-endpoint
           value: $(params.scan-s3-endpoint)
-        - name: s3-access-key-id
-          value: $(params.scan-s3-access-key-id)
-        - name: s3-secret-access-key
-          value: $(params.scan-s3-secret-access-key)
+        - name: s3-secret-name
+          value: $(params.scan-s3-secret-name)
         - name: s3-bucket
           value: $(params.security-s3-bucket)
         - name: s3-ui-route

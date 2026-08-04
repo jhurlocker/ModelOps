@@ -37,9 +37,13 @@ spec:
       type: string
       default: ""
       description: "Optional explicit modelcar OCI image reference."
-    - name: huggingface-token
+    - name: huggingface-secret-name
       type: string
-      default: ""
+      default: "huggingface-credentials"
+      description: >-
+        Name of a Secret (in this Task's namespace) with a "token" key,
+        consumed via secretKeyRef (optional: true, since HuggingFace
+        auth is optional). Never a token value itself.
     - name: valuesContent
       type: string
       default: ""
@@ -99,7 +103,11 @@ spec:
         - name: MODELCAR_IMAGE
           value: $(params.modelcar-image)
         - name: HF_TOKEN
-          value: $(params.huggingface-token)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.huggingface-secret-name)
+              key: token
+              optional: true
         - name: VALUES_CONTENT
           value: $(params.valuesContent)
         - name: GPU_COUNT_OVERRIDE

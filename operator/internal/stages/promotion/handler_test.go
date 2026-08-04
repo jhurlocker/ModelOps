@@ -117,11 +117,10 @@ func fullCharacterizationFixture() (*modelopsv1alpha1.ModelRequest, *modelopsv1a
 	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
 
 	secrets := stagecommon.Secrets{
-		EvalHubToken:      "evalhub-tok",
-		HuggingFaceToken:  "hf-tok",
-		ResultS3Endpoint:  "http://result-s3:9000",
-		ResultS3AccessKey: "result-access",
-		ResultS3SecretKey: "result-secret",
+		EvalHubSecretName:     "evalhub-creds-secret",
+		HuggingFaceSecretName: "hf-creds-secret",
+		ResultS3Endpoint:      "http://result-s3:9000",
+		ResultS3SecretName:    "result-s3-creds-secret",
 	}
 
 	return mr, cfg, plan, secrets
@@ -185,7 +184,7 @@ func TestBuildSpec_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput(
 		"approval-poll-interval-seconds": "30",
 		"approval-timeout-seconds":       "7200",
 		"evalhub-url":                    "http://evalhub.example.com",
-		"evalhub-token":                  "evalhub-tok",
+		"evalhub-secret-name":            "evalhub-creds-secret",
 		"openshift-console-domain":       "apps.example.com",
 		"guidellm-profile":               "sweep",
 		"guidellm-rate":                  "8.5",
@@ -194,10 +193,9 @@ func TestBuildSpec_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput(
 		"benchmark-target-url":           "http://custom-benchmark-target/v1",
 		"custom-data":                    "true",
 		"custom-filename":                "custom.json",
-		"huggingface-token":              "hf-tok",
+		"huggingface-secret-name":        "hf-creds-secret",
 		"s3-api-endpoint":                "http://result-s3:9000",
-		"s3-access-key-id":               "result-access",
-		"s3-secret-access-key":           "result-secret",
+		"result-s3-secret-name":          "result-s3-creds-secret",
 		"mr-server":                      "http://registry.example.com",
 		"mr-port":                        "9090",
 		"model-reg-author":               "Team Author",
@@ -214,6 +212,13 @@ func TestBuildSpec_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput(
 
 	require.Equal(t, want, spec.Params)
 	require.Equal(t, stagecommon.StageKindPromotion, spec.StageKind)
+
+	// Phase 8 (docs/PHASE_LOG.md): credential values must never appear
+	// here -- promotion.Handler inherits this property entirely from
+	// BuildCommonModelParams (it never touches sc.Secrets directly).
+	for _, leaked := range []string{"evalhub-token", "huggingface-token", "s3-access-key-id", "s3-secret-access-key"} {
+		require.NotContains(t, spec.Params, leaked)
+	}
 }
 
 func TestBuildSpec_MiddleNamespace_OmitsApprovalURL_AndRunRegisterFalse(t *testing.T) {

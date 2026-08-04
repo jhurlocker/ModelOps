@@ -172,14 +172,12 @@ func fullCharacterizationFixture() stagecommon.StageContext {
 	plan := &modelopsv1alpha1.CapacityPlan{Status: modelopsv1alpha1.CapacityPlanStatus{GPUsNeeded: 4}}
 
 	secrets := stagecommon.Secrets{
-		EvalHubToken:      "evalhub-tok",
-		HuggingFaceToken:  "hf-tok",
-		ScanS3Endpoint:    "http://scan-s3:9000",
-		ScanS3AccessKey:   "scan-access",
-		ScanS3SecretKey:   "scan-secret",
-		ResultS3Endpoint:  "http://result-s3:9000",
-		ResultS3AccessKey: "result-access",
-		ResultS3SecretKey: "result-secret",
+		EvalHubSecretName:     "evalhub-creds-secret",
+		HuggingFaceSecretName: "hf-creds-secret",
+		ScanS3Endpoint:        "http://scan-s3:9000",
+		ScanS3SecretName:      "scan-s3-creds-secret",
+		ResultS3Endpoint:      "http://result-s3:9000",
+		ResultS3SecretName:    "result-s3-creds-secret",
 	}
 
 	return stagecommon.StageContext{
@@ -236,18 +234,16 @@ func TestBuildSpec_FullFixture_CharacterizesCurrentOutput(t *testing.T) {
 		"hardware-profile-namespace": "custom-hw-ns",
 		"severity-threshold":         "warn",
 		"evalhub-url":                "http://evalhub.example.com",
-		"evalhub-token":              "evalhub-tok",
+		"evalhub-secret-name":        "evalhub-creds-secret",
 		"tenant-ns":                  "my-sandbox",
 		"openshift-console-domain":   "apps.example.com",
-		"huggingface-token":          "hf-tok",
+		"huggingface-secret-name":    "hf-creds-secret",
 		"scan-s3-endpoint":           "http://scan-s3:9000",
-		"scan-s3-access-key-id":      "scan-access",
-		"scan-s3-secret-access-key":  "scan-secret",
+		"scan-s3-secret-name":        "scan-s3-creds-secret",
 		"compliance-s3-bucket":       "custom-result-bucket", // spec.ResultS3Bucket wins over cfg.Spec.ComplianceS3Bucket
 		"security-s3-bucket":         "custom-result-bucket", // spec.ResultS3Bucket wins over cfg.Spec.SecurityS3Bucket
 		"s3-api-endpoint":            "http://result-s3:9000",
-		"s3-access-key-id":           "result-access",
-		"s3-secret-access-key":       "result-secret",
+		"result-s3-secret-name":      "result-s3-creds-secret",
 		"mr-server":                  "http://registry.example.com",
 		"mr-port":                    "9090",
 		"model-reg-author":           "Team Author",
@@ -259,6 +255,14 @@ func TestBuildSpec_FullFixture_CharacterizesCurrentOutput(t *testing.T) {
 	require.Equal(t, want, spec.Params)
 	require.Equal(t, "sandbox", spec.Name)
 	require.Equal(t, stagecommon.StageKindSandbox, spec.StageKind)
+
+	// Phase 8 (docs/PHASE_LOG.md): scan-s3-access-key-id/
+	// scan-s3-secret-access-key must never be produced by this
+	// Handler -- credentials flow by Secret name only
+	// (scan-s3-secret-name).
+	for _, leaked := range []string{"scan-s3-access-key-id", "scan-s3-secret-access-key"} {
+		require.NotContains(t, spec.Params, leaked)
+	}
 }
 
 func TestSandboxPipelineNameOrDefault_PrecedenceOrder(t *testing.T) {

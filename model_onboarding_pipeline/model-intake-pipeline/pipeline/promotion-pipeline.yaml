@@ -139,9 +139,14 @@ spec:
     - name: evalhub-url
       type: string
       default: ""
-    - name: evalhub-token
+    - name: evalhub-secret-name
       type: string
-      default: ""
+      default: "evalhub-credentials"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with a
+        "token" key -- consumed via secretKeyRef (optional: true, so a
+        nonexistent Secret with this name is harmless). Never a token
+        value.
     - name: guidellm-profile
       type: string
       default: "sweep"
@@ -163,15 +168,24 @@ spec:
     - name: s3-api-endpoint
       type: string
       default: "http://minio.modelops-storage.svc.cluster.local:9000"
-    - name: s3-access-key-id
+    - name: result-s3-secret-name
       type: string
-      default: "minioadmin"
-    - name: s3-secret-access-key
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with
+        accessKeyId/secretAccessKey keys for result storage. Consumed
+        via secretKeyRef by upload-guide-llm-results -- never passed as
+        a literal credential value. Named to exactly match
+        stagecommon.BuildCommonModelParams' "result-s3-secret-name"
+        param -- PipelineRun.spec.params binds to a Pipeline's declared
+        params by exact name, unlike a Pipeline's own
+        params-to-Task-params forwarding (which may rename).
+    - name: huggingface-secret-name
       type: string
-      default: "minioadmin"
-    - name: huggingface-token
-      type: string
-      default: ""
+      default: "huggingface-credentials"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with a
+        "token" key -- consumed via secretKeyRef (optional: true).
+        Never a token value.
     - name: openshift-console-domain
       type: string
       default: ""
@@ -306,8 +320,8 @@ spec:
           value: $(params.model-id)
         - name: modelcar-image
           value: $(params.modelcar-image)
-        - name: huggingface-token
-          value: $(params.huggingface-token)
+        - name: huggingface-secret-name
+          value: $(params.huggingface-secret-name)
         - name: valuesContent
           value: $(params.values-content)
         - name: gpu-count-override
@@ -361,8 +375,8 @@ spec:
           value: $(params.model-name)
         - name: evalhub-url
           value: $(params.evalhub-url)
-        - name: evalhub-token
-          value: $(params.evalhub-token)
+        - name: evalhub-secret-name
+          value: $(params.evalhub-secret-name)
         - name: tenant-ns
           value: $(params.target-namespace)
         - name: guidellm-profile
@@ -386,10 +400,8 @@ spec:
       params:
         - name: s3-api-endpoint
           value: $(params.s3-api-endpoint)
-        - name: s3-access-key-id
-          value: $(params.s3-access-key-id)
-        - name: s3-secret-access-key
-          value: $(params.s3-secret-access-key)
+        - name: s3-secret-name
+          value: $(params.result-s3-secret-name)
       runAfter:
         - benchmark
       taskRef:
