@@ -6,6 +6,16 @@ spec:
   description: |
     Submit a garak security scan via EvalHub, wait for completion, download
     results, upload to S3, update the Model Registry, and gate on pass/fail.
+
+    TLS trust for EvalHub HTTPS requests is provided by an OpenShift service
+    CA bundle mounted from the ConfigMap default-evalhub-service-ca (provisioned
+    by the TrustyAI Operator when the namespace carries the label
+    evalhub.trustyai.opendatahub.io/tenant). The ConfigMap's service-ca.crt key
+    is populated asynchronously by OpenShift's service.beta.openshift.io/
+    inject-cabundle annotation after the namespace is labeled -- a PipelineRun
+    executed immediately after a namespace is first labeled (rather than against
+    a long-lived, already-labeled namespace) could race the injection. Not
+    engineered around for this phase; tracked as a known race window.
   params:
     - name: target
       type: string
@@ -70,6 +80,10 @@ spec:
       description: "Summary of security scan results."
     - name: passed
       description: "true if passed, false if blocked."
+  volumes:
+    - name: evalhub-service-ca
+      configMap:
+        name: default-evalhub-service-ca
   workspaces:
     - name: shared-workspace
       description: Shared workspace for scan results
@@ -78,9 +92,13 @@ spec:
     - name: security-scan
       image: quay.io/jhurlocker/security-scanner:v0.1.9
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: evalhub-service-ca
+          mountPath: /etc/evalhub-ca
+          readOnly: true
       env:
         - name: REQUESTS_CA_BUNDLE
-          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          value: /etc/evalhub-ca/service-ca.crt
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN

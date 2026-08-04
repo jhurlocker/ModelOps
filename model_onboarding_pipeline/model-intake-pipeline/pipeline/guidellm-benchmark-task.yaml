@@ -4,6 +4,16 @@ metadata:
   name: guidellm-benchmark
 spec:
   description: Submit a GuideLLM benchmark via EvalHub, poll for completion, and save results.
+
+    TLS trust for EvalHub HTTPS requests is provided by an OpenShift service
+    CA bundle mounted from the ConfigMap default-evalhub-service-ca (provisioned
+    by the TrustyAI Operator when the namespace carries the label
+    evalhub.trustyai.opendatahub.io/tenant). The ConfigMap's service-ca.crt key
+    is populated asynchronously by OpenShift's service.beta.openshift.io/
+    inject-cabundle annotation after the namespace is labeled -- a PipelineRun
+    executed immediately after a namespace is first labeled (rather than against
+    a long-lived, already-labeled namespace) could race the injection. Not
+    engineered around for this phase; tracked as a known race window.
   params:
     - name: target
       type: string
@@ -47,6 +57,10 @@ spec:
     - name: benchmark-results
       description: "Summary of benchmark results."
       type: string
+  volumes:
+    - name: evalhub-service-ca
+      configMap:
+        name: default-evalhub-service-ca
   workspaces:
     - name: shared-workspace
       description: Shared workspace for storing benchmark results
@@ -54,9 +68,13 @@ spec:
     - name: run-evalhub-guidellm
       image: quay.io/jhurlocker/guidellm-benchmark:v0.1.5
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: evalhub-service-ca
+          mountPath: /etc/evalhub-ca
+          readOnly: true
       env:
         - name: REQUESTS_CA_BUNDLE
-          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+          value: /etc/evalhub-ca/service-ca.crt
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN

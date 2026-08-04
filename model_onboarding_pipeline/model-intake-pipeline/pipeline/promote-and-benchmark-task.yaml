@@ -12,6 +12,16 @@ spec:
     5. Uploads benchmark results to S3
 
     Runs sequentially per namespace and halts on first failure.
+
+    TLS trust for EvalHub HTTPS requests is provided by an OpenShift service
+    CA bundle mounted from the ConfigMap default-evalhub-service-ca (provisioned
+    by the TrustyAI Operator when the namespace carries the label
+    evalhub.trustyai.opendatahub.io/tenant). The ConfigMap's service-ca.crt key
+    is populated asynchronously by OpenShift's service.beta.openshift.io/
+    inject-cabundle annotation after the namespace is labeled -- a PipelineRun
+    executed immediately after a namespace is first labeled (rather than against
+    a long-lived, already-labeled namespace) could race the injection. Not
+    engineered around for this phase; tracked as a known race window.
   params:
     - name: promotion-namespaces
       type: string
@@ -107,7 +117,13 @@ spec:
     - name: promote-and-benchmark
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: evalhub-service-ca
+          mountPath: /etc/evalhub-ca
+          readOnly: true
       env:
+        - name: SSL_CERT_FILE
+          value: /etc/evalhub-ca/service-ca.crt
         - name: PROMOTION_NAMESPACES
           value: $(params.promotion-namespaces)
         - name: MODEL_NAME
@@ -474,6 +490,10 @@ spec:
             json.dump(all_results, f, indent=2)
         print("\nAll namespaces promoted successfully.")
         PYEOF
+  volumes:
+    - name: evalhub-service-ca
+      configMap:
+        name: default-evalhub-service-ca
   workspaces:
     - name: shared-workspace
       description: Workspace for deployment options and results
