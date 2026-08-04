@@ -3729,3 +3729,199 @@ on the `staging` namespace were cleaned up afterward.
   `ModelRequest` itself or a watched dependency changes. Adding
   namespace-label-change watches for this reason alone is a smaller
   separate task — worth its own phase when prioritized.
+
+---
+
+## Phase 10 — Cleanup and honesty pass
+
+**Commit:** `ff4df64` on `feat/model-request-controller` — "Phase 10:
+cleanup and honesty pass". Low-risk changes per
+`docs/REVIEW_RESPONSE_PLAN.md` — no design review needed, but tests
+written first for the CapacityPlan logic change per the standing TDD
+principle.
+
+### What changed
+
+Six independent items from `docs/REVIEW_RESPONSE_PLAN.md` Phase 10,
+organized below.
+
+#### 1. Deleted the dead root `app.py`
+
+`model_onboarding_pipeline/model-intake-ui/app.py` (979 lines, SQLite
+monolith) confirmed unreferenced by any production code: `Containerfile`
+copies only `app/` (the package) and `wsgi.py` (which imports `from app
+import create_app`), the `Deployment` runs `gunicorn wsgi:app`, and no
+file in the repo imports or references the root `app.py`. Deleted.
+-977 lines.
+
+#### 2. Labeled CapacityPlan heuristic honestly as `[static estimate]`
+
+The GPU-sizing logic in `CapacityPlanReconciler` (`operator/internal/
+controller/capacityplan_controller.go`) is a static table-driven
+heuristic (ContextLength/Concurrency → GPU count/model mapping), not a
+real GPU-inventory-aware or advisor-backed placement decision. Changes:
+
+- **Status message**: `"Capacity plan: ..."` → `"[static estimate]
+  Capacity plan: ..."` — makes the nature of the estimate visible to
+  anyone reading `kubectl get capacityplan ... -o yaml` output.
+- **Reconciler doc comment**: new doc comment on
+  `CapacityPlanReconciler` struct explaining the static nature and
+  pointing to the existing-but-unwired `gpu-advisor` container image
+  (`quay.io/jhurlocker/gpu-advisor`, Phase 7 backlog note).
+- **`CapacityPlanSpec` doc comment**: new doc comment on the API type
+  cross-referencing the reconciler and `capacityplanning/doc.go` for
+  the full honesty label.
+- **`capacityplanning/doc.go`**: new paragraph explicitly noting the
+  static-heuristic nature and the `[static estimate]` prefix convention.
+  Existing provider-integration backlog note (Phase 7 item 9)
+  cross-referenced.
+
+TDD: wrote `TestCapacityPlan_MessageFormat_IncludesStaticEstimatePrefixOnSuccess`
+first (asserting `strings.Contains(msg, "[static estimate]")`),
+confirmed it failed against the old message template, then updated the
+production code. Updated `TestCapacityPlan_MessageFormat_MatchesCurrentTemplate`
+to the new exact format.
+
+#### 3. Deprecation doc-comments on legacy `PipelineRunName`-style status fields
+
+`ModelRequestStatus.PipelineRunName`, `.SandboxPipelineRunName`, and
+`.PromotionPipelineRunName` (`operator/api/v1alpha1/modelrequest_types.go`)
+each gained a `Deprecated:` Go doc comment: "Retained for compatibility
+with the Tekton-based reference implementation. Consumers should prefer
+Stages[] for provider-independent lifecycle tracking." Fields remain
+fully functional — documentation only, consistent with the Phase 6/7
+decision to keep them as reference-implementation convenience fields.
+
+#### 4. Verified and updated module-level docs staleness
+
+Per the review plan's instruction ("verify, don't blindly redo" —
+check whether the stale-docs complaints are already resolved):
+
+- **Root `README.md`**: has the "Current scope" section but lacks the
+  explicit "model release promotion" vs. "AI application promotion"
+  disambiguation phrase. **Left untouched** per the review plan's
+  explicit instruction: "don't touch the root README again."
+- **`model_onboarding_pipeline/README.adoc`**: described a fixed
+  two-phase Tekton workflow. Updated:
+  - Pipeline Flow section: marked as conceptual, added note about
+    current CRD-driven implementation via
+    `ModelLifecycleProfile.Spec.Stages`
+  - Renamed "Phase 1" / "Phase 2" / "Phase 3" → "Stage: ... (conceptual)"
+  - Running instructions: replaced UI form walkthrough and direct
+    `PipelineRun` approach with CRD-driven workflow via `ModelRequest` CR
+  - Deploy step 8: replaced monolithic `model-intake-pipeline.yaml`
+    instruction with note about operator-driven orchestration
+  - Project structure: removed dead `app.py` entry, added `app/` and
+    `wsgi.py`
+- **`gitops/README.md`**: "Adding a New Promotion Namespace" section
+  used the deprecated `pipelineRef`/`promotionNamespaces` field shape
+  (pre-Phase 6). Replaced with the current `Stages[]` +
+  `providerConfigRef` + `perNamespace: true` API.
+- **`SKILL.md`**: "Automatic RBAC" section referenced
+  `ModelLifecycleProfile.promotionNamespaces` (removed field). Updated
+  to `ModelLifecycleProfile.Spec.Stages` with `perNamespace: true`.
+
+#### 5. Added backlog note: separate stage semantic type from execution engine
+
+New item 11 in `docs/REFACTOR_PLAN.md`: `ProfileStageSpec.Kind` today
+conflates lifecycle semantic type ("this is a security scan") with
+execution engine (`PipelineRun`, `CapacityPlan`). A future pass should
+add a separate semantic-type concept alongside `Kind`/`ProviderConfigRef`,
+so the profile declares *what* a stage is independently of *how* it runs.
+Explicitly notes Phase 6's decision to not validate `Kind` as a CRD
+enum still stands.
+
+#### 6. Added three backlog notes for intentionally-out-of-scope items
+
+Per item 6 of the review plan ("explicitly do NOT implement... add them
+as backlog notes if not already captured"):
+
+- **Item 12 (DAG dependencies)**: stage walker currently iterates
+  `Stages` linearly; DAG-shaped dependencies (fan-out/fan-in) need
+  their own design.
+- **Item 13 (per-stage retry/timeout)**: no stage has configurable
+  retry count, backoff, or timeout; the only retry is the reconciler's
+  global 5s `transientErrorRequeueDelay`.
+- **Item 14 (cancellation)**: no API surface for controlled abort of a
+  running `ModelRequest`. Tekton natively supports `PipelineRun`
+  cancellation but the walker has no mechanism to propagate it.
+
+All four new items (11–14): tracked future work, not implemented this
+phase.
+
+### Test coverage added
+
+- `internal/controller/capacityplan_controller_test.go`:
+  `TestCapacityPlan_MessageFormat_IncludesStaticEstimatePrefixOnSuccess`
+  (new test, written first — TDD starting point). Updated
+  `TestCapacityPlan_MessageFormat_MatchesCurrentTemplate` to the new
+  exact format including `[static estimate]`.
+- Total suite: **65 passing** in `internal/controller` (up from 63 at
+  Phase 9: 1 new, 1 updated). All other packages: same count as Phase 9.
+  `internal/stages/tekton`: 4 pre-existing tests still fail in the
+  podman container environment (pipeline YAML directory path resolution
+  — invisible to envtest and the live cluster; not a regression from
+  this phase, which touched zero files in `internal/stages/tekton`).
+
+### Cross-stage import check
+
+No new imports added anywhere. `internal/stages/capacityplanning/doc.go`
+change is purely a comment. No `_types.go` structural changes. The
+cross-stage import boundary holds unchanged from Phase 9.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) picked up the new
+Go doc comments on `CapacityPlanSpec` (→ CRD `description:` block) and
+the three `Deprecated:` comments on the `PipelineRunName`-style status
+fields (→ CRD `description:` blocks with `Deprecated:` prefix).
+`config/rbac/role.yaml` had a minor whitespace diff (controller-gen
+version variance, no semantic change). `zz_generated.deepcopy.go`: no
+diff. `make manifests` idempotent on a second run, confirmed.
+
+`gitops/components/operator/crd-capacityplans.yaml` and
+`crd-modelrequests.yaml` synced from the regenerated `config/crd/bases/*`
+output. `crd-lifecycleprofiles.yaml`, `crd-platformconfigs.yaml`, and
+`crd-intakeproviderconfigs.yaml` confirmed unchanged.
+
+### Sandbox cluster verification
+
+All changes verified against the sandbox cluster via the
+branch-tracked ArgoCD `Application/modelops-operator`:
+
+- Rebuilt and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image; `kubectl rollout restart` on the `modelops-operator`
+  `Deployment`; ArgoCD synced to `ff4df64`, remained `Synced`/`Healthy`
+  throughout.
+- Created disposable `ModelRequest` `phase10-verify` (`sandbox`
+  namespace, `standard-generative-onboarding` profile, pointing at
+  pre-existing `scan-s3-credentials`/`result-s3-credentials`/
+  `evalhub-credentials` Secrets). Reconciled through capacity-planning
+  to `sandboxRunning`.
+- The resulting `CapacityPlan` (`phase10-verify-capacity`) status:
+  `Phase: Succeeded`, `GPUsNeeded: 1`, `GPUModel: NVIDIA-L40S`,
+  `Message: "[static estimate] Capacity plan: 1 x NVIDIA-L40S for
+  context=4096 concurrency=2 time-slicing=true"` — the `[static
+  estimate]` prefix confirmed present on the real cluster, not just in
+  envtest.
+- Deleted `phase10-verify` and its child resources afterward;
+  `Application/modelops-operator` remained `Synced`/`Healthy`.
+
+### Known follow-up NOT done in this phase
+
+- The root `README.md`'s missing "model release promotion" vs. "AI
+  application promotion" disambiguation is noted but deliberately left
+  for a future pass (per the review plan's explicit instruction).
+- `model_onboarding_pipeline/docs/modelops_tutorial.adoc` and
+  `model_onboarding_pipeline/docs/ai_engineer_tutorial.adoc` were
+  identified as stale (pre-CRD pipeline workflows) but not updated —
+  the review plan's instruction scoped module-doc updates to
+  `model_onboarding_pipeline/README.adoc` specifically; these tutorial
+  files are a larger re-documentation effort best handled as a
+  dedicated docs pass rather than folded into a cleanup phase.
+- The dead `model-intake-pipeline.yaml` and
+  `model-intake-pipelinerun.yaml` files (already identified in Phase
+  8's follow-up notes) still exist — same reasoning as `app.py`'s
+  deletion, but these may have archival/documentation value the
+  dead monolith did not; flagged for a separate decision rather than
+  deleted without discussion.
