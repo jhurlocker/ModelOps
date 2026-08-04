@@ -16,9 +16,12 @@ spec:
     - name: evalhub-url
       type: string
       description: "EvalHub base URL (e.g. evalhub-redhat-ods-applications.apps.<cluster>)."
-    - name: evalhub-token
+    - name: evalhub-secret-name
       type: string
-      description: "Bearer token for EvalHub API (OpenShift OAuth token)."
+      description: >-
+        Name of a Secret (in this Task's namespace) with a "token" key
+        (Bearer token for the EvalHub API), consumed via secretKeyRef
+        (optional: true). Never a token value itself.
     - name: tenant-ns
       type: string
       description: "Tenant namespace for EvalHub (must have evalhub.trustyai.* label)."
@@ -57,7 +60,11 @@ spec:
         - name: EVALHUB_URL
           value: $(params.evalhub-url)
         - name: EVALHUB_TOKEN
-          value: $(params.evalhub-token)
+          valueFrom:
+            secretKeyRef:
+              name: $(params.evalhub-secret-name)
+              key: token
+              optional: true
         - name: TENANT_NS
           value: $(params.tenant-ns)
         - name: TARGET

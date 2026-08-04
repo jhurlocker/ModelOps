@@ -12,7 +12,7 @@ package tekton
 // regressing back to a value-carrying param or reintroducing a
 // hardcoded credential default, in either of these files, ever again.
 //
-// Scoped deliberately to the exact 8 files this phase's Task/Pipeline
+// Scoped deliberately to the exact 9 files this phase's Task/Pipeline
 // changes touch -- not a blanket scan of every YAML file in the
 // directory. model-intake-pipeline.yaml/model-intake-pipelinerun.yaml
 // (a dead/orphaned Pipeline and a static sample manifest, neither
@@ -49,14 +49,28 @@ func pipelineYAMLDir(t *testing.T) string {
 	return dir
 }
 
-// affectedPipelineAndTaskFiles are the 2 Pipelines + 6 Tasks this
+// affectedPipelineAndTaskFiles are the 2 Pipelines + 7 Tasks this
 // phase's YAML changes touch.
+//
+// guidellm-benchmark-task.yaml was missed in the first implementation
+// pass (found only by real sandbox-cluster verification -- Tekton
+// rejected the resulting promotion PipelineRun with "missing values
+// for these params which have no default values: [evalhub-token]",
+// since promotion-pipeline.yaml's "benchmark" task step had already
+// stopped supplying it -- exactly the class of gap live-cluster
+// verification exists to catch that envtest/unit tests structurally
+// cannot, since nothing in this repo's Go code ever inspects a Task's
+// own declared param list). Listing it here is itself part of the
+// regression net: if a ninth file is ever missed the same way, both
+// "credential value params fully removed" and "consume via
+// secretKeyRef" checks below would need to know to check it too.
 var affectedPipelineAndTaskFiles = []string{
 	"sandbox-pipeline.yaml",
 	"promotion-pipeline.yaml",
 	"compliance-artifact-scan-task.yaml",
 	"security-scan-task.yaml",
 	"deploy-model-task.yaml",
+	"guidellm-benchmark-task.yaml",
 	"promote-and-benchmark-task.yaml",
 	"upload-guidellm-results-task.yaml",
 	"upload-lm-eval-results-task.yaml",
@@ -118,6 +132,7 @@ var taskFilesExpectingSecretKeyRef = []string{
 	"compliance-artifact-scan-task.yaml",
 	"security-scan-task.yaml",
 	"deploy-model-task.yaml",
+	"guidellm-benchmark-task.yaml",
 	"promote-and-benchmark-task.yaml",
 	"upload-guidellm-results-task.yaml",
 	"upload-lm-eval-results-task.yaml",
