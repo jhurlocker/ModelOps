@@ -148,6 +148,20 @@ Modeled on Cluster API's `infrastructureRef` pattern.
 
 ---
 
+## Backlog notes (Phase 10 — cleanup and honesty pass)
+
+These items are tracked future work, explicitly NOT implemented in Phase 10 or any prior phase. Added per `docs/REVIEW_RESPONSE_PLAN.md` Phase 10 item 5 and 6.
+
+11. **Separate stage semantic type from execution engine.** Today `ProfileStageSpec.Kind` conflates two concepts: the lifecycle semantic type (e.g. "this stage is a security assessment") and the execution engine used to implement it (`PipelineRun`, `CapacityPlan`, etc.). Phase 6 deliberately rejected making `Kind` a validated CRD enum, and that decision stands. A future pass should add a separate semantic-type concept alongside `Kind`/`ProviderConfigRef` — so a profile can declare "this is a security scan" (semantic type) and the platform resolves which engine runs it today (Tekton `PipelineRun` via `IntakeProviderConfig`), with the semantic type stable even if the engine changes later. Not a small change; needs its own design review before implementation.
+
+12. **Stage dependency DAGs (non-linear ordering).** The stage walker (Phase 6) iterates `profile.Spec.Stages` in a strictly linear, sequential order. Real-world lifecycles often have DAG-shaped dependencies (e.g. "run security scan AND ModelCard review in parallel, promote only after both succeed"). No code, CRD fields, or design exists for this yet. A DAG implementation would need: a DAG representation in `ModelLifecycleProfile`, a walker that respects fan-out/fan-in, and a means for the walker to track parallel progress without creating duplicate child resources. Not scope for any current phase; revisit only when there's a concrete use case driving it.
+
+13. **Per-stage retry and timeout policies.** No stage currently has a configurable retry count, backoff strategy, or timeout ceiling. The only retry mechanism is the reconciler's own global `transientErrorRequeueDelay` (5s, Phase 1). A real per-stage policy would mean: (a) CRD fields on `ProfileStageSpec` for `maxRetries`, `backoffSeconds`, `timeoutSeconds`; (b) the stage walker tracking retry counts and enforcing timeouts; (c) distinguishing transient failures (retry) from permanent failures (skip or fail the whole request, depending on `required`). Not scope for any current phase.
+
+14. **Cancellation behavior.** No mechanism exists to cancel a running stage or an entire `ModelRequest` lifecycle. A user who submits a `ModelRequest` and later wants to abort it mid-flow has no API surface for doing so — deleting the `ModelRequest` would cascade-delete owned child resources (garbage collection), but that's not a controlled cancellation path. A real cancellation design would need: an API signal (e.g. a `spec.cancelRequested` annotation or condition), propagatable cancellation through the stage walker to the execution engine (Tekton `PipelineRun` cancellation, which Tekton already supports natively via `spec.status = "PipelineRunCancelled"`), and a graceful cleanup phase. Not scope for any current phase; needs its own design review.
+
+---
+
 ## Working constraints for every phase
 
 - Preserve backward compatibility with existing `ModelRequest`/`ModelLifecycleProfile` YAML wherever reasonable; call out explicitly any change that's a breaking API change.

@@ -98,19 +98,35 @@ oc get applications -n openshift-gitops
 
 ## Adding a New Promotion Namespace
 
-The `promotionNamespaces` field in `ModelLifecycleProfile` can reference namespaces that don't exist yet. The operator automatically creates the necessary RBAC (`pipeline` ServiceAccount, RoleBindings) in those namespaces when a ModelRequest is submitted.
+Promotion namespaces are declared per-stage on `ModelLifecycleProfile.Spec.Stages`
+with `perNamespace: true`. The operator automatically creates the necessary RBAC
+(`pipeline` ServiceAccount, RoleBindings) in those namespaces when a ModelRequest
+is submitted.
 
 Example lifecycle profile:
 ```yaml
 apiVersion: modelops.example.io/v1alpha1
 kind: ModelLifecycleProfile
 spec:
-  pipelineRef:
-    sandbox: sandbox-pipeline
-    promotion: promotion-pipeline
-  promotionNamespaces:
-    - staging
-    - production
+  providerConfigRef:
+    name: rhoai-default
+    kind: IntakeProviderConfig
+  stages:
+    - name: capacity
+      kind: CapacityPlan
+      required: true
+    - name: sandbox
+      kind: PipelineRun
+      providerConfigRef:
+        name: rhoai-sandbox
+        kind: IntakeProviderConfig
+      required: true
+    - name: promote
+      kind: PipelineRun
+      providerConfigRef:
+        name: rhoai-promotion
+        kind: IntakeProviderConfig
+      perNamespace: true
 ```
 
 The operator will ensure each promotion namespace has:

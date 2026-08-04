@@ -181,7 +181,7 @@ oc get applications -n openshift-gitops
 ```
 
 **Automatic RBAC for promotion namespaces:**
-When a ModelRequest is submitted, the operator automatically ensures each promotion namespace (from `ModelLifecycleProfile.promotionNamespaces`) has:
+When a ModelRequest is submitted, the operator automatically ensures each promotion namespace (declared via `ModelLifecycleProfile.Spec.Stages` with `perNamespace: true`) has:
 - A `pipeline` ServiceAccount
 - `pipeline-edit` RoleBinding (edit ClusterRole scoped to the namespace)
 - EvalHub ClusterRoleBinding (links `pipeline-evalhub-submitter` ClusterRole to the pipeline SA)

@@ -4,6 +4,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// CapacityPlanSpec is the desired state for a capacity-planning run.
+// The sizing logic in CapacityPlanReconciler is a static heuristic
+// (table-driven ContextLength/Concurrency -> GPU count/model mapping
+// with a configurable MaxGPUsPerRequest ceiling), not a real
+// GPU-inventory-aware or advisor-backed placement decision. See
+// internal/stages/capacityplanning/doc.go and
+// internal/controller/capacityplan_controller.go's reconciler doc
+// comment for the full honesty label.
 type CapacityPlanSpec struct {
 	ModelRef                CapacityPlanModelRef `json:"modelRef"`
 	GPUs                    int                  `json:"gpus,omitempty"`

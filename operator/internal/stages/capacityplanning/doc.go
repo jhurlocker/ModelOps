@@ -25,6 +25,19 @@
 // so the walker never needs a stage-kind-specific branch for it -- see
 // docs/REFACTOR_PLAN.md Phase 6's design review.
 //
+// IMPORTANT: the GPU-sizing logic in CapacityPlanReconciler is a static
+// heuristic (table-driven ContextLength/Concurrency -> GPU count/model
+// mapping with a configurable MaxGPUsPerRequest ceiling), not a real
+// GPU-inventory-aware or advisor-backed placement decision. Status
+// messages produced by successful capacity plans are prefixed with
+// "[static estimate]" to make this explicit to anyone reading them. A
+// real gpu-advisor container image already exists and is used by the
+// sandbox Tekton pipeline's own gpu-advisor Task
+// (model_onboarding_pipeline/tools/gpu-advisor,
+// quay.io/jhurlocker/gpu-advisor) -- wiring it into
+// CapacityPlanReconciler is a tracked backlog item, not this pass. See
+// docs/REFACTOR_PLAN.md Phase 7 backlog note.
+//
 // Package boundary rule (see REFACTOR_PLAN.md, "Modularity" guiding
 // principle): this package must never import internal/stages/sandbox or
 // internal/stages/promotion. Shared helpers belong in

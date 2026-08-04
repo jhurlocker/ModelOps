@@ -13,6 +13,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// CapacityPlanReconciler reconciles CapacityPlan objects. The GPU sizing
+// logic is a static heuristic (table-driven ContextLength/Concurrency ->
+// GPU count/model mapping with a configurable MaxGPUsPerRequest ceiling),
+// not a real GPU-inventory-aware or advisor-backed placement decision. A
+// real gpu-advisor container image (quay.io/jhurlocker/gpu-advisor,
+// model_onboarding_pipeline/tools/gpu-advisor) already exists and is used
+// by the sandbox Tekton pipeline, but it is not wired into this
+// reconciler. See docs/REFACTOR_PLAN.md Phase 7 backlog note for details.
 type CapacityPlanReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -95,7 +103,7 @@ func (r *CapacityPlanReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	plan.Status.GPUsNeeded = baseGPUs
 	plan.Status.GPUModel = gpuModel
 	plan.Status.Message = fmt.Sprintf(
-		"Capacity plan: %d x %s for context=%d concurrency=%d time-slicing=%v",
+		"[static estimate] Capacity plan: %d x %s for context=%d concurrency=%d time-slicing=%v",
 		baseGPUs, gpuModel, spec.ContextLength, spec.Concurrency, spec.AllowTimeSlicing,
 	)
 

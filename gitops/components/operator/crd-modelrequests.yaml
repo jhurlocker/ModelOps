@@ -256,10 +256,22 @@ spec:
                   entry for the exact before/after values.
                 type: string
               pipelineRunName:
+                description: |-
+                  Deprecated: PipelineRunName is retained for compatibility with the
+                  Tekton-based reference implementation. Consumers should prefer
+                  Stages[] for provider-independent lifecycle tracking.
                 type: string
               promotionPipelineRunName:
+                description: |-
+                  Deprecated: PromotionPipelineRunName is retained for compatibility
+                  with the Tekton-based reference implementation. Consumers should
+                  prefer Stages[] for provider-independent lifecycle tracking.
                 type: string
               sandboxPipelineRunName:
+                description: |-
+                  Deprecated: SandboxPipelineRunName is retained for compatibility
+                  with the Tekton-based reference implementation. Consumers should
+                  prefer Stages[] for provider-independent lifecycle tracking.
                 type: string
               stages:
                 description: |-

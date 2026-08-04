@@ -282,7 +282,20 @@ func TestCapacityPlan_MessageFormat_MatchesCurrentTemplate(t *testing.T) {
 	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
 	require.NoError(t, err)
 	require.Equal(t,
-		"Capacity plan: 1 x NVIDIA-L40S for context=8192 concurrency=4 time-slicing=true",
+		"[static estimate] Capacity plan: 1 x NVIDIA-L40S for context=8192 concurrency=4 time-slicing=true",
 		plan.Status.Message,
 	)
+}
+
+func TestCapacityPlan_MessageFormat_IncludesStaticEstimatePrefixOnSuccess(t *testing.T) {
+	ns := newTestNamespace(t)
+	newCapacityPlan(t, ns, "plan-1", modelopsv1alpha1.CapacityPlanSpec{
+		ContextLength: 16384,
+		Concurrency:   1,
+	})
+
+	plan, _, err := reconcileCapacityPlan(t, ns, "plan-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", plan.Status.Phase)
+	require.Contains(t, plan.Status.Message, "[static estimate]")
 }

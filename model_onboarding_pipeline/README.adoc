@@ -34,14 +34,16 @@ teams a safe, documented starting point.
 
 image::images/modelops_pipeline_flow.png["ModelOps onboarding pipeline architecture"]
 
-== The Pipeline Flow
+== The Pipeline Flow (Conceptual — see operator/ for the current CRD-driven implementation)
 
-A human submits a candidate model through the *Model Intake UI*, which starts a Tekton
-`PipelineRun`. The pipeline runs in two phases on a single cluster (the "staging cluster"
-is simulated as a separate namespace, `vllm-staging`). Gating is enforced by task failure:
-if any gate fails, the pipeline halts and downstream stages never run.
+This section describes the conceptual pipeline stages for understanding what the
+onboarding process does. The actual production implementation is CRD-driven and managed
+by the ModelOps operator's `ModelLifecycleProfile.Spec.Stages` (ordered stage list, per
+docs/REFACTOR_PLAN.md Phase 6). The Tekton pipeline manifests referenced below
+(`model-intake-sandbox`, `model-intake-promotion`) are execution-level details resolved
+through `IntakeProviderConfig`, not hardcoded in the controller.
 
-=== Phase 1 — Sandbox governance (namespace: `vllm`, automated)
+=== Stage: Sandbox governance (conceptual, automated)
 
 . *Compliance + Artifact Scan* [GATE 1] — Pulls the candidate's OCI modelcar artifact,
   checks compliance policy (architecture/OS/provenance/license), and runs a Trivy CVE scan
@@ -59,7 +61,7 @@ if any gate fails, the pipeline halts and downstream stages never run.
   configured tolerance.
 . *Teardown* — Removes the sandbox deployment to free the GPU for staging.
 
-=== Phase 2 — Promote to staging (namespace: `vllm-staging`, human-gated)
+=== Stage: Promote to staging (conceptual, human-gated)
 
 [start=7]
 . *GPU Advisor (staging)* — Independently assesses the staging environment's GPU.
@@ -72,7 +74,7 @@ if any gate fails, the pipeline halts and downstream stages never run.
 . *Register Model + Results* — Updates the existing registry entry with the benchmark
   results and marks the model PRODUCTION-READY.
 
-=== Phase 3 — MaaS production deployment (optional)
+=== Stage: MaaS production deployment (conceptual, optional)
 
 Deploys the model via Models-as-a-Service CRDs with API-key auth, rate limiting, and
 API Gateway routing.
@@ -293,13 +295,14 @@ oc apply -f model-intake-pipeline/pipeline/model-registry-task.yaml
 oc apply -f model-intake-pipeline/pipeline/deploy-maas-task.yaml
 ----
 
-==== 8. Deploy the pipeline
+==== 8. Deploy the pipelines and supporting infrastructure
 
-[source,sh,role=execute]
-----
-oc apply -f model-intake-pipeline/pipeline/model-intake-pipeline.yaml
-oc apply -f model-intake-pipeline/pipeline/pvc.yaml
-----
+The operator and its stage walker (see `operator/`) resolve pipeline names from
+`ModelLifecycleProfile` and `IntakeProviderConfig` CRDs. The individual Tekton task
+YAMLs deployed above are still used as the building blocks; the monolithic
+`model-intake-pipeline.yaml` is no longer directly invoked by the current architecture.
+
+For GitOps-based deployment, see `gitops/` and the root `README.md`.
 
 ==== 9. Deploy the Model Intake UI
 
@@ -334,51 +337,25 @@ The Results UI visualizes GuideLLM benchmark results from S3:
 oc apply -f results-ui/deployment.yaml
 ----
 
-== Running the Pipeline
+== Running the Pipeline (current CRD-driven approach)
 
-=== Via the Model Intake UI
+The production workflow is CRD-driven: submit a `ModelRequest` CR (via the Model
+Intake UI or `kubectl`), and the operator handles the full lifecycle through the
+stage walker defined in `ModelLifecycleProfile.Spec.Stages`. See the root
+`README.md` and `operator/` for the current architecture.
 
-. Open the Model Intake UI route in your browser.
-. Fill out the form:
-+
-* **Model section:** Set `model-id` to a Hugging Face model (e.g.
-  `ibm-granite/granite-3.3-2b-instruct`). `model-name` auto-populates.
-* **EvalHub section:** Set `evalhub-token` to your OpenShift OAuth token
-  (`oc whoami -t`). This is required for the garak scan and GuideLLM benchmark.
-* **GPU Advisor section:** Adjust `context-length` and `concurrency` to match your
-  hardware.
-* Leave other fields at their defaults unless you need to customize.
-. Click *Submit Model for Onboarding*.
-. Monitor progress in *Pipeline Runs* tab. When the pipeline reaches the approval gate,
-  go to *Deployment Plans*, review the GPU plan, and *Approve*.
+```bash
+oc apply -f operator/config/samples/modelrequest-sample.yaml
+# Or submit via the Model Intake UI (deployed in the sandbox namespace)
+```
 
-Required fields (`model-id`, `model-name`, `evalhub-token`) are validated before submission.
-The form will not submit if any are empty.
+Monitor progress:
 
-=== Via direct PipelineRun
-
-Create a PipelineRun YAML (see `model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml`
-for a template) and apply it:
-
-[source,sh,role=execute]
-----
-oc create -f model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml -n vllm
-----
-
-Monitor the run:
-
-[source,sh,role=execute]
-----
-oc get pipelineruns -n vllm --watch
-----
-
-View task logs from the OpenShift web console (*Pipelines → PipelineRuns* → click the run
-→ *Logs* tab) or via:
-
-[source,sh,role=execute]
-----
-tkn pipelinerun logs <pipelinerun-name> -n vllm -f
-----
+```bash
+oc -n sandbox get modelrequests
+oc -n sandbox get capacityplans
+oc -n sandbox get pipelineruns
+```
 
 == Key Pipeline Parameters
 
@@ -455,9 +432,10 @@ model_onboarding_pipeline/
       staging-namespace.yaml              # vllm-staging namespace + RBAC
       ...
   model-intake-ui/                         # Flask intake UI (Python)
-    app.py
+    app/                                    # Flask app factory package
     deployment.yaml
     Containerfile
+    wsgi.py
   results-ui/                              # Benchmark results viewer (Python)
     app.py
     deployment.yaml

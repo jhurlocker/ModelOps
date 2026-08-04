@@ -138,9 +138,18 @@ type ModelRequestStatus struct {
 	// `kubectl get modelrequest` show meaningful progress against the
 	// profile's declared stage list. Introduced in Phase 6.
 	Stages                   []StageProgress    `json:"stages,omitempty"`
-	PipelineRunName          string             `json:"pipelineRunName,omitempty"`
-	SandboxPipelineRunName   string             `json:"sandboxPipelineRunName,omitempty"`
-	PromotionPipelineRunName string             `json:"promotionPipelineRunName,omitempty"`
+	// Deprecated: PipelineRunName is retained for compatibility with the
+	// Tekton-based reference implementation. Consumers should prefer
+	// Stages[] for provider-independent lifecycle tracking.
+	PipelineRunName string `json:"pipelineRunName,omitempty"`
+	// Deprecated: SandboxPipelineRunName is retained for compatibility
+	// with the Tekton-based reference implementation. Consumers should
+	// prefer Stages[] for provider-independent lifecycle tracking.
+	SandboxPipelineRunName string `json:"sandboxPipelineRunName,omitempty"`
+	// Deprecated: PromotionPipelineRunName is retained for compatibility
+	// with the Tekton-based reference implementation. Consumers should
+	// prefer Stages[] for provider-independent lifecycle tracking.
+	PromotionPipelineRunName string `json:"promotionPipelineRunName,omitempty"`
 	Message                  string             `json:"message,omitempty"`
 	Conditions               []metav1.Condition `json:"conditions,omitempty"`
 }
