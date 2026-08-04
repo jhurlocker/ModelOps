@@ -99,6 +99,33 @@ func ensureNamespace(t *testing.T, name string) {
 	}
 }
 
+// ensureNamespaceWithLabels creates a Namespace with the given labels,
+// or updates an existing namespace to have those labels if it already
+// exists. Used by tests exercising
+// StageNamespaceSetup.AllowedNamespaceSelector (Phase 9), where the
+// target namespace's labels must match the selector for the stage to
+// proceed.
+func ensureNamespaceWithLabels(t *testing.T, name string, labels map[string]string) {
+	t.Helper()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: labels,
+		},
+	}
+	if err := k8sClient.Create(context.Background(), ns); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			t.Fatalf("failed to create namespace %s: %v", name, err)
+		}
+		// Namespace already exists -- update its labels.
+		_ = k8sClient.Get(context.Background(), types.NamespacedName{Name: name}, ns)
+		ns.Labels = labels
+		if err := k8sClient.Update(context.Background(), ns); err != nil {
+			t.Fatalf("failed to update namespace %s labels: %v", name, err)
+		}
+	}
+}
+
 // testDefaultStages reproduces, for test fixtures only, the exact
 // 3-stage sequence internal/controller's now-removed defaultStages()
 // used to synthesize automatically for any profile with an empty

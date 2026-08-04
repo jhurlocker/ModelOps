@@ -30,6 +30,29 @@ func TestProviderConfigError_UnwrapsToUnderlyingError(t *testing.T) {
 	require.ErrorIs(t, pcErr, underlying)
 }
 
+func TestNamespaceApprovalError_ErrorReturnsUnderlyingMessage(t *testing.T) {
+	underlying := errors.New("namespace \"staging\" does not match allowedNamespaceSelector: ...")
+	naErr := &NamespaceApprovalError{Err: underlying}
+
+	require.Equal(t, "namespace \"staging\" does not match allowedNamespaceSelector: ...", naErr.Error())
+}
+
+func TestNamespaceApprovalError_UnwrapsToUnderlyingError(t *testing.T) {
+	underlying := errors.New("selector mismatch")
+	naErr := &NamespaceApprovalError{Err: underlying}
+
+	require.ErrorIs(t, naErr, underlying)
+}
+
+func TestNamespaceApprovalError_SurvivesFmtErrorfWrapping_StillMatchedByErrorsAs(t *testing.T) {
+	naErr := &NamespaceApprovalError{Err: errors.New("namespace \"bad-ns\" not approved")}
+	wrapped := fmt.Errorf("stage %q: preparing namespace %q: %w", "promotion", "bad-ns", naErr)
+
+	var got *NamespaceApprovalError
+	require.True(t, errors.As(wrapped, &got))
+	require.Same(t, naErr, got)
+}
+
 func TestProviderConfigError_SurvivesFmtErrorfWrapping_StillMatchedByErrorsAs(t *testing.T) {
 	// Mirrors exactly how internal/stagewalk.Walk wraps a StageRunner's
 	// EnsureRun error (fmt.Errorf("stage %q: %w", ...)) before

@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -253,6 +254,11 @@ func (r *ModelRequestReconciler) Reconcile(
 		if setup == nil {
 			return nil
 		}
+		if setup.AllowedNamespaceSelector != nil {
+			if err := r.checkNamespaceApproved(ctx, ns, setup.AllowedNamespaceSelector); err != nil {
+				return err
+			}
+		}
 		if setup.EnsureRBAC {
 			if err := r.ensurePromotionNamespaceRBAC(ctx, ns, modelRequest.Namespace); err != nil {
 				return &namespaceSetupError{reason: "RBACSetupFailed", err: err}
@@ -297,6 +303,21 @@ func (r *ModelRequestReconciler) Reconcile(
 		var pcErr *stagecommon.ProviderConfigError
 		if errors.As(walkErr, &pcErr) {
 			return r.failRequestWithRequeue(ctx, &modelRequest, "ProviderConfigLookupFailed", pcErr.Error(), providerConfigLookupRequeueDelay)
+		}
+		// NamespaceApprovalError (Phase 9): StageNamespaceSetup.
+		// AllowedNamespaceSelector check failure -- the candidate
+		// namespace either doesn't exist or its labels don't match
+		// the selector. Unlike ProviderConfigLookupFailed (a missing-
+		// dependency race), this uses failRequest with no bounded
+		// requeue: namespaces are long-lived cluster infrastructure,
+		// not a dynamically-provisioned CRD; the operator has no
+		// reason to expect the namespace (or its labels) to
+		// spontaneously change without human intervention. See
+		// docs/REFACTOR_PLAN.md Phase 9 and stagecommon/errors.go's
+		// NamespaceApprovalError doc comment for the full rationale.
+		var naErr *stagecommon.NamespaceApprovalError
+		if errors.As(walkErr, &naErr) {
+			return r.failRequest(ctx, &modelRequest, "NamespaceNotApproved", naErr.Error())
 		}
 		logger.Error(walkErr, "stage walk failed")
 		return ctrl.Result{RequeueAfter: transientErrorRequeueDelay}, walkErr
@@ -967,6 +988,37 @@ func (r *ModelRequestReconciler) ensurePromotionNamespaceRBAC(ctx context.Contex
 		}
 	} else if err != nil {
 		return fmt.Errorf("failed to check for existing evalhub ClusterRoleBinding for %s: %w", targetNS, err)
+	}
+
+	return nil
+}
+
+// checkNamespaceApproved evaluates sel against a target namespace's
+// labels, returning a stagecommon.NamespaceApprovalError if the namespace
+// doesn't exist or doesn't match. A nil or empty selector is treated as
+// "permits everything" (the caller -- setupNamespace -- already guards
+// against nil, so this function only receives a non-nil selector).
+func (r *ModelRequestReconciler) checkNamespaceApproved(ctx context.Context, ns string, sel *metav1.LabelSelector) error {
+	var namespace corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: ns}, &namespace); apierrors.IsNotFound(err) {
+		return &stagecommon.NamespaceApprovalError{
+			Err: fmt.Errorf("namespace %q does not exist", ns),
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to get namespace %q for approval check: %w", ns, err)
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(sel)
+	if err != nil {
+		return &stagecommon.NamespaceApprovalError{
+			Err: fmt.Errorf("invalid allowedNamespaceSelector: %w", err),
+		}
+	}
+
+	if !selector.Matches(labels.Set(namespace.Labels)) {
+		return &stagecommon.NamespaceApprovalError{
+			Err: fmt.Errorf("namespace %q labels do not match allowedNamespaceSelector", ns),
+		}
 	}
 
 	return nil

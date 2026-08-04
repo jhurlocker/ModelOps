@@ -120,6 +120,23 @@ type StageNamespaceSetup struct {
 	// the stage runs (today's ensureMaaSNamespaceLabels, previously
 	// hardcoded to only fire in the promotion loop).
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// AllowedNamespaceSelector, when set, constrains which namespaces
+	// this stage is permitted to target. The walker evaluates it
+	// against each candidate namespace's labels before any RBAC is
+	// provisioned or labels are applied (the check fires first in the
+	// setupNamespace closure -- see
+	// internal/controller/modelrequest_controller.go). A namespace
+	// that doesn't exist or whose labels don't match causes the walk
+	// to fail with a "NamespaceNotApproved" status reason -- the stage
+	// never executes there and no RBAC is provisioned.
+	//
+	// When nil or empty (the default), all namespaces are permitted
+	// -- backward-compatible with every existing profile (Phase 9,
+	// REFACTOR_PLAN.md; opt-in security boundary, not a flag-day
+	// default change).
+	// +optional
+	AllowedNamespaceSelector *metav1.LabelSelector `json:"allowedNamespaceSelector,omitempty"`
 }
 
 // ProviderConfigRef is a name+kind reference to a provider-specific

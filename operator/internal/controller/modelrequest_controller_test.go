@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/apis"
@@ -890,4 +891,321 @@ func TestModelRequest_CapacityPlanCreateRace_AlreadyExists_DoesNotFailReconcile(
 	created, err := createIgnoringAlreadyExists(context.Background(), r.Client, &loser)
 	require.NoError(t, err, "losing a Create race to an equivalent object must not fail the reconcile")
 	require.False(t, created)
+}
+
+// Phase 9 — Namespace RBAC governance (AllowedNamespaceSelector).
+// See docs/REFACTOR_PLAN.md Phase 9 for the full design proposal.
+
+func requireServiceAccountNotExists(t *testing.T, ns string) {
+	t.Helper()
+	var sa corev1.ServiceAccount
+	err := k8sClient.Get(context.Background(), nsName(ns, "pipeline"), &sa)
+	require.True(t, apierrors.IsNotFound(err), "expected no pipeline ServiceAccount in %s, got error: %v", ns, err)
+}
+
+func requireRoleBindingNotExists(t *testing.T, ns, name string) {
+	t.Helper()
+	var rb rbacv1.RoleBinding
+	err := k8sClient.Get(context.Background(), nsName(ns, name), &rb)
+	require.True(t, apierrors.IsNotFound(err), "expected no RoleBinding %s/%s, got error: %v", ns, name, err)
+}
+
+// 4a — Namespace fails the selector, no RBAC provisioned.
+func TestModelRequest_NamespaceFailsAllowedNamespaceSelector_NoRBACProvisioned_NamespaceNotApproved(t *testing.T) {
+	ns := newTestNamespace(t)
+	promotionNS := "promo-" + randSuffix()
+	ensureNamespaceWithLabels(t, promotionNS, map[string]string{"env": "staging"})
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	reqTrue := true
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "promotion", Kind: "PipelineRun", PerNamespace: true,
+			Required: &reqTrue,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"env": "production"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{PromotionNamespaces: []string{promotionNS}}
+	})
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "NamespaceNotApproved", mr.Status.Phase)
+	require.Contains(t, mr.Status.Message, promotionNS)
+	require.Contains(t, mr.Status.Message, "allowedNamespaceSelector")
+
+	requireServiceAccountNotExists(t, promotionNS)
+	requireRoleBindingNotExists(t, promotionNS, "pipeline-edit")
+}
+
+// 4b — Profile without selector is completely unaffected (backward compat).
+func TestModelRequest_ProfileWithoutAllowedNamespaceSelector_CompletelyUnaffected(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, "staging")
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	newProfile(t, ns, "profile-1", defaultProfileSpec("cfg-1"))
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	mr, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-sandbox", corev1.ConditionTrue, "sandbox ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-promotion-staging", corev1.ConditionTrue, "promotion ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", mr.Status.Phase)
+	require.NotContains(t, mr.Status.Phase, "NamespaceNotApproved")
+
+	requireServiceAccountExists(t, ns)
+	requireServiceAccountExists(t, "staging")
+}
+
+// 4c — Namespace matches selector, RBAC provisioned normally.
+func TestModelRequest_NamespaceMatchesAllowedNamespaceSelector_RBACProvisionedNormally(t *testing.T) {
+	ns := newTestNamespace(t)
+	promotionNS := "promo-" + randSuffix()
+	ensureNamespaceWithLabels(t, promotionNS, map[string]string{"modelops.io/tier": "promotion-target"})
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "sandbox", Kind: "PipelineRun",
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{EnsureRBAC: true},
+		},
+		{Name: "promotion", Kind: "PipelineRun", PerNamespace: true,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"modelops.io/tier": "promotion-target"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{PromotionNamespaces: []string{promotionNS}}
+	})
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-sandbox", corev1.ConditionTrue, "sandbox ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-promotion-"+promotionNS, corev1.ConditionTrue, "promotion ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", mr.Status.Phase)
+
+	requireServiceAccountExists(t, promotionNS)
+}
+
+// 4d — Explicit nil selector = identical to absent (backward compatible).
+func TestModelRequest_AllowedNamespaceSelectorNil_BehaviorIdenticalToAbsent(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, "staging")
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages[2].NamespaceSetup.AllowedNamespaceSelector = nil
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-sandbox", corev1.ConditionTrue, "sandbox ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-promotion-staging", corev1.ConditionTrue, "promotion ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", mr.Status.Phase)
+
+	requireServiceAccountExists(t, "staging")
+}
+
+// 4e — matchExpressions (set-based selector) works correctly.
+func TestModelRequest_AllowedNamespaceSelectorMatchExpressions_LabelsFetchedCorrectly(t *testing.T) {
+	ns := newTestNamespace(t)
+	promotionNS := "promo-" + randSuffix()
+	ensureNamespaceWithLabels(t, promotionNS, map[string]string{"tier": "prod"})
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "sandbox", Kind: "PipelineRun",
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{EnsureRBAC: true},
+		},
+		{Name: "promotion", Kind: "PipelineRun", PerNamespace: true,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
+						{Key: "tier", Operator: metav1.LabelSelectorOpIn, Values: []string{"prod", "staging"}},
+					},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{PromotionNamespaces: []string{promotionNS}}
+	})
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-sandbox", corev1.ConditionTrue, "sandbox ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "promotionRunning", mr.Status.Phase)
+
+	setPipelineRunCondition(t, ns, "mr-1-promotion-"+promotionNS, corev1.ConditionTrue, "promotion ok")
+	mr, _, err = reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	require.Equal(t, "Succeeded", mr.Status.Phase)
+
+	requireServiceAccountExists(t, promotionNS)
+}
+
+// 4f — Multi-namespace: first approved namespace gets RBAC, the second
+// (unapproved) namespace fails the selector check and the walk stops.
+// The approved namespace's RBAC is already provisioned (sequential,
+// not transactional), but the unapproved namespace gets nothing -- the
+// fail-closed guarantee: no unapproved namespace ever gets RBAC.
+func TestModelRequest_MultiNamespacePromotion_FirstPassesSecondFails_NoRBACInEither(t *testing.T) {
+	ns := newTestNamespace(t)
+	nsA := "promo-a-" + randSuffix()
+	nsB := "promo-b-" + randSuffix()
+	ensureNamespaceWithLabels(t, nsA, map[string]string{"env": "approved"})
+	ensureNamespace(t, nsB)
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "promotion", Kind: "PipelineRun", PerNamespace: true,
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"env": "approved"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", func(mr *modelopsv1alpha1.ModelRequest) {
+		mr.Spec.Requirements = &modelopsv1alpha1.ModelRequirements{PromotionNamespaces: []string{nsA, nsB}}
+	})
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "NamespaceNotApproved", mr.Status.Phase)
+	require.Contains(t, mr.Status.Message, nsB)
+
+	requireServiceAccountExists(t, nsA)
+	requireServiceAccountNotExists(t, nsB)
+}
+
+// 4h — Sandbox stage (PerNamespace: false) with matching selector on own ns.
+func TestModelRequest_SandboxStageWithAllowedNamespaceSelector_AppliedToOwnNamespace(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespaceWithLabels(t, ns, map[string]string{"modelops.io/stage": "sandbox"})
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "sandbox", Kind: "PipelineRun",
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"modelops.io/stage": "sandbox"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "sandboxRunning", mr.Status.Phase)
+
+	requireServiceAccountExists(t, ns)
+}
+
+// 4i — Sandbox stage with non-matching selector on own ns → blocked.
+func TestModelRequest_SandboxStageOwnNamespaceFailsSelector_NamespaceNotApproved(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, ns)
+
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+	spec := defaultProfileSpec("cfg-1")
+	spec.Stages = []modelopsv1alpha1.ProfileStageSpec{
+		{Name: "capacity", Kind: "CapacityPlan"},
+		{Name: "sandbox", Kind: "PipelineRun",
+			NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+				EnsureRBAC: true,
+				AllowedNamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"modelops.io/stage": "production"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-1", spec)
+	newModelRequest(t, ns, "mr-1", "profile-1", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-1")
+
+	_, _, err := reconcileModelRequest(t, ns, "mr-1")
+	require.NoError(t, err)
+
+	mr := getModelRequest(t, ns, "mr-1")
+	require.Equal(t, "NamespaceNotApproved", mr.Status.Phase)
+	require.Contains(t, mr.Status.Message, ns)
+
+	requireServiceAccountNotExists(t, ns)
+
+	var pr tektonv1.PipelineRun
+	getErr := k8sClient.Get(context.Background(), nsName(ns, "mr-1-sandbox"), &pr)
+	require.True(t, apierrors.IsNotFound(getErr), "sandbox PipelineRun must not be created when own namespace fails approval")
 }

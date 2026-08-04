@@ -3549,5 +3549,183 @@ not a manual edit). `zz_generated.deepcopy.go`: no diff, as expected.
   S3-report-upload code path (surfaced during live verification, see
   above) was not investigated or fixed -- it predates this phase and
   is orthogonal to the credential-reference design this phase
-  implements (the actual EvalHub bearer-token authentication this
-  phase touches worked correctly).
+   implements (the actual EvalHub bearer-token authentication this
+   phase touches worked correctly).
+
+---
+
+## Phase 9 — Namespace RBAC governance (AllowedNamespaceSelector)
+
+**Status:** Complete. This phase went through an explicit design-review
+pass first (per the user's request, same as Phases 4/5/6/7/8) before any
+code was written; the approved design is what was implemented with two
+refinements from the review (see below).
+
+### What changed
+
+- **`StageNamespaceSetup.AllowedNamespaceSelector`**
+  (`operator/api/v1alpha1/modellifecycleprofile_types.go`): new optional
+  field of type `*metav1.LabelSelector`. When set, the walker evaluates
+  it against each candidate namespace's labels before any RBAC is
+  provisioned or labels are applied. A namespace that doesn't exist or
+  doesn't match causes the walk to fail with a `"NamespaceNotApproved"`
+  status reason — the stage never executes there and no RBAC is
+  provisioned. When nil or empty (the default), all namespaces are
+  permitted — backward-compatible with every existing profile. Uses the
+  standard `metav1.LabelSelector` type, so both `matchLabels` (simple
+  equality) and `matchExpressions` (set-based In/NotIn/Exists/
+  DoesNotExist) selectors are supported.
+
+- **`stagecommon.NamespaceApprovalError`** (`operator/internal/stagecommon/errors.go`):
+  new error type, mirroring the existing `ProviderConfigError` pattern
+  (lives in `stagecommon` so both `internal/controller` and any future
+  namespace-setup consumer can recognize it via `errors.As` without
+  importing each other). Wraps the underlying failure (namespace not
+  found, labels don't match, or invalid selector syntax) with a
+  human-readable message distinguishing "does not exist" from "labels
+  do not match."
+
+- **`checkNamespaceApproved`**
+  (`operator/internal/controller/modelrequest_controller.go`): new
+  method on `ModelRequestReconciler`. GETs the target namespace,
+  evaluates the `metav1.LabelSelectorAsSelector` against its labels, and
+  returns a `NamespaceApprovalError` wrapping the specific failure.
+  NotFound and labels-mismatch are distinguished via distinct error
+  messages, both surfacing as `"NamespaceNotApproved"` — the status
+  reason is the same, but the message tells the user whether they need
+  to create the namespace or relabel it.
+
+- **Wired into `setupNamespace` closure**: the approval check fires
+  first, before `EnsureRBAC` and `Labels` — if it fails, nothing else
+  happens for that namespace and the walk stops. The existing
+  `namespaceSetupError`→`SecretLookupFailed`/`RBACSetupFailed`/
+  `ProviderConfigLookupFailed` chain in `Reconcile`'s error handler
+  gained `NamespaceApprovalError`→`"NamespaceNotApproved"` recognized
+  via `errors.As`, returning `failRequest` (no requeue).
+
+### Requeue decision: no-requeue (design review item 1)
+
+`ProviderConfigLookupFailed` (Phase 7) used a 30s bounded requeue
+because a missing `IntakeProviderConfig` is a real GitOps race —
+created by the same sync process as the profile. A namespace that
+doesn't match a selector is different: namespaces are long-lived cluster
+infrastructure, not dynamically-provisioned CRDs. If `staging` exists
+but lacks `modelops.io/approved: "true"`, polling every 30s won't fix
+it — a human needs to label the namespace or adjust the selector. Even
+the NotFound sub-case (namespace doesn't exist yet) needs not just the
+namespace to be created but also the right labels to be applied. The
+operator has no reason to expect this to happen on its own within any
+particular window, so `failRequest` (no requeue, the request sits idle
+until something changes) is the correct posture.
+
+This is documented in `stagecommon.NamespaceApprovalError`'s doc comment
+and in the `Reconcile` error-handler code comment, with an explicit
+cross-reference to `ProviderConfigLookupFailed`'s different reasoning.
+
+### NotFound vs. label-mismatch (design review item 2)
+
+Both surface as `"NamespaceNotApproved"` but with distinct messages:
+
+- NotFound: `namespace "nonexistent-ns" does not exist`
+- Labels mismatch: `namespace "staging" labels do not match allowedNamespaceSelector`
+
+This lets the user know whether to create the namespace or relabel it,
+without needing to inspect the namespace themselves.
+
+### Additive/non-breaking: opt-in
+
+Profiles without `AllowedNamespaceSelector` (or with it nil/empty)
+behave exactly as before — all namespaces are permitted. This is the
+same backward-compatibility bar every phase since Phase 2 has held.
+The live `standard-generative-onboarding` profile needs zero changes
+and continues to work unmodified.
+
+### API changes
+
+`gitops/components/operator/crd-lifecycleprofiles.yaml` gained the
+`allowedNamespaceSelector` field under `stages[].namespaceSetup`.
+`config/crd/bases/modelops.example.io_modellifecycleprofiles.yaml`
+(same content, the generated canonical copy). `zz_generated.deepcopy.go`
+gained a 5-line addition for the new `*LabelSelector` pointer field
+on `StageNamespaceSetup.DeepCopyInto`.
+
+### Test coverage
+
+11 new tests (all passing), up from 124 at the end of Phase 8:
+
+| Test | Location | What it proves |
+|---|---|---|
+| `TestNamespaceApprovalError_ErrorReturnsUnderlyingMessage` | `stagecommon` | Error() passes through wrapped message |
+| `TestNamespaceApprovalError_UnwrapsToUnderlyingError` | `stagecommon` | Unwrap() works for errors.Is |
+| `TestNamespaceApprovalError_SurvivesFmtErrorfWrapping_StillMatchedByErrorsAs` | `stagecommon` | Survives `fmt.Errorf("stage %q: preparing namespace %q: %w", ...)` wrapping (how Walk wraps SetupNamespace errors) |
+| `TestModelRequest_NamespaceFailsAllowedNamespaceSelector_NoRBACProvisioned_NamespaceNotApproved` | `controller` | Selector requires `env: production`, namespace has `env: staging` → `NamespaceNotApproved`, no SA/RB in target ns |
+| `TestModelRequest_ProfileWithoutAllowedNamespaceSelector_CompletelyUnaffected` | `controller` | Full sandbox→promotion→Succeeded lifecycle using `defaultProfileSpec()` (no selector) — backward-compatibility litmus test |
+| `TestModelRequest_NamespaceMatchesAllowedNamespaceSelector_RBACProvisionedNormally` | `controller` | Selector matches → full lifecycle succeeds, RBAC present |
+| `TestModelRequest_AllowedNamespaceSelectorNil_BehaviorIdenticalToAbsent` | `controller` | Explicit nil = same as absent = no filtering |
+| `TestModelRequest_AllowedNamespaceSelectorMatchExpressions_LabelsFetchedCorrectly` | `controller` | Set-based `In` selector matches → succeeds |
+| `TestModelRequest_MultiNamespacePromotion_FirstPassesSecondFails_NoRBACInEither` | `controller` | 2 promotion targets, first approved → gets RBAC; second unapproved → walk stops, `NamespaceNotApproved` |
+| `TestModelRequest_SandboxStageWithAllowedNamespaceSelector_AppliedToOwnNamespace` | `controller` | Non-promotion stage (sandbox, `PerNamespace: false`) with selector matching own namespace → proceeds normally |
+| `TestModelRequest_SandboxStageOwnNamespaceFailsSelector_NamespaceNotApproved` | `controller` | Same as above but selector doesn't match → `NamespaceNotApproved`, no PipelineRun created |
+
+Also extended `ensureNamespaceWithLabels` in `testutil_test.go` to
+update labels on an already-existing namespace (the previous
+`ensureNamespace` was Create-only, which was fine when no test needed
+namespaces to already have labels before the reconciler looked at them).
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all five packages under `internal/stages/*`
+(`sandbox`, `promotion`, `capacityplanning`, `tekton`, `noop`): none
+imports another. `internal/stagewalk` and `internal/stagecommon` depend
+only on `api/v1alpha1` and each other — no `internal/controller` or
+`internal/stages/*` entries.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5): `config/rbac/role.yaml`
+had one cosmetic whitespace diff (`SeverityThreshold` field alignment —
+controller-gen version variance, no semantic change). CRD diff is
+purely additive (`allowedNamespaceSelector` under
+`stages[].namespaceSetup.properties`). Deepcopy diff is 5 lines for
+the new `*metav1.LabelSelector` pointer on `StageNamespaceSetup`.
+Confirmed idempotent on a second run (no diff). `make generate`
+(deepcopy) confirmed no diff on a second run.
+
+`gitops/components/operator/crd-lifecycleprofiles.yaml` re-synced from
+the regenerated `config/crd/bases/*` output, confirmed byte-identical
+afterward. All other gitops CRD files (`crd-modelrequests.yaml`,
+`crd-capacityplans.yaml`, `crd-platformconfigs.yaml`,
+`crd-intakeproviderconfigs.yaml`) confirmed unchanged.
+
+### Sandbox cluster verification
+
+All three live cases tested against the sandbox cluster via the
+branch-tracked ArgoCD `Application/modelops-operator`:
+
+1. **Exists-but-labels-don't-match**: `NamespaceNotApproved: namespace "staging" labels do not match allowedNamespaceSelector` — the most common real-world case (unlabeled namespace).
+2. **Exists-and-labels-match**: `promotionRunning` — labeling `staging` with `modelops.io/approved=true`, then creating a fresh `ModelRequest` against the same profile, reached promotion normally with RBAC provisioned in `staging`.
+3. **NotFound**: `NamespaceNotApproved: namespace "nonexistent-ns" does not exist` — promotion targets `["nonexistent-ns"]`, the distinct NotFound message confirms the operator distinguishes "doesn't exist" from "wrong labels."
+
+Auto-sync was temporarily disabled on the ArgoCD Application to prevent
+self-heal from reverting the CRD before the test completed (the same
+Phase 5 pattern documented in that phase's log entry). Auto-sync was
+restored after verification; the Application returned to `Synced`/
+`Healthy` within its normal sync cycle. All three disposable test
+`ModelRequest`s, the test `ModelLifecycleProfile`, and test labels
+on the `staging` namespace were cleaned up afterward.
+
+### Known follow-up NOT done in this phase
+
+- The live `standard-generative-onboarding` profile (the only profile in
+  this repo) was not modified to set `AllowedNamespaceSelector` — this
+  is deliberately opt-in. Organizations that want namespace-level RBAC
+  governance add the field to their profiles; those that don't are
+  unaffected.
+- No `Watches()`-based re-trigger was added for the
+  `NamespaceNotApproved` reason — same backlog scope as the four other
+  `*LookupFailed` reasons already deferred in Phase 7's backlog bullet
+  (item 8). A label change on a namespace doesn't trigger a
+  `ModelRequest` reconcile today; the operator only re-checks when the
+  `ModelRequest` itself or a watched dependency changes. Adding
+  namespace-label-change watches for this reason alone is a smaller
+  separate task — worth its own phase when prioritized.

@@ -142,6 +142,66 @@ spec:
                         (e.g. the CapacityPlan stage, which doesn't execute anything
                         inside a target namespace).
                       properties:
+                        allowedNamespaceSelector:
+                          description: |-
+                            AllowedNamespaceSelector, when set, constrains which namespaces
+                            this stage is permitted to target. The walker evaluates it
+                            against each candidate namespace's labels before any RBAC is
+                            provisioned or labels are applied (the check fires first in the
+                            setupNamespace closure -- see
+                            internal/controller/modelrequest_controller.go). A namespace
+                            that doesn't exist or whose labels don't match causes the walk
+                            to fail with a "NamespaceNotApproved" status reason -- the stage
+                            never executes there and no RBAC is provisioned.
+
+                            When nil or empty (the default), all namespaces are permitted
+                            -- backward-compatible with every existing profile (Phase 9,
+                            REFACTOR_PLAN.md; opt-in security boundary, not a flag-day
+                            default change).
+                          properties:
+                            matchExpressions:
+                              description: matchExpressions is a list of label selector
+                                requirements. The requirements are ANDed.
+                              items:
+                                description: |-
+                                  A label selector requirement is a selector that contains values, a key, and an operator that
+                                  relates the key and values.
+                                properties:
+                                  key:
+                                    description: key is the label key that the selector
+                                      applies to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      operator represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists and DoesNotExist.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      values is an array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. This array is replaced during a strategic
+                                      merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchLabels:
+                              additionalProperties:
+                                type: string
+                              description: |-
+                                matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                operator is "In", and the values array contains only "value". The requirements are ANDed.
+                              type: object
+                          type: object
+                          x-kubernetes-map-type: atomic
                         ensureRBAC:
                           description: |-
                             EnsureRBAC provisions the "pipeline" ServiceAccount and the
