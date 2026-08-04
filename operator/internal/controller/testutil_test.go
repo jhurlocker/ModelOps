@@ -165,8 +165,8 @@ func testDefaultStages(providerConfigRef *modelopsv1alpha1.ProviderConfigRef) []
 				EnsureRBAC: true,
 				Labels: map[string]string{
 					"opendatahub.io/generated-namespace": "true",
-					"maas.opendatahub.io/gateway-access":  "true",
-					"opendatahub.io/dashboard":            "true",
+					"maas.opendatahub.io/gateway-access": "true",
+					"opendatahub.io/dashboard":           "true",
 				},
 			},
 		},
@@ -291,9 +291,9 @@ func newModelRequest(t *testing.T, ns, name, profileName string, mutate func(*mo
 				Name:       name,
 				Version:    "v1",
 			},
-			LifecycleProfile:  profileName,
-			RequestedBy:       "test-suite",
-			ScanS3SecretName:  secretName,
+			LifecycleProfile:   profileName,
+			RequestedBy:        "test-suite",
+			ScanS3SecretName:   secretName,
 			ResultS3SecretName: secretName,
 		},
 	}

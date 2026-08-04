@@ -5,14 +5,14 @@ import (
 )
 
 type ModelRequestSpec struct {
-	Model                ModelIdentity      `json:"model"`
-	DisplayName          string             `json:"displayName,omitempty"`
-	BusinessJustification string            `json:"businessJustification,omitempty"`
-	LifecycleProfile     string             `json:"lifecycleProfile"`
-	PipelineRef          string             `json:"pipelineRef,omitempty"`
-	Requirements         *ModelRequirements `json:"requirements,omitempty"`
-	Access               *ModelAccess       `json:"access,omitempty"`
-	RequestedBy          string             `json:"requestedBy,omitempty"`
+	Model                 ModelIdentity      `json:"model"`
+	DisplayName           string             `json:"displayName,omitempty"`
+	BusinessJustification string             `json:"businessJustification,omitempty"`
+	LifecycleProfile      string             `json:"lifecycleProfile"`
+	PipelineRef           string             `json:"pipelineRef,omitempty"`
+	Requirements          *ModelRequirements `json:"requirements,omitempty"`
+	Access                *ModelAccess       `json:"access,omitempty"`
+	RequestedBy           string             `json:"requestedBy,omitempty"`
 
 	EvalHubSecretName     string `json:"evalhubSecretName,omitempty"`
 	HuggingFaceSecretName string `json:"huggingfaceSecretName,omitempty"`
@@ -25,7 +25,7 @@ type ModelRequestSpec struct {
 	ResultS3Endpoint string `json:"resultS3Endpoint,omitempty"`
 	ResultS3Bucket   string `json:"resultS3Bucket,omitempty"`
 
-	MaaS  *MaaSOverride `json:"maas,omitempty"`
+	MaaS *MaaSOverride `json:"maas,omitempty"`
 }
 
 type ModelIdentity struct {
@@ -106,10 +106,10 @@ type ModelAccess struct {
 }
 
 type MaaSOverride struct {
-	Enabled          bool   `json:"enabled,omitempty"`
-	GPUCount         string `json:"gpuCount,omitempty"`
-	RuntimeImage     string `json:"runtimeImage,omitempty"`
-	AuthorizedGroup  string `json:"authorizedGroup,omitempty"`
+	Enabled         bool   `json:"enabled,omitempty"`
+	GPUCount        string `json:"gpuCount,omitempty"`
+	RuntimeImage    string `json:"runtimeImage,omitempty"`
+	AuthorizedGroup string `json:"authorizedGroup,omitempty"`
 }
 
 type ModelRequestStatus struct {
@@ -137,7 +137,7 @@ type ModelRequestStatus struct {
 	// entry per namespace for a PerNamespace stage. This is what makes
 	// `kubectl get modelrequest` show meaningful progress against the
 	// profile's declared stage list. Introduced in Phase 6.
-	Stages                   []StageProgress    `json:"stages,omitempty"`
+	Stages []StageProgress `json:"stages,omitempty"`
 	// Deprecated: PipelineRunName is retained for compatibility with the
 	// Tekton-based reference implementation. Consumers should prefer
 	// Stages[] for provider-independent lifecycle tracking.
@@ -149,7 +149,7 @@ type ModelRequestStatus struct {
 	// Deprecated: PromotionPipelineRunName is retained for compatibility
 	// with the Tekton-based reference implementation. Consumers should
 	// prefer Stages[] for provider-independent lifecycle tracking.
-	PromotionPipelineRunName string `json:"promotionPipelineRunName,omitempty"`
+	PromotionPipelineRunName string             `json:"promotionPipelineRunName,omitempty"`
 	Message                  string             `json:"message,omitempty"`
 	Conditions               []metav1.Condition `json:"conditions,omitempty"`
 }

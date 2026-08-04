@@ -85,9 +85,9 @@ func TestWalk_OneStage_Succeeds(t *testing.T) {
 	runner.ScriptStage("only", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
 
 	in := Input{
-		Stages:   []modelopsv1alpha1.ProfileStageSpec{{Name: "only", Kind: "fake"}},
-		Handlers: map[string]stagecommon.StageHandler{"only": nameEchoHandler()},
-		Runners:  map[string]stagecommon.StageRunner{"fake": runner},
+		Stages:       []modelopsv1alpha1.ProfileStageSpec{{Name: "only", Kind: "fake"}},
+		Handlers:     map[string]stagecommon.StageHandler{"only": nameEchoHandler()},
+		Runners:      map[string]stagecommon.StageRunner{"fake": runner},
 		BuildContext: basicContextFunc(),
 	}
 

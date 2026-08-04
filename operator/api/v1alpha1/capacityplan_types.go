@@ -13,23 +13,23 @@ import (
 // internal/controller/capacityplan_controller.go's reconciler doc
 // comment for the full honesty label.
 type CapacityPlanSpec struct {
-	ModelRef                CapacityPlanModelRef `json:"modelRef"`
-	GPUs                    int                  `json:"gpus,omitempty"`
-	GPUType                 string               `json:"gpuType,omitempty"`
-	GPUsPerReplica          int                  `json:"gpusPerReplica,omitempty"`
-	TimeSlicingConfig       string               `json:"timeSlicingConfig,omitempty"`
-	IsolationPolicy         string               `json:"isolationPolicy,omitempty"`
-	ContextLength           int                  `json:"contextLength,omitempty"`
-	Concurrency             int                  `json:"concurrency,omitempty"`
-	AllowTimeSlicing        bool                 `json:"allowTimeSlicing,omitempty"`
-	AllowMIG                bool                 `json:"allowMIG,omitempty"`
-	AdvisorEndpoint         string               `json:"advisorEndpoint,omitempty"`
-	AdvisorSecretName       string               `json:"advisorSecretName,omitempty"`
-	AdvisorTimeoutSeconds   int                  `json:"advisorTimeoutSeconds,omitempty"`
-	GPUOperatorNamespace    string               `json:"gpuOperatorNamespace,omitempty"`
-	ClusterPolicyName       string               `json:"clusterPolicyName,omitempty"`
-	TimeSlicingConfigMap    string               `json:"timeSlicingConfigMap,omitempty"`
-	MaxTimeSlices           int                  `json:"maxTimeSlices,omitempty"`
+	ModelRef              CapacityPlanModelRef `json:"modelRef"`
+	GPUs                  int                  `json:"gpus,omitempty"`
+	GPUType               string               `json:"gpuType,omitempty"`
+	GPUsPerReplica        int                  `json:"gpusPerReplica,omitempty"`
+	TimeSlicingConfig     string               `json:"timeSlicingConfig,omitempty"`
+	IsolationPolicy       string               `json:"isolationPolicy,omitempty"`
+	ContextLength         int                  `json:"contextLength,omitempty"`
+	Concurrency           int                  `json:"concurrency,omitempty"`
+	AllowTimeSlicing      bool                 `json:"allowTimeSlicing,omitempty"`
+	AllowMIG              bool                 `json:"allowMIG,omitempty"`
+	AdvisorEndpoint       string               `json:"advisorEndpoint,omitempty"`
+	AdvisorSecretName     string               `json:"advisorSecretName,omitempty"`
+	AdvisorTimeoutSeconds int                  `json:"advisorTimeoutSeconds,omitempty"`
+	GPUOperatorNamespace  string               `json:"gpuOperatorNamespace,omitempty"`
+	ClusterPolicyName     string               `json:"clusterPolicyName,omitempty"`
+	TimeSlicingConfigMap  string               `json:"timeSlicingConfigMap,omitempty"`
+	MaxTimeSlices         int                  `json:"maxTimeSlices,omitempty"`
 	// MaxGPUsPerRequest, when set (> 0), is a configured ceiling
 	// CapacityPlanReconciler compares its unclamped GPU recommendation
 	// against: if the recommendation would exceed this value,

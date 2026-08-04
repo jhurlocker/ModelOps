@@ -42,7 +42,7 @@ func TestMain(m *testing.M) {
 
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths: []string{
-			"../../config/crd/bases",   // our own CRDs (ModelRequest, CapacityPlan, ...)
+			"../../config/crd/bases",    // our own CRDs (ModelRequest, CapacityPlan, ...)
 			"../../config/crd/testdata", // vendored third-party CRDs (Tekton PipelineRun)
 		},
 		ErrorIfCRDPathMissing: true,

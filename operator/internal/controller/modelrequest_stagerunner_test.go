@@ -176,8 +176,8 @@ func TestModelRequest_FullLifecycle_FakeClientWithoutTektonScheme(t *testing.T) 
 				Name:       "mr-1",
 				Version:    "v1",
 			},
-			LifecycleProfile:  "profile-1",
-			ScanS3SecretName:  secretName,
+			LifecycleProfile:   "profile-1",
+			ScanS3SecretName:   secretName,
 			ResultS3SecretName: secretName,
 		},
 	}))

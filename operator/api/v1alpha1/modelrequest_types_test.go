@@ -122,8 +122,8 @@ func TestModelRequirements_WireFormatUnchanged_RoundTrip(t *testing.T) {
 // pointed check than the round-trip test: it asserts no field ends up
 // nested under a named sub-struct key (e.g. "gpuConfig") in the marshaled
 // output, which is exactly the mistake a non-anonymous embed (`GPUConfig
-// GPUConfig \`json:"gpuConfig,omitempty"\`` instead of an anonymous
-// `GPUConfig \`json:",inline"\``) would produce.
+// GPUConfig \`json:"gpuConfig,omitempty"\“ instead of an anonymous
+// `GPUConfig \`json:",inline"\“) would produce.
 func TestModelRequirements_WireFormatUnchanged_NoWrapperKeys(t *testing.T) {
 	var reqs ModelRequirements
 	require.NoError(t, json.Unmarshal([]byte(modelRequirementsGoldenJSON), &reqs))

@@ -113,6 +113,12 @@ promotion across namespaces → registration. Everything else below is
 a roadmap item — a planned placeholder, not a partially-built feature.
 No CRDs, controllers, or code exist yet for anything past intake.
 
+**What "promotion" means in this repo:** model release promotion
+(moving a validated model artifact through sandbox → staging →
+production) is implemented. AI application promotion (promoting a
+complete application stack with inference code, guardrails, and routing
+config) is a separate lifecycle stage, planned but not built.
+
 ```mermaid
 flowchart LR
     Intake["Model Intake<br/>(implemented)"]:::done

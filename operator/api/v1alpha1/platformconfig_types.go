@@ -5,12 +5,12 @@ import (
 )
 
 type PlatformConfigSpec struct {
-	ComplianceS3Bucket  string   `json:"complianceS3Bucket,omitempty"`
-	SecurityS3Bucket    string   `json:"securityS3Bucket,omitempty"`
+	ComplianceS3Bucket string `json:"complianceS3Bucket,omitempty"`
+	SecurityS3Bucket   string `json:"securityS3Bucket,omitempty"`
 
-	RegistryServer      string `json:"registryServer,omitempty"`
-	RegistryPort        string `json:"registryPort,omitempty"`
-	RegistryAuthor      string `json:"registryAuthor,omitempty"`
+	RegistryServer string `json:"registryServer,omitempty"`
+	RegistryPort   string `json:"registryPort,omitempty"`
+	RegistryAuthor string `json:"registryAuthor,omitempty"`
 
 	ComplianceScanImage     string   `json:"complianceScanImage,omitempty"`
 	ComplianceIgnoreUnfixed string   `json:"complianceIgnoreUnfixed,omitempty"`
@@ -39,15 +39,15 @@ type PlatformConfigSpec struct {
 	HardwareProfileName      string `json:"hardwareProfileName,omitempty"`
 	HardwareProfileNamespace string `json:"hardwareProfileNamespace,omitempty"`
 
-	EvalHubURL                     string  `json:"evalhubUrl,omitempty"`
-	ApprovalApiUrl                 string  `json:"approvalApiUrl,omitempty"`
-	ApprovalPollIntervalSeconds    int     `json:"approvalPollIntervalSeconds,omitempty"`
-	ApprovalTimeoutSeconds         int     `json:"approvalTimeoutSeconds,omitempty"`
-	BenchmarkProfile               string  `json:"benchmarkProfile,omitempty"`
-	BenchmarkRate                  float64 `json:"benchmarkRate,omitempty"`
-	BenchmarkMaxSeconds            int     `json:"benchmarkMaxSeconds,omitempty"`
-	BenchmarkMaxRequests           int     `json:"benchmarkMaxRequests,omitempty"`
-	BenchmarkTargetUrl             string  `json:"benchmarkTargetUrl,omitempty"`
+	EvalHubURL                  string  `json:"evalhubUrl,omitempty"`
+	ApprovalApiUrl              string  `json:"approvalApiUrl,omitempty"`
+	ApprovalPollIntervalSeconds int     `json:"approvalPollIntervalSeconds,omitempty"`
+	ApprovalTimeoutSeconds      int     `json:"approvalTimeoutSeconds,omitempty"`
+	BenchmarkProfile            string  `json:"benchmarkProfile,omitempty"`
+	BenchmarkRate               float64 `json:"benchmarkRate,omitempty"`
+	BenchmarkMaxSeconds         int     `json:"benchmarkMaxSeconds,omitempty"`
+	BenchmarkMaxRequests        int     `json:"benchmarkMaxRequests,omitempty"`
+	BenchmarkTargetUrl          string  `json:"benchmarkTargetUrl,omitempty"`
 
 	MaaSServingNS       string `json:"maasServingNs,omitempty"`
 	MaaSPolicyNS        string `json:"maasPolicyNs,omitempty"`
