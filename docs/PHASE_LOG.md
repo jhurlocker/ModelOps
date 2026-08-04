@@ -3109,3 +3109,445 @@ benchmarks" claim.
   no live remote-advisor-endpoint test was performed (this cluster's
   `advisor-endpoint` param is empty, so only the local heuristic path
   was exercised end-to-end).
+
+---
+
+## Phase 8 (docs/REVIEW_RESPONSE_PLAN.md) — Secret handling hardening
+
+**Commits:** `ef6aa6d` ("Phase 8: secret handling hardening - fix
+EvalHub secret bug, eliminate credential values from Tekton params")
+and `bd1a228` ("Phase 8 fix: guidellm-benchmark-task.yaml was missed in
+the initial pass") on `feat/model-request-controller`. Not a breaking
+API/CRD change -- no `_types.go` file touched, `make manifests
+generate` regenerated only `config/rbac/role.yaml` (the new
+`secrets: create;update;patch` grant).
+
+This phase went through an explicit design review first (per the
+user's request, same as Phase 0/4/5/6/7), covering two related,
+independently-verified defects named in `docs/REVIEW_RESPONSE_PLAN.md`:
+the EvalHub secret bug, and secret VALUES leaking into
+`PipelineRun.spec.params`. The approved design is what's implemented
+below; see the design-review conversation for the full rationale on
+each shape decision (why `resolveSecrets` still resolves values for
+validation but only propagates names, why the generated EvalHub token
+is wrapped in an owned ephemeral Secret rather than passed as a param,
+why `secretKeyRef` was chosen over Secret-typed workspaces).
+
+### What changed
+
+**The EvalHub secret bug** (`internal/controller/modelrequest_controller.go`):
+`resolveSecrets` previously read the EvalHub Secret's `"url"` key into
+`s.scanS3Endpoint` -- the wrong field entirely, unrelated to EvalHub --
+and never read `"token"` at all, unconditionally overwriting
+`s.evalhubToken` with a freshly generated `ServiceAccount` token
+regardless of whether the operator had configured one. Fixed: `url`
+now lands in a new `evalhubURL` field; an explicit `token` key, when
+present and non-empty, is honored by reusing the operator's own
+Secret's name; the generated-token fallback only runs when no explicit
+token was found.
+
+**Eliminating credential values from Tekton params** -- the design
+approved in review, implemented exactly as proposed:
+
+- **`internal/stagecommon/params.go`**: `Secrets` no longer carries any
+  credential VALUE field. It now carries only non-secret
+  endpoints (`EvalHubURL`, `ResultS3Endpoint`, `ScanS3Endpoint`) and
+  Secret NAME references (`EvalHubSecretName`, `HuggingFaceSecretName`,
+  `ResultS3SecretName`, `ScanS3SecretName`). `BuildCommonModelParams`
+  emits `evalhub-secret-name`/`huggingface-secret-name` (always
+  present, defaulting to the conventional names
+  `evalhub-credentials`/`huggingface-credentials` when unset -- see
+  "The empty-secretKeyRef-name gotcha" below) and
+  `result-s3-secret-name` (omitted when unset, since `resolveSecrets`'
+  fail-loud validation guarantees a real `ModelRequest` never reaches
+  this function without one) instead of `evalhub-token`/
+  `huggingface-token`/`s3-access-key-id`/`s3-secret-access-key`.
+- **`internal/stages/sandbox/handler.go`**: emits `scan-s3-secret-name`
+  instead of `scan-s3-access-key-id`/`scan-s3-secret-access-key`.
+  `internal/stages/promotion/handler.go` needed **no logic change** --
+  it never read `sc.Secrets.*` directly, only through
+  `BuildCommonModelParams`.
+- **`internal/stages/tekton/stagerunner.go` needed no change at all** --
+  `toTektonParams`/`buildPipelineRun` just copy whatever's in
+  `map[string]string` into `tektonv1.Params`; they have no opinion
+  about whether a value is a name or a credential. Confirms the
+  proposal's claim that this is a smaller-blast-radius Go change than
+  it might look, concentrated entirely in `resolveSecrets`,
+  `stagecommon.Secrets`/`BuildCommonModelParams`, and
+  `sandbox.Handler`.
+- **`resolveSecrets`** (`modelrequest_controller.go`): kept its exact
+  pre-Phase-8 shape of `Get`-then-validate for every `*SecretName`
+  field (still fails loudly on a missing Secret or missing
+  `accessKeyId`/`secretAccessKey` keys for scan/result S3, matching
+  Phase 1's contract byte-for-byte) -- the only change is that the
+  *return value* carries the Secret's own name instead of the values
+  read out of it. `resolvedSecrets` (the private struct) dropped
+  `evalhubToken`/`huggingfaceToken`/`scanS3AccessKey`/`scanS3SecretKey`/
+  `resultS3AccessKey`/`resultS3SecretKey` entirely; nothing in this
+  file ever holds a credential value past the local scope of the `if`
+  block that read it out of a `corev1.Secret.Data` map.
+- **`ensureEvalHubTokenSecret`** (new): when no operator-configured
+  EvalHub token exists, the freshly generated `TokenRequest` token is
+  upserted into an owned, ephemeral Secret named
+  `"<ModelRequest.Name>-evalhub-token"` (create-if-absent, refresh
+  `.Data["token"]` in place if it already exists -- mirroring the
+  `createIgnoringAlreadyExists` idempotency pattern already used
+  elsewhere in this file for other owned child objects, but as an
+  upsert rather than a create-or-ignore, since the token has a 24h TTL
+  and must be refreshed every reconcile). Owner-referenced to the
+  `ModelRequest` via `controllerutil.SetControllerReference`, same GC
+  story as every other child object this reconciler creates --
+  confirmed live (see "Sandbox cluster verification" below): deleting
+  the `ModelRequest` deleted this Secret automatically.
+- **RBAC**: `+kubebuilder:rbac:groups="",resources=secrets` gained
+  `create;update;patch` (previously `get;list;watch` only), narrowly
+  scoped per the user's explicit request -- the marker comment
+  explains this is for `ensureEvalHubTokenSecret`'s single, owned,
+  ephemeral, per-`ModelRequest` Secret specifically, not a general
+  secret-writing capability; every other `*SecretName` field stays
+  read-only. `gitops/components/operator/clusterrole.yaml` (the
+  hand-maintained copy ArgoCD actually deploys, per the Phase 1/5
+  precedent) updated in lockstep with the same explanatory comment.
+  `controller-gen` aggregated the new `secrets` verb set with the
+  pre-existing `serviceaccounts` rule (identical verbs) into one
+  combined rule in the generated `config/rbac/role.yaml` -- confirmed
+  this is normal `controller-gen` aggregation behavior, not a manual
+  edit gone wrong.
+
+### Task/Pipeline YAML changes (same commit, not a follow-up)
+
+Per the approved design's own reasoning (a value-carrying param with a
+hardcoded default silently wins the moment Go stops supplying a value
+-- exactly Phase 1's `minioadmin` bug, one layer downstream), the
+underlying Tekton definitions changed in the same commit as the Go
+code, across **9 files** (originally scoped as 8; see "A real bug
+caught only by live-cluster verification" below for the 9th):
+
+- **`sandbox-pipeline.yaml`, `promotion-pipeline.yaml`**: replaced
+  `scan-s3-access-key-id`/`scan-s3-secret-access-key`/
+  `s3-access-key-id`/`s3-secret-access-key`/`evalhub-token`/
+  `huggingface-token` Pipeline-level params (several with hardcoded
+  `minioadmin`/`minio` defaults -- see below) with
+  `scan-s3-secret-name`/`result-s3-secret-name`/`evalhub-secret-name`/
+  `huggingface-secret-name`, and stopped forwarding the removed params
+  into their Task invocations.
+- **`compliance-artifact-scan-task.yaml`, `security-scan-task.yaml`,
+  `deploy-model-task.yaml`, `guidellm-benchmark-task.yaml`,
+  `promote-and-benchmark-task.yaml`, `upload-guidellm-results-task.yaml`,
+  `upload-lm-eval-results-task.yaml`**: replaced their own
+  `s3-access-key-id`/`s3-secret-access-key`/`evalhub-token`/
+  `huggingface-token` params (several also with hardcoded
+  `minioadmin`/`minio`/`minio`/`test` defaults) with a single
+  `s3-secret-name` (S3-consuming Tasks) or `evalhub-secret-name`/
+  `huggingface-secret-name` (token-consuming Tasks) param, and changed
+  the corresponding step `env` entries from a literal `value:
+  $(params.xxx)` to `valueFrom.secretKeyRef.name: $(params.xxx-secret-name)`
+  -- exactly mirroring the pre-existing `advisor-secret-name`/
+  `ADVISOR_API_KEY` pattern already live in `gpu-advisor-task.yaml`
+  (the concrete precedent the design review's proposal was built on).
+  S3 credentials (always required, per `resolveSecrets`' fail-loud
+  validation) use a plain `secretKeyRef` with no `optional: true`; the
+  two genuinely-optional credentials (EvalHub token, HuggingFace token)
+  set `optional: true`.
+- **`promote-and-benchmark-task.yaml`, `upload-lm-eval-results-task.yaml`**
+  are not on the live path (their referencing Pipeline,
+  `model-intake-pipeline.yaml`, is dead/orphaned -- confirmed unreferenced
+  by any `WorkflowRef`/`ProviderConfigRef` anywhere in this repo) but
+  were fixed anyway, per explicit user instruction to fold this into
+  the same commit rather than leave latent hardcoded-credential-shaped
+  defaults sitting in GitOps-deployed-but-unused `Task` CRs.
+  `model-intake-pipeline.yaml` and `model-intake-pipelinerun.yaml`
+  themselves (the dead Pipeline and a static sample manifest) still
+  contain the old pattern -- deliberately out of scope, same reasoning
+  as the already-identified dead `app.py` in
+  `docs/REVIEW_RESPONSE_PLAN.md` Phase 10 -- flagged as a known
+  follow-up below, not silently ignored.
+
+### The empty-`secretKeyRef`-name gotcha
+
+A real Kubernetes API-validation constraint shaped this design, caught
+during the design-review discussion before any code was written:
+`env[].valueFrom.secretKeyRef.name` must be a non-empty string even
+when `optional: true` -- `optional` only tolerates the *referenced
+Secret* not existing, not an empty *name* field, which the API server
+rejects outright at Pod admission. Since HuggingFace/EvalHub tokens are
+genuinely optional (unlike S3 credentials, which `resolveSecrets`
+already guarantees non-empty), `BuildCommonModelParams` always emits
+*some* name for these two -- falling back to the conventional
+`evalhub-credentials`/`huggingface-credentials` placeholder when
+unconfigured -- rather than omitting the param. A pod referencing a
+nonexistent Secret by a valid name, with `optional: true`, is
+completely harmless (confirmed live -- see below); an empty name is
+not tolerated at all. This is exactly the existing, working shape of
+`advisor-secret-name`'s default (`gpu-advisor-credentials`), just
+applied deliberately here instead of being an accident of `AddParam`'s
+ordinary empty-value guard.
+
+### TDD: tests written first, confirmed failing, then implemented
+
+Per the standing principle, every change below started as a failing
+test against the *old* code:
+
+- `internal/stagecommon/params_test.go`: rewrote the full-fixture and
+  defaults-applied tests to the new `Secrets` shape and new expected
+  param names *before* touching `params.go` -- confirmed `go vet`
+  failure (`unknown field EvalHubSecretName`) first. Added explicit
+  `require.NotContains` assertions that `evalhub-token`/
+  `huggingface-token`/`s3-access-key-id`/`s3-secret-access-key` never
+  appear in `BuildCommonModelParams`' output at all -- the decisive
+  per-function assertion, not just a renamed golden value.
+- `internal/stages/sandbox/handler_test.go`,
+  `internal/stages/promotion/handler_test.go`: same treatment,
+  mechanical rename of the fixture's `Secrets` literal plus the same
+  `NotContains` assertions added to each package's full-fixture test.
+- `internal/controller/modelrequest_controller_test.go`: 7 new tests
+  for the EvalHub bug fix and the HuggingFace name-only contract,
+  written against the not-yet-existing `evalhubURL`/`evalhubSecretName`/
+  `huggingfaceSecretName` fields and the not-yet-existing
+  `ensureEvalHubTokenSecret` (confirmed failing:
+  `unknown field EvalHubSecretName in struct literal` at `go vet`
+  time). New `newSecret`/`newPipelineServiceAccount` test helpers in
+  `testutil_test.go` (the latter needed because
+  `generateServiceAccountToken`'s `TokenRequest` requires the
+  `"pipeline"` `ServiceAccount` to actually exist server-side, normally
+  provisioned by `ensurePromotionNamespaceRBAC` during a full
+  `Reconcile` -- tests calling `resolveSecrets` directly bypass that,
+  so they provision it themselves).
+- `internal/controller/modelrequest_credentials_test.go` (new file):
+  the canary-value test, written and confirmed failing (`undefined:
+  resolveSecrets` fields, then real assertion failures against the
+  unfixed code) before the fix landed.
+- `internal/stages/tekton/pipeline_yaml_credentials_test.go` (new
+  file): the static YAML safety net, written and confirmed failing
+  against the *original* Task/Pipeline YAML (real failure output
+  showing `sandbox-pipeline.yaml` containing `default: "minioadmin"`
+  and `name: s3-access-key-id`) before any YAML file was edited.
+
+### The canary-value test: the decisive evidence, per the design review
+
+`TestModelRequest_SandboxAndPromotionPipelineRuns_NeverContainRawCredentialValues`
+(`internal/controller/modelrequest_credentials_test.go`) seeds four
+Secrets (`canary-scan-s3`, `canary-result-s3`, `canary-evalhub`,
+`canary-hf`) with long, distinctive, random-looking values that could
+never collide with a legitimate default, drives a `ModelRequest`
+through `Reconcile` to create both the sandbox and promotion
+`PipelineRun`s, and asserts for every param in both objects: the value
+is never *equal to* any canary value (the direct leak) and never
+*contains* one as a substring (a defensive check against
+concatenation). Also asserts the `*-secret-name` params **are**
+present with the correct Secret names, and that `evalhub-url`'s value
+(the Secret's own URL) wins over `PlatformConfig`'s default -- so the
+test fails loudly if the fix regresses to "just delete the param"
+instead of "replace it with a reference." This is the test envtest can
+actually run that most directly answers "is the leak closed," per the
+design review's own framing.
+
+### A real bug caught only by live-cluster verification, not envtest
+
+Exactly the category of gap this repo's own guiding principles warn
+about (Phase 1's RBAC-escalation incident, Phase 6's
+`PromotionPipelineRunName` bug): **`guidellm-benchmark-task.yaml` was
+missed entirely in the first implementation pass.** The original design
+proposal's grep for `sc.Secrets.*` usage in Go correctly found the six
+Tasks Go code's *param names* pointed at, but `guidellm-benchmark-task.yaml`
+is invoked by `promotion-pipeline.yaml`'s `benchmark` step using the
+*same* `evalhub-url`/`evalhub-token` forwarding pattern as
+`security-scan` -- and nothing about the Go-side investigation would
+surface a Task file that was never directly named in `internal/stages/*`.
+`envtest` could not have caught this either: the fake client has no
+real Tekton reconciler and never validates a `PipelineRun`'s params
+against its referenced `Pipeline`/`Task`'s actual declared param
+schema -- that validation is a genuine Tekton-controller-side check
+this repo's test suite has no way to exercise short of a real cluster.
+A real `ModelRequest` (`phase8-verify`, `sandbox` namespace) reached
+`promotionRunning` cleanly through the *entire* sandbox pipeline (proving
+every other file's fix correct) and then failed outright with `[User
+error] Validation failed for pipelinerun ... invalid input params for
+task guidellm-benchmark: missing values for these params which have no
+default values: [evalhub-token]` -- because `promotion-pipeline.yaml`'s
+`benchmark` step had already stopped supplying `evalhub-token` (renamed
+to `evalhub-secret-name`), but `guidellm-benchmark-task.yaml` itself
+still declared `evalhub-token` as a required, no-default Task param.
+Fixed identically to its six siblings (`bd1a228`); added it to
+`pipeline_yaml_credentials_test.go`'s `affectedPipelineAndTaskFiles`
+list with a doc comment explaining exactly how it was missed, so the
+static safety net now covers all 9 files (2 Pipelines + 7 Tasks) and a
+10th missed file would fail the same two tests immediately.
+
+### Sandbox cluster verification
+
+This phase needed real cluster verification beyond `envtest` for
+exactly the reasons anticipated in the design review: `envtest` cannot
+exercise Tekton's own `secretKeyRef` substitution/resolution, and
+cannot confirm a Task actually *authenticates successfully* using a
+`secretKeyRef`-sourced credential at runtime (only that the Go code
+built the right map, or that a fake client accepted an object).
+
+- Pushed both commits (`ef6aa6d`, then the `guidellm-benchmark-task.yaml`
+  fix `bd1a228`) to `feat/model-request-controller`; hard-refreshed
+  `Application/modelops-operator` and `Application/modelops-pipelines`
+  (branch-tracked, auto-sync + self-heal) after each push, confirmed
+  `Synced`/`Healthy` at the respective revision, and confirmed the live
+  `ClusterRole`/`Task`/`Pipeline` objects matched the committed YAML
+  (`secrets` verb list, `s3-secret-name`/`evalhub-secret-name` params,
+  `secretKeyRef` step definitions) before testing against them.
+- Rebuilt and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image (same pattern as every prior phase); `kubectl rollout restart`
+  on the `modelops-operator` `Deployment`; manager started cleanly, all
+  three `EventSource`s registered without error.
+- **Passive confirmation before any dedicated test**: the moment the
+  new image started reconciling the sandbox namespace's pre-existing
+  leftover `ModelRequest`s (disposable artifacts from earlier sessions,
+  per Phase 0/1's handoff notes), it immediately began creating real
+  `<name>-evalhub-token` Secrets for every one of them (confirmed via
+  `oc get secrets -n sandbox` showing ~20 freshly-created Secrets,
+  each holding a real JWT-shaped token under `.data.token`) -- since
+  none of those requests had an explicit `EvalHubSecretName` configured,
+  this is the generated-token fallback path firing for real, unprompted,
+  proving the ephemeral-Secret upsert works against genuinely
+  pre-existing production-shaped state, not just a purpose-built test
+  fixture.
+- **The decisive test**: created `phase8-verify` (`sandbox` namespace,
+  `standard-generative-onboarding` profile), pointing
+  `scanS3SecretName`/`resultS3SecretName` at two *canary-named* Secrets
+  (`phase8-canary-scan-s3`/`phase8-canary-result-s3`) holding the
+  **real, working** `accessKeyId`/`secretAccessKey` values copied from
+  the cluster's existing `scan-s3-credentials`/`result-s3-credentials`
+  Secrets under a deliberately distinct name -- so the test proves both
+  "the Secret is resolved by the *name* the reconciler actually chose"
+  (not a coincidence of two paths agreeing on a shared default name)
+  and "real S3/EvalHub authentication genuinely succeeds using a
+  `secretKeyRef`-sourced credential," not just that a plausible-looking
+  string reached a param.
+  - Confirmed via `oc get pipelinerun ... -o json`: the sandbox
+    `PipelineRun`'s params included `scan-s3-secret-name:
+    phase8-canary-scan-s3`, `result-s3-secret-name:
+    phase8-canary-result-s3`, `evalhub-secret-name:
+    phase8-verify-evalhub-token` (the generated ephemeral Secret,
+    confirming the fallback path), `huggingface-secret-name:
+    huggingface-credentials` (the unconfigured-default placeholder) --
+    and a direct string search of the full `PipelineRun` JSON for the
+    real, known `scan-s3-credentials` Secret's actual
+    `accessKeyId`/`secretAccessKey` values (base64-decoded from the
+    live cluster) found **zero matches**, live, on the real object
+    Tekton executed against -- the same assertion the envtest canary
+    test makes, now confirmed against genuine cluster state rather
+    than a fixture.
+  - `compliance-artifact-scan`'s `s3-upload` step **genuinely
+    authenticated and uploaded** 5 real objects to the live MinIO
+    (`Uploaded compliance-artifact-sandbox/trivy-report.json ->
+    s3://compliance-artifact-results/...`, etc.) using credentials
+    resolved via `secretKeyRef.name: $(params.scan-s3-secret-name)` =
+    `phase8-canary-scan-s3` -- real authentication success, not a
+    structural check.
+  - `security-scan`'s garak job **genuinely submitted to and completed
+    against the real EvalHub API** (`Submitting garak job ... to
+    EvalHub`, a real job ID, successful polling to completion) using
+    `EVALHUB_TOKEN` resolved via `secretKeyRef.name:
+    $(params.evalhub-secret-name)` = the generated ephemeral Secret --
+    an unrelated, pre-existing SSL-cert-trust issue in that
+    container's *own* S3-report-upload code path (`certificate verify
+    failed`) surfaced separately and is flagged as out-of-scope, not a
+    regression from this phase (the actual credential-resolution
+    concern this phase touches -- the EvalHub bearer token -- worked
+    correctly; a 401/403 would have failed job *submission*, not a
+    downstream unrelated TLS handshake).
+  - After the `guidellm-benchmark-task.yaml` fix and a fresh
+    `phase8-verify`, the **entire end-to-end flow reached
+    `Status.Phase == "Succeeded"` legitimately** (not manually flipped,
+    unlike every prior phase's verification pattern -- the whole
+    sandbox→promotion sequence ran for real): `benchmark` (promotion's
+    GuideLLM-via-EvalHub step) again showed a real job submitted and
+    completed; `upload-guide-llm-results` genuinely uploaded 3 objects
+    to S3 using `result-s3-secret-name: phase8-canary-result-s3`;
+    `deploy-model` (both sandbox and promotion invocations) succeeded
+    with `HF_TOKEN` sourced from a `secretKeyRef` pointing at
+    `huggingface-credentials`, a Secret confirmed **not to exist** in
+    this namespace (`oc get secret huggingface-credentials` ->
+    `NotFound`) -- decisive proof the `optional: true` +
+    non-empty-placeholder-name design for genuinely-unconfigured
+    credentials works exactly as intended against real Kubernetes API
+    validation, not just in theory.
+  - Deleted `phase8-verify`; confirmed both its `PipelineRun`s, its
+    `CapacityPlan`, **and** `phase8-verify-evalhub-token` (the
+    ephemeral Secret) were all garbage-collected via owner references
+    -- the new Secret type follows the exact same cleanup story as
+    every other child object this reconciler creates. Deleted the two
+    canary Secrets afterward. `Application/modelops-operator`/
+    `Application/modelops-pipelines` remained `Synced`/`Healthy`
+    throughout.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all five packages under
+`internal/stages/*` (`sandbox`, `promotion`, `capacityplanning`,
+`tekton`, `noop`): none imports another (all five commands produced no
+matching output). This phase touched `internal/stages/sandbox` (params
+only) and `internal/stages/tekton` (new test file only, no production
+code) -- neither gained a new import of any kind.
+
+### Manifest regeneration
+
+No `_types.go` file was touched. `make manifests generate`
+(controller-gen v0.16.5) run; `git diff` confirmed the only change is
+`config/rbac/role.yaml`'s `secrets` rule gaining `create;update;patch`
+(aggregated with the pre-existing `serviceaccounts` rule, since both
+now share an identical verb set -- normal `controller-gen` behavior,
+not a manual edit). `zz_generated.deepcopy.go`: no diff, as expected.
+
+### Test coverage added
+
+- `internal/stagecommon/params_test.go`: both existing tests rewritten
+  to the new `Secrets` shape/param names, plus new `NotContains`
+  assertions for the four removed credential-value param names.
+- `internal/stages/sandbox/handler_test.go`,
+  `internal/stages/promotion/handler_test.go`: fixture literal renamed;
+  same `NotContains` assertions added to each package's full-fixture
+  test.
+- `internal/controller/modelrequest_controller_test.go`: 7 new tests
+  (`TestResolveSecrets_EvalHubSecretHasURLAndToken_UsesTokenVerbatim_NeverGeneratesOrOverwrites`,
+  `TestResolveSecrets_EvalHubSecretHasURLButNoToken_GeneratesAndPersistsEphemeralSecret`,
+  `TestResolveSecrets_NoEvalHubSecretConfigured_GeneratesAndPersistsEphemeralSecret`,
+  `TestResolveSecrets_EvalHubEphemeralSecret_UpsertIsIdempotentAcrossReconciles`,
+  `TestResolveSecrets_HuggingFaceSecretName_ReturnsNameNotValue`,
+  `TestResolveSecrets_NoHuggingFaceSecretNameConfigured_LeavesItEmpty`,
+  `TestResolveSecrets_MissingHuggingFaceSecret_ReturnsError`), plus the
+  two pre-existing `resolveSecrets` tests mechanically updated to the
+  new name-only contract. New `newSecret`/`newPipelineServiceAccount`
+  helpers in `testutil_test.go`.
+- `internal/controller/modelrequest_credentials_test.go` (new file, 1
+  test): the canary-value decisive-evidence test described above.
+- `internal/stages/tekton/pipeline_yaml_credentials_test.go` (new file,
+  4 tests): the static safety net against reintroducing a
+  value-carrying credential param or a hardcoded credential default in
+  any of the 9 affected Task/Pipeline files, plus a check that the
+  replacement `*-secret-name` params actually exist and that credential-
+  consuming Tasks reference `secretKeyRef` at all.
+- Total suite: **136 tests passing** (124 at the end of Phase 7 + 12
+  new: 7 in `internal/controller`, 1 canary test, 4 in
+  `internal/stages/tekton`), `go build ./...`/`go vet ./...` clean.
+
+### Known follow-up NOT done in this phase
+
+- `model-intake-pipeline.yaml` and `model-intake-pipelinerun.yaml` (the
+  dead/orphaned Pipeline and a static sample manifest -- confirmed
+  unreferenced by any live `WorkflowRef`/`ProviderConfigRef`) still
+  contain the pre-Phase-8 value-carrying credential params and
+  `minioadmin`/`minio` defaults. Deliberately out of scope, same
+  reasoning as the already-identified dead `app.py` in
+  `docs/REVIEW_RESPONSE_PLAN.md` Phase 10 -- worth folding into that
+  same cleanup pass rather than a dedicated fix here.
+- The SA-projected-token alternative for the EvalHub credential (have
+  `security-scan` read its own `pipeline` ServiceAccount's
+  automatically-projected token file directly, eliminating the
+  `TokenRequest`/ephemeral-Secret/RBAC-grant machinery entirely) was
+  added as backlog item 10 under `docs/REFACTOR_PLAN.md` Phase 7, not
+  built this phase -- it requires a Task-*script* change (source the
+  token from a file instead of an env var), a larger blast radius than
+  this phase's plumbing-focused scope.
+- The unrelated SSL-certificate-trust issue in `security-scanner`'s own
+  S3-report-upload code path (surfaced during live verification, see
+  above) was not investigated or fixed -- it predates this phase and
+  is orthogonal to the credential-reference design this phase
+  implements (the actual EvalHub bearer-token authentication this
+  phase touches worked correctly).
