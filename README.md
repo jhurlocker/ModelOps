@@ -141,26 +141,22 @@ problem `IntakeProviderConfig` solves for pipeline execution — but the
 reconcile loop around it is a different shape from the stage walker.
 
 ```mermaid
-flowchart LR
-    Data["Data Intake /<br/>Curation"]:::planned
+fflowchart LR
+    Data["Data Intake /<br/>Curation<br/>(optional, may happen first)"]:::planned
+    Finetune["Fine-tuning /<br/>Training<br/>(optional, may happen first)"]:::planned
     Intake["Model Intake<br/>(implemented)"]:::done
     AppDev["AI Application<br/>Development"]:::planned
-    Finetune["Fine-tuning /<br/>Training"]:::planned
     AppPromo["AI Application<br/>Promotion"]:::planned
     Retire["Retirement /<br/>Decommissioning"]:::planned
-    Monitor["Monitoring<br/>(models & applications)<br/>continuous — not sequential"]:::monitoring
+    Monitor["Monitoring<br/>(continuous, per deployed<br/>model or application)"]:::monitoring
 
-    Data --> Intake
-    Data -.also feeds.-> Finetune
-    Intake --> AppDev
-    AppDev --> Finetune
-    Finetune --> AppPromo
-    Intake -.can promote directly.-> AppPromo
-    AppPromo --> Retire
+    Data -.may feed.-> Finetune
+    Data -.may feed.-> Intake
+    Finetune -.may feed.-> Intake
+    Intake ==> AppDev ==> AppPromo ==> Retire
 
-    Intake -.watches.-> Monitor
-    AppPromo -.watches.-> Monitor
-    Monitor -.drift / alerts can trigger.-> Retire
+    Intake -.creates.-> Monitor
+    AppPromo -.creates.-> Monitor
 
     classDef done fill:#2f9e44,stroke:#2f9e44,color:#ffffff
     classDef planned fill:#f1f3f5,stroke:#adb5bd,stroke-dasharray: 5 5,color:#868e96
