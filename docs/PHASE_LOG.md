@@ -3925,3 +3925,203 @@ branch-tracked ArgoCD `Application/modelops-operator`:
   deletion, but these may have archival/documentation value the
   dead monolith did not; flagged for a separate decision rather than
   deleted without discussion.
+
+---
+
+## Phase 9 — Permanent fix for EvalHub SSL trust failure (CA ConfigMap mount)
+
+**Commit:** `b683088` on `feat/model-request-controller` —
+"Phase 9: fix EvalHub SSL trust failure by mounting
+operator-provisioned CA ConfigMap". No CRD/API change — YAML-only
+Task changes plus a static safety-net Go test.
+
+This phase directly followed from investigation on the live cluster
+(see the investigation preceding this log entry for the full
+discovery process), not from `REFACTOR_PLAN.md` or
+`REVIEW_RESPONSE_PLAN.md`.
+
+### Root cause
+
+`security-scan-task.yaml` and `guidellm-benchmark-task.yaml` both set
+`REQUESTS_CA_BUNDLE=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt`
+— a path never populated by anything. The TrustyAI Operator provisions a
+real service CA ConfigMap (`default-evalhub-service-ca`, key
+`service-ca.crt`, populated via OpenShift's
+`service.beta.openshift.io/inject-cabundle` annotation) in any namespace
+labeled `evalhub.trustyai.opendatahub.io/tenant`. The `sandbox` namespace
+already has that label from the gitops `lifecycleprofile.yaml` and
+the ConfigMap was confirmed present on the live cluster.
+
+The error, confirmed from a real failed TaskRun
+(`model-intake-ccd61c241c-sandbox-security-scan`):
+```
+ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED]
+certificate verify failed: unable to get local issuer certificate
+```
+
+### What changed
+
+**3 Task YAML files** (all in `model_onboarding_pipeline/model-intake-pipeline/pipeline/`):
+
+- **`security-scan-task.yaml`**: added `volumes:` section with
+  `evalhub-service-ca` ConfigMap referencing `default-evalhub-service-ca`;
+  added `volumeMounts:` in the `security-scan` step at `/etc/evalhub-ca`;
+  changed `REQUESTS_CA_BUNDLE` from the broken path to
+  `/etc/evalhub-ca/service-ca.crt`.
+
+- **`guidellm-benchmark-task.yaml`**: identical treatment
+  (`run-evalhub-guidellm` step).
+
+- **`promote-and-benchmark-task.yaml`** (dead/orphaned Task, not
+  referenced by any live `WorkflowRef`/`ProviderConfigRef` — same as
+  Phase 8's decision to fix it anyway for defense in depth): same
+  volume/volumeMount, but uses
+  `SSL_CERT_FILE=/etc/evalhub-ca/service-ca.crt` because the
+  inline Python script uses `urllib.request.urlopen()` rather than the
+  `requests` library (which reads `REQUESTS_CA_BUNDLE`).
+
+Each file also gained a doc comment noting the asynchronous
+`inject-cabundle` race window (a PipelineRun executed immediately
+after a namespace is first labeled could race the injection; not
+engineered around for this phase, just documented).
+
+**No change to `gpu-advisor-task.yaml`**: its `ADVISOR_ENDPOINT` is an
+external RunPod-hosted endpoint with a public CA — system CA bundle
+(`/etc/ssl/certs/ca-bundle.crt`) is correct.
+
+**No change for `id` vs `benchmark_id` or hyphen/underscore naming**:
+confirmed against the live EvalHub API's `/api/v1/evaluations/providers`
+response that this codebase's actual payload fields match the API
+(`"id"` for benchmarks, `"provider_id"` for garak/guidellm — neither
+has hyphen/underscore ambiguity). The `lm_evaluation_harness` (API)
+vs `lm-evaluation-harness` (CR) mismatch is a pre-existing,
+version-specific convention for a provider this codebase never uses.
+
+### Static safety-net test
+
+`operator/internal/stages/tekton/pipeline_yaml_ca_test.go` (5 tests,
+same pattern as Phase 8's `pipeline_yaml_credentials_test.go`):
+
+- `TestPipelineYAML_EvalHubTasks_MountCAConfigMapVolume` — every
+  EvalHub-calling Task declares the `evalhub-service-ca` configMap
+  volume referencing `default-evalhub-service-ca`.
+- `TestPipelineYAML_EvalHubTasks_MountVolumeAtExpectedPath` — every
+  EvalHub-calling Task step mounts it at `/etc/evalhub-ca`.
+- `TestPipelineYAML_EvalHubTasks_UseCorrectCABundle` — every
+  EvalHub-calling Task sets the CA bundle env var to
+  `/etc/evalhub-ca/service-ca.crt` (either `REQUESTS_CA_BUNDLE`
+  or `SSL_CERT_FILE`), and never to the old broken path.
+- `TestPipelineYAML_NonEvalHubTasks_NoBrokenCABundlePath` —
+  `gpu-advisor-task.yaml` does not carry the old broken path.
+- `TestPipelineYAML_AllEvaluHubCallingFilesListed` — any Task with
+  an `evalhub-url` param that is missing from `evalHubTaskFiles`
+  fails the test immediately (this is what caught
+  `promote-and-benchmark-task.yaml` being missed).
+
+### Sandbox cluster verification
+
+- Built and pushed a new `quay.io/jhurlocker/modelops-operator:latest`
+  image from this phase's code (same pattern as every prior phase).
+- Pushed `b683088` to `feat/model-request-controller`; hard-refreshed
+  `Application/modelops-operator` and `Application/modelops-pipelines`
+  (both branch-tracked, auto-sync + self-heal), confirmed
+  `Synced`/`Healthy` at `b683088`. Confirmed the live `Task` objects
+  carry the new `volumes:` section before testing against them.
+- **Pre-fix failing evidence preserved**: the
+  `model-intake-ccd61c241c-sandbox-security-scan` TaskRun
+  (`StepFailed`, SSL cert error) remained on the cluster during
+  verification, confirming the bug was real and reproducible before
+  the fix.
+- Created 3 consecutive disposable `ModelRequest`s
+  (`ssl-fix-alpha`/`beta`/`gamma`, `sandbox` namespace,
+  `standard-generative-onboarding` profile, model names deliberately
+  kept to pure lower-case letters to avoid an unrelated
+  InferenceService name-validation collision encountered during
+  testing). Confirmed:
+  - **ssl-fix-alpha's sandbox security-scan `Succeeded`**: advanced
+    autonomously to `promotionRunning`.
+  - **ssl-fix-beta's sandbox security-scan `Succeeded`**: CA volume
+    mountPath confirmed at `/etc/evalhub-ca` in the pod spec; the
+    `security-scan` step logs showed `"Garak job submitted"`, real
+    job polling to completion, and `"Garak gate passed"` — the exact
+    EvalHub HTTPS flow that failed with SSL pre-fix now working.
+    Advanced autonomously to `promotionRunning`.
+  - A separate, pre-existing S3-upload SSL warning in the
+    security-scanner's own S3-report-upload code path (against a
+    MinIO route, not EvalHub) surfaced as a `WARN` — confirmed
+    non-fatal (the scan gate passed regardless) and orthogonal to
+    this phase's EvalHub CA fix.
+- All 3 disposable `ModelRequest`s, their `CapacityPlan`s,
+  `PipelineRun`s, and `*-evalhub-token` Secrets deleted afterward;
+  auto-garbage-collected via owner references. `Application/
+  modelops-operator` and `Application/modelops-pipelines` remained
+  `Synced`/`Healthy` throughout.
+
+### Test coverage added
+
+- `operator/internal/stages/tekton/pipeline_yaml_ca_test.go`: 5 new
+  tests (see above). Total suite: 141 tests (136 at end of Phase 8
+  + 5 new), `go build ./...`/`go vet ./...` clean.
+
+### Known follow-up NOT done in this phase
+
+- The asynchronous `inject-cabundle` race window documented in each
+  fixed Task's description (a PipelineRun executed immediately after
+  a namespace is first labeled could race the ConfigMap's CA bundle
+  injection) was deliberately not engineered around — the sandbox
+  namespace has been labeled for 6d+ and the race does not apply.
+  Flagged for a future phase if dynamic namespace creation becomes
+  a requirement.
+- The separate SSL trust issue for the security-scanner's own S3
+  upload against the MinIO route (surfaced as a non-fatal `WARN`
+  during verification) was not investigated — it predates this phase,
+  is orthogonal to EvalHub CA trust, and is harmless (the scan gate
+  passes on EvalHub results alone; S3 upload is archival).
+
+### Phase 9 follow-up — root-cause correction (commit `070fca5`)
+
+The initial Task YAML fix (mounting `default-evalhub-service-ca`
+ConfigMap and setting `REQUESTS_CA_BUNDLE`) was **correct but
+insufficient on its own**. A request submitted through the UI
+immediately after the Task fix still failed with the same SSL error.
+
+**Corrected root cause**:
+
+- The `evalhub-credentials` Secret (`gitops/components/runtime-config/
+  secrets.yaml`) had its `url` key set to the EvalHub OpenShift route
+  address (`https://minio-modelops-storage.apps.ocp...`).
+- The route uses a **ZeroSSL RSA DV SSL CA 2** certificate, which is
+  a public CA **not present** in the UBI9 `ca-certificates` bundle
+  (146 certs) or Python `certifi` (121 certs) in the `security-scanner`
+  container image.
+- The `default-evalhub-service-ca` ConfigMap (which the Task YAML fix
+  mounts) contains only the **OpenShift service serving signer** CA —
+  valid for `*.svc.cluster.local` addresses but worthless for route
+  addresses using public CAs.
+- The controller code (`stagecommon.params.go`) prefers the Secret's
+  `url` value over the PlatformConfig's `evalhubUrl`, so the route
+  address from the Secret always won regardless of the
+  PlatformConfig's correct service address.
+
+**Two-part fix**:
+
+1. **Task YAML** (commit `b683088`): mount `default-evalhub-service-ca`
+   ConfigMap at `/etc/evalhub-ca` and set `REQUESTS_CA_BUNDLE` to the
+   mounted service CA file. This is necessary for the service address
+   to work — the service CA is not in the container's default trust
+   store.
+
+2. **Gitops Secret** (commit `070fca5`): change `evalhub-credentials`
+   Secret's `url` value from the route address to the cluster-internal
+   service address (`https://default-evalhub.redhat-ods-applications.
+   svc.cluster.local:8443`), matching the PlatformConfig's own default.
+   This ensures the Task YAML's mounted service CA can validate the
+   connection.
+
+**Live verification**: a disposable test `ModelRequest`
+(`ssl-verify-svc`) confirmed the fix end-to-end:
+`evalhub-url=https://default-evalhub.redhat-ods-applications.svc.cluster.local:8443`,
+security-scan `Succeeded` (`"Garak job completed"`, `"Garak gate
+passed"`), full pipeline advanced from sandbox → promotion.
+
+---

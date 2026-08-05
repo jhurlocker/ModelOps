@@ -116,34 +116,66 @@ No CRDs, controllers, or code exist yet for anything past intake.
 **What "promotion" means in this repo:** model release promotion
 (moving a validated model artifact through sandbox → staging →
 production) is implemented. AI application promotion (promoting a
-complete application stack with inference code, guardrails, and routing
-config) is a separate lifecycle stage, planned but not built.
+complete application stack — inference code, guardrails, routing
+config — independent of any single model's promotion cycle) is a
+separate, planned lifecycle stage below.
+
+**A note on guardrails:** guardrails aren't listed as their own stage.
+Guardrail *policy definition* is scoped under AI application
+development (it's part of what you build); guardrail *enforcement* is
+a live, runtime concern that AI application promotion ships and
+monitoring observes. Splitting it this way avoids a stage that's
+really a cross-cutting concern pretending to be a step in a sequence.
+
+**A note on monitoring's shape:** unlike every other stage below,
+monitoring has no terminal state — it doesn't run once and finish, it
+runs continuously for as long as a model or application is deployed.
+It won't be built as another entry in a `ModelRequest`-style ordered
+stage list; it needs its own CRD with a standard continuously-
+reconciled shape (spec: what to watch: status: current drift/alerts,
+refreshed on every reconcile, never `Succeeded`), addressed by model
+identity rather than scoped to any single onboarding or promotion
+request. The pluggable-provider pattern still applies here — "how do
+we actually compute drift" is the same kind of swappable-backend
+problem `IntakeProviderConfig` solves for pipeline execution — but the
+reconcile loop around it is a different shape from the stage walker.
 
 ```mermaid
 flowchart LR
+    Data["Data Intake /<br/>Curation"]:::planned
     Intake["Model Intake<br/>(implemented)"]:::done
-    Finetune["Fine-tuning /<br/>Retraining"]:::planned
-    Guardrails["Guardrails<br/>(runtime policy)"]:::planned
-    Monitoring["Production Monitoring<br/>& Drift Detection"]:::planned
-    Redeploy["Redeployment /<br/>Rollback"]:::planned
-    Testing["Testing & Evaluation<br/>(ongoing)"]:::planned
+    AppDev["AI Application<br/>Development"]:::planned
+    Finetune["Fine-tuning /<br/>Training"]:::planned
+    AppPromo["AI Application<br/>Promotion"]:::planned
     Retire["Retirement /<br/>Decommissioning"]:::planned
+    Monitor["Monitoring<br/>(models & applications)<br/>continuous — not sequential"]:::monitoring
 
-    Intake --> Finetune --> Guardrails --> Monitoring --> Redeploy --> Testing --> Retire
+    Data --> Intake
+    Data -.also feeds.-> Finetune
+    Intake --> AppDev
+    AppDev --> Finetune
+    Finetune --> AppPromo
+    Intake -.can promote directly.-> AppPromo
+    AppPromo --> Retire
+
+    Intake -.watches.-> Monitor
+    AppPromo -.watches.-> Monitor
+    Monitor -.drift / alerts can trigger.-> Retire
 
     classDef done fill:#2f9e44,stroke:#2f9e44,color:#ffffff
     classDef planned fill:#f1f3f5,stroke:#adb5bd,stroke-dasharray: 5 5,color:#868e96
+    classDef monitoring fill:#f1f3f5,stroke:#4263eb,stroke-dasharray: 2 2,color:#4263eb
 ```
 
 | Stage | Status | What exists today |
 |---|---|---|
+| Data intake/curation | Planned | No CRD, no controller, no code. Envisioned as a peer to model intake — a `DataRequest`-shaped approval-gated pipeline (PII scan, license/provenance check, quality validation, human sign-off), reusing the same `StageRunner`/`ProviderConfig`/evidence-chain machinery already built for models |
 | **Model intake** (capacity planning → sandbox validation → approval-gated promotion → registration) | **Implemented** | `ModelRequest`, `ModelLifecycleProfile`, `IntakeProviderConfig`, `PlatformConfig`, `CapacityPlan` CRDs; a working reconciler, stage walker, and Tekton provider adapter, all with test coverage (see `docs/PHASE_LOG.md`) |
-| Fine-tuning / retraining | Planned | No CRD, no controller, no code |
-| Guardrails (runtime policy enforcement) | Planned | No CRD, no controller, no code |
-| Production monitoring & drift detection | Planned | No CRD, no controller, no code |
-| Redeployment / rollback | Planned | No CRD, no controller, no code |
-| Testing & evaluation (ongoing, post-deployment) | Planned | No CRD, no controller, no code. Distinct from intake's own pre-promotion security scan/benchmark, which are one-time onboarding gates, not ongoing evaluation of a running model |
-| Retirement / decommissioning | Planned | No CRD, no controller, no code |
+| AI application development | Planned | No CRD, no controller, no code. Scoped narrowly to provisioning a governed development environment (namespace, RBAC, a pinned model endpoint to build against) — not to the open-ended work of building an application itself, which isn't CRD-shaped and isn't in scope here. Owns guardrail *policy definition* |
+| Fine-tuning/training | Planned | No CRD, no controller, no code. Expected to reference Data intake's output as an input, the same way a future evidence record would reference a `ModelCard` |
+| AI application promotion | Planned | No CRD, no controller, no code. Distinct from model release promotion (implemented) — operates on the application stack (inference code, guardrails, routing config), not the model artifact. Natural consumer of a future `ServingProvider` abstraction (vLLM/KServe/SageMaker/Azure AI/etc., the serving-side analog of `IntakeProviderConfig`) |
+| Monitoring (models & AI applications) | Planned | No CRD, no controller, no code. Includes data drift, not just model-output drift. See the shape note above — this is a continuously-reconciled CRD, not a stage-walker entry. Owns guardrail *enforcement* observability |
+| Retirement/decommissioning | Planned | No CRD, no controller, no code. Revoke access, archive evidence, confirm no live traffic, record why — the audit-trail-complete end of a model's life, as important to the evidence chain as onboarding is |
 
 ## CRD reference
 
