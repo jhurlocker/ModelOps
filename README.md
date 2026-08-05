@@ -141,7 +141,7 @@ problem `IntakeProviderConfig` solves for pipeline execution — but the
 reconcile loop around it is a different shape from the stage walker.
 
 ```mermaid
-fflowchart LR
+flowchart LR
     Data["Data Intake /<br/>Curation<br/>(optional, may happen first)"]:::planned
     Finetune["Fine-tuning /<br/>Training<br/>(optional, may happen first)"]:::planned
     Intake["Model Intake<br/>(implemented)"]:::done
