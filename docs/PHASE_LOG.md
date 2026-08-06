@@ -4488,5 +4488,196 @@ namespace with `modelops.example.io/model-request` labels.
   `ProviderConfigLookupFailed`**: already a backlog item in
   `REFACTOR_PLAN.md`'s Phase 7 section, covering all four
   lookup-failure reasons together. Not specific to this phase.
+- **`io.ReadAll` in `internal/webhookcore/renderer.go:79` has no
+  explicit size bound** (no `LimitReader`/`MaxBytesReader`). An
+  unbounded response from a malicious or misbehaving webhook provider
+  is a real resource-exhaustion risk -- low priority for the controlled
+  sandbox mock today, but a v2 hardening pass should cap it. Distinct
+  from the correctness bug the `ReadAll` replacement fixed (the old
+  `make([]byte, -1)` panic).
+
+---
+
+## Phase B — Check-type stage decomposition
+
+**Commit:** `4af489c` on `feat/model-request-controller` — "Phase B:
+check-type stage decomposition (CheckType enum, checkTypes on
+ProfileStageSpec, checkResults evidence extraction)". Additive CRD/API
+change — every existing profile keeps working with zero modification.
+
+This phase went through an explicit design review first (same as Phases
+4-7 and Phase A); the approved design is what's implemented below. One
+design-review fix (CheckResults on StageProgress, not just StageStatus)
+and one scope addition (promotion-stage checkTypes) were folded in
+before implementation started.
+
+### What changed
+
+- **`api/v1alpha1/modellifecycleprofile_types.go`**: `CheckType` enum
+  (`SecurityScan`/`ComplianceScan`/`Benchmark`) with
+  `+kubebuilder:validation:Enum`. Deliberately validated (unlike
+  `Kind`, unvalidated in Phase 6) — this is a curated governance
+  vocabulary audit tooling will query against, so a typo should be a
+  rejected write, not a silent gap in the evidence chain.
+  `ProfileStageSpec.CheckTypes` is an additive optional field.
+
+- **`api/v1alpha1/modelrequest_types.go`**: `CheckResult` struct
+  (`Type`/`Passed`/`Reason`/`Message`) and `CheckResults` on
+  `StageProgress`. Deliberately a decoupled plain struct in
+  `api/v1alpha1` — same pattern as `StageProgress.Phase` (a plain
+  `string`, not imported from `internal/stagecommon`), per Phase 6's
+  reasoning.
+
+- **`internal/stagecommon/stage.go`**: `CheckResult` struct and
+  `CheckResults` on `StageStatus`. This is the internal contract — the
+  copy site at `modelrequest_controller.go:477` (`toStageProgressList`)
+  maps each `stagecommon.CheckResult` to `api/v1alpha1.CheckResult`,
+  same pattern as `Phase` mapping. `stageProgressEqual` was updated
+  with a new `singleStageProgressEqual` helper since Go structs with
+  slices can't use `==`/`!=`.
+
+- **`internal/stagewalk/walk.go`**: `Progress.CheckResults` added; the
+  Walk loop copies `status.CheckResults` through alongside the existing
+  `Phase`/`RunRef`/`Message` pass-through. Zero control-flow changes
+  — purely additive.
+
+- **Webhook checkResults extraction**: `WebhookProviderConfigSpec.
+  StatusMapping.CheckResultsJsonPath` (`string, omitempty`) — a
+  JSONPath extracted from the poll response body. New
+  `webhookcore.JSONPathExtractor.Slice` method extracts `[]any` via
+  simple dot-path traversal (no string rendering, avoids the
+  Kubernetes jsonpath library's array-serialization limitations).
+  `extractCheckResults` in `webhook/stagerunner.go` iterates the array,
+  skips non-`map[string]any` entries, and builds `[]stagecommon.
+  CheckResult`. Degenerate cases (missing path, empty array, non-array
+  at path) all return nil — no error, just no per-check evidence.
+
+- **Tekton checkResults extraction**: `IntakeProviderConfigSpec.
+  CheckResultMappings []CheckResultMapping` maps PipelineRun result
+  names to `CheckType` + `PassedValue`. `providerDetails` gains
+  `checkResultMappings`, populated from the CR by
+  `resolveProviderDetails`. `mapCondition` gains a `mappings` parameter;
+  `buildCheckResults` reads `PipelineRunStatus.Results` and compares
+  `Value.StringVal` against `PassedValue` per mapping. Results missing
+  from the PipelineRun are silently omitted. `EnsureRun` resolves the
+  provider details in the already-exists path for mappings only,
+  gracefully falling back to nil if resolution fails (so a deleted
+  provider config never masks the PipelineRun's real Phase).
+
+- **Live profile** (`gitops/components/runtime-config/lifecycleprofile.
+  yaml`): sandbox stage now declares `checkTypes: [SecurityScan,
+  ComplianceScan]`; promotion stage declares `checkTypes: [Benchmark]`.
+  This is the additive, non-breaking migration: both combined-shape
+  (sandbox with two checkTypes) and single-checkType (promotion with
+  one) are valid instances of the same schema.
+
+### Design decisions documented from review
+
+- **checkTypes is validated (unlike Kind)**: `Kind` is an extensibility
+  escape hatch (new execution engines wired in `main.go` without a CRD
+  change). `CheckTypes` is a governance vocabulary — a typo here should
+  be a rejected write, not a silent gap in an audit trail.
+- **CheckResults is evidence only, not gating**: `Required` still
+  applies at the whole-stage level for a combined stage. This phase
+  does not attempt to make individual `CheckTypes` independently
+  required within one combined stage entry — that's what decomposition
+  is for.
+- **Walker requires zero changes**: adding `CheckTypes` to
+  `ProfileStageSpec` falls out for free from the existing generic
+  `profile.Spec.Stages` iteration. Both combined and decomposed shapes
+  are valid, data-driven instantiations of the same schema.
+- **api/v1alpha1.CheckResult is decoupled from stagecommon.CheckResult**:
+  same decoupling as `StageProgress.Phase` (plain string) vs.
+  `stagecommon.StagePhase`. The `api/v1alpha1` package never imports
+  `internal/stagecommon`.
+
+### TDD: tests written first or alongside
+
+- **Backward compatibility** (`api/v1alpha1/modellifecycleprofile_types_
+  test.go`, 4 new tests): golden-value round-trip proving empty/nil
+  `checkTypes` and `checkResults` are `omitempty` and produce the
+  pre-Phase-B wire shape. A profile with `checkTypes` set serializes
+  correctly. A `StageProgress` with/without `checkResults` round-trips
+  correctly.
+- **Equivalence** (`internal/controller/checktype_controller_test.go`,
+  `TestModelRequest_DecomposedAndCombinedCheckTypes_ProduceEquivalent
+  GovernanceContent`): 3-stage decomposed profile (one `CheckType` per
+  entry) and 1-stage combined profile (three `CheckTypes` on one entry)
+  both reconcile to `Succeeded` via `noop.StageRunner`. Governance-
+  relevant content (which check types appear in the profile) is
+  equivalent — different granularity of control, same set of checks.
+- **Extraction — Tekton** (`internal/stages/tekton/stagerunner_test.
+  go`, 3 new tests): `buildCheckResults` maps PipelineRun results to
+  check types, omits results missing from the PipelineRun, and returns
+  nil for empty mappings.
+- **Extraction — Webhook** (`internal/stages/webhook/stagerunner_test.
+  go`, 5 new tests): `extractCheckResults` extracts all fields from
+  fixture JSON, returns nil for empty path/empty array/non-array at
+  path, and skips non-map array entries.
+- **Full-path survival** (`internal/controller/checktype_controller_
+  test.go`, `TestModelRequest_CheckResults_SurvivesFullPathFrom
+  StageRunnerToPersistedStatus`): creates a `FakeStageRunner` scripted
+  to return `CheckResults` on the sandbox stage, reconciles twice
+  (sandbox completes in first pass, promotion in second), and asserts
+  `ModelRequest.Status.Stages[1].CheckResults` has the expected type/
+  passed/reason values exactly as supplied by the fake runner.
+- **Total new tests**: 8 (4 api + 2 controller + 3 tekton + 5 webhook =
+  14 across the four test files). All 127 pre-existing controller +
+  stage tests pass unmodified — zero assertion values changed, zero
+  test names changed.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) picked up the new
+`checkTypes`/`checkResultMappings`/`checkResults`/`checkResultsJsonPath`
+fields across all 4 affected CRDs (`modellifecycleprofiles`,
+`modelrequests`, `intakeproviderconfigs`, `webhookproviderconfigs`).
+Diffed field-by-field — purely additive, zero fields removed or renamed.
+`zz_generated.deepcopy.go` gained `DeepCopyInto`/`DeepCopy` for
+`CheckType`, `CheckResult`, `CheckResultMapping`. Confirmed idempotent
+on a second `make manifests generate`. No RBAC change — `checkTypes`/
+`checkResults` are purely data on existing CRDs; the `tekton`/
+`webhook` StageRunners already hold `intakeproviderconfigs`/
+`webhookproviderconfigs` `get;list;watch`.
+
+### GitOps manifests
+
+`gitops/components/operator/crd-{lifecycleprofiles,modelrequests,
+intakeproviderconfigs,webhookproviderconfigs}.yaml` synced verbatim from
+the regenerated bases (confirmed byte-identical after copy). No RBAC
+change to `clusterrole.yaml` — the `WebhookProviderConfig`/
+`IntakeProviderConfig` RBAC marks already exist, and no new resource
+types or verbs are needed. `kustomize build` confirmed clean for both
+`gitops/components/operator` and `gitops/components/runtime-config`.
+
+### Sandbox cluster verification
+
+- Pushed `4af489c` to `feat/model-request-controller`; hard-refreshed
+  `Application/modelops-operator` and `Application/modelops-runtime-
+  config` (both branch-tracked, auto-sync + self-heal) — confirmed
+  both `Synced`/`Healthy` at `4af489c`.
+- Built and pushed `quay.io/jhurlocker/modelops-operator:latest` from
+  this phase's code; `kubectl rollout restart` picked it up. Manager
+  started cleanly, all `EventSource`s registered without error.
+- Verified live profile shows correct `checkTypes`:
+  sandbox `[SecurityScan, ComplianceScan]`, promotion `[Benchmark]`.
+- Created a disposable `ModelRequest` (`phaseb-verify`) referencing
+  the live `standard-generative-onboarding` profile — reconciled
+  to `sandboxRunning` with `Status.Stages[]` showing capacity
+  `Succeeded` and sandbox `Running`, `CurrentStage: sandbox`, the
+  real Tekton condition message correctly surfaced. Deleted afterward;
+  `PipelineRun` and `CapacityPlan` confirmed garbage-collected via
+  owner references.
+
+### Known follow-up NOT done in this phase
+
+- **No per-`CheckType` `Required` within a combined stage**: documented
+  boundary in the design review; this is what decomposition (3 entries,
+  1 `CheckType` each, each with its own `Required`) is for.
+- **`io.ReadAll` in `internal/webhookcore/renderer.go:79` has no
+  explicit size bound**: a malicious/misbehaving webhook provider
+  returning an unbounded response is a real resource-exhaustion
+  consideration for a v2 hardening pass. Noted in Phase A's follow-up
+  list above.
 
 ---
