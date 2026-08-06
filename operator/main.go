@@ -11,8 +11,11 @@ import (
 	"github.com/jhurlocker/modelops-operator/internal/stages/promotion"
 	"github.com/jhurlocker/modelops-operator/internal/stages/sandbox"
 	tektonstage "github.com/jhurlocker/modelops-operator/internal/stages/tekton"
+	"github.com/jhurlocker/modelops-operator/internal/stages/webhook"
+	"github.com/jhurlocker/modelops-operator/internal/webhookcore"
 
 	tektonv1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1"
+	"net/http"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -86,6 +89,13 @@ func main() {
 			"PipelineRun": &tektonstage.StageRunner{
 				Client: mgr.GetClient(),
 				Scheme: mgr.GetScheme(),
+			},
+			"Webhook": &webhook.StageRunner{
+				Client:    mgr.GetClient(),
+				Caller:    &webhookcore.DefaultCaller{Client: &http.Client{}},
+				Scheme:    mgr.GetScheme(),
+				Renderer:  webhookcore.Renderer{},
+				Extractor: webhookcore.JSONPathExtractor{},
 			},
 		},
 	}).SetupWithManager(mgr); err != nil {
