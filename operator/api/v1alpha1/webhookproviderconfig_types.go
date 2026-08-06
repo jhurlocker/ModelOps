@@ -134,6 +134,16 @@ type WebhookStatusMapping struct {
 	// is left empty.
 	// +optional
 	DetailsUrlTemplate string `json:"detailsUrlTemplate,omitempty"`
+
+	// CheckResultsJsonPath extracts a structured per-check breakdown
+	// from the poll response body when the stage covers multiple
+	// CheckTypes. The extracted value should be a JSON array of
+	// objects matching the shape {type: "SecurityScan", passed: true,
+	// reason: "...", message: "..."}. If unset, the expression
+	// resolves to nothing, or the result is an empty array,
+	// CheckResults stays nil -- no error, just no per-check evidence.
+	// +optional
+	CheckResultsJsonPath string `json:"checkResultsJsonPath,omitempty"`
 }
 
 // StagePhase mirrors stagecommon.StagePhase so the CRD's own enum

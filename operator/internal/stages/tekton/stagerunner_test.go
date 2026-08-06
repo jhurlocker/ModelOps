@@ -297,3 +297,50 @@ func TestStageRunner_OwnedTypes_ReturnsExactlyPipelineRun(t *testing.T) {
 	_, ok := owned[0].(*tektonv1.PipelineRun)
 	require.True(t, ok, "tekton.StageRunner owns exactly *tektonv1.PipelineRun")
 }
+
+func TestBuildCheckResults_MapsPipelineRunResultsToCheckTypes(t *testing.T) {
+	results := []tektonv1.PipelineRunResult{
+		{Name: "compliance-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "true"}},
+		{Name: "security-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "true"}},
+		{Name: "benchmark-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "false"}},
+	}
+	mappings := []modelopsv1alpha1.CheckResultMapping{
+		{ResultName: "compliance-passed", CheckType: modelopsv1alpha1.CheckTypeComplianceScan, PassedValue: "true"},
+		{ResultName: "security-passed", CheckType: modelopsv1alpha1.CheckTypeSecurityScan, PassedValue: "true"},
+		{ResultName: "benchmark-passed", CheckType: modelopsv1alpha1.CheckTypeBenchmark, PassedValue: "true"},
+	}
+
+	cr := buildCheckResults(results, mappings)
+	require.Len(t, cr, 3)
+
+	require.Equal(t, "ComplianceScan", cr[0].Type)
+	require.True(t, cr[0].Passed)
+
+	require.Equal(t, "SecurityScan", cr[1].Type)
+	require.True(t, cr[1].Passed)
+
+	require.Equal(t, "Benchmark", cr[2].Type)
+	require.False(t, cr[2].Passed, "benchmark value 'false' vs passedValue 'true' -> not passed")
+}
+
+func TestBuildCheckResults_MissingResultInMapping_OmitsEntry(t *testing.T) {
+	results := []tektonv1.PipelineRunResult{
+		{Name: "security-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "true"}},
+	}
+	mappings := []modelopsv1alpha1.CheckResultMapping{
+		{ResultName: "compliance-passed", CheckType: modelopsv1alpha1.CheckTypeComplianceScan, PassedValue: "true"},
+		{ResultName: "security-passed", CheckType: modelopsv1alpha1.CheckTypeSecurityScan, PassedValue: "true"},
+	}
+
+	cr := buildCheckResults(results, mappings)
+	require.Len(t, cr, 1, "compliance-passed not in results -> omitted; security-passed present")
+	require.Equal(t, "SecurityScan", cr[0].Type)
+}
+
+func TestBuildCheckResults_NoMappings_ReturnsNil(t *testing.T) {
+	results := []tektonv1.PipelineRunResult{
+		{Name: "compliance-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "true"}},
+	}
+	cr := buildCheckResults(results, nil)
+	require.Nil(t, cr)
+}

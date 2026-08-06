@@ -563,3 +563,70 @@ func TestHandler_BuildSpec_MissingProviderConfigRef_ReturnsError(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, strings.Contains(err.Error(), "ProviderConfigRef"), "error must mention ProviderConfigRef")
 }
+
+func TestExtractCheckResults_FullFixture_ExtractsAllFields(t *testing.T) {
+	body := []byte(`{
+		"checks": [
+			{"type": "SecurityScan", "passed": true, "reason": "no-cves", "message": "All CVEs below threshold"},
+			{"type": "ComplianceScan", "passed": true, "reason": "policy-ok"},
+			{"type": "Benchmark", "passed": false, "reason": "throughput-low", "message": "Throughput below target"}
+		]
+	}`)
+
+	extractor := &webhookcore.JSONPathExtractor{}
+	cr := extractCheckResults(body, "$.checks", extractor)
+
+	require.Len(t, cr, 3)
+
+	require.Equal(t, "SecurityScan", cr[0].Type)
+	require.True(t, cr[0].Passed)
+	require.Equal(t, "no-cves", cr[0].Reason)
+	require.Equal(t, "All CVEs below threshold", cr[0].Message)
+
+	require.Equal(t, "ComplianceScan", cr[1].Type)
+	require.True(t, cr[1].Passed)
+	require.Equal(t, "policy-ok", cr[1].Reason)
+
+	require.Equal(t, "Benchmark", cr[2].Type)
+	require.False(t, cr[2].Passed)
+	require.Equal(t, "throughput-low", cr[2].Reason)
+	require.Equal(t, "Throughput below target", cr[2].Message)
+}
+
+func TestExtractCheckResults_EmptyJsonPath_ReturnsNil(t *testing.T) {
+	body := []byte(`{"checks": [{"type": "SecurityScan", "passed": true}]}`)
+	extractor := &webhookcore.JSONPathExtractor{}
+	cr := extractCheckResults(body, "", extractor)
+	require.Nil(t, cr)
+}
+
+func TestExtractCheckResults_EmptyArray_ReturnsNil(t *testing.T) {
+	body := []byte(`{"checks": []}`)
+	extractor := &webhookcore.JSONPathExtractor{}
+	cr := extractCheckResults(body, "$.checks", extractor)
+	require.Nil(t, cr)
+}
+
+func TestExtractCheckResults_NonArrayAtPath_ReturnsNil(t *testing.T) {
+	body := []byte(`{"checks": "not-an-array"}`)
+	extractor := &webhookcore.JSONPathExtractor{}
+	cr := extractCheckResults(body, "$.checks", extractor)
+	require.Nil(t, cr)
+}
+
+func TestExtractCheckResults_SkipsNonMapEntries(t *testing.T) {
+	body := []byte(`{
+		"checks": [
+			{"type": "SecurityScan", "passed": true},
+			"not-a-map",
+			{"type": "ComplianceScan", "passed": false}
+		]
+	}`)
+
+	extractor := &webhookcore.JSONPathExtractor{}
+	cr := extractCheckResults(body, "$.checks", extractor)
+
+	require.Len(t, cr, 2)
+	require.Equal(t, "SecurityScan", cr[0].Type)
+	require.Equal(t, "ComplianceScan", cr[1].Type)
+}

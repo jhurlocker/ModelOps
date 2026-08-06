@@ -28,6 +28,18 @@ const (
 	StageFailed StagePhase = "Failed"
 )
 
+// CheckResult is optional per-check granular governance evidence a
+// StageRunner may populate alongside the stage's aggregate Phase. Only
+// meaningful when a stage's ProfileStageSpec.CheckTypes has more than
+// one entry (the combined case); for a single-checkType stage, the
+// aggregate Phase already captures the check's outcome.
+type CheckResult struct {
+	Type    string
+	Passed  bool
+	Reason  string
+	Message string
+}
+
 // StageStatus is the generic status contract a StageRunner reports back
 // to the reconciler for a single stage run. Modeled after Kubernetes'
 // own metav1.Condition pattern (Reason/Message), reduced to exactly the
@@ -51,6 +63,12 @@ type StageStatus struct {
 	// detailsUrlTemplate); every other runner (tekton, noop,
 	// capacityplanning) leaves it empty.
 	DetailsURL string
+	// CheckResults is optional per-check evidence, distinct from and in
+	// addition to the stage's single aggregate Phase. Populated only
+	// when the stage's ProfileStageSpec.CheckTypes has multiple entries
+	// and the provider can produce structured per-check output.
+	// +optional
+	CheckResults []CheckResult
 }
 
 // StageKind classifies which named "slot" of a shared provider config a

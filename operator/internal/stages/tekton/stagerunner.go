@@ -67,13 +67,6 @@ func (r *StageRunner) EnsureRun(ctx context.Context, req *modelopsv1alpha1.Model
 	if apierrors.IsNotFound(err) {
 		details, resolveErr := resolveProviderDetails(ctx, r.Client, req.Namespace, stage)
 		if resolveErr != nil {
-			// Wrapped in stagecommon.ProviderConfigError so
-			// ModelRequestReconciler can recognize this specific
-			// failure class via errors.As and surface a dedicated
-			// "ProviderConfigLookupFailed" status reason instead of
-			// the generic silent-retry error path every other
-			// EnsureRun error falls into. See docs/REFACTOR_PLAN.md
-			// Phase 7.
 			return stagecommon.StageStatus{}, &stagecommon.ProviderConfigError{Err: resolveErr}
 		}
 		newRun := buildPipelineRun(stage.RunName, req.Namespace, details, toTektonParams(stage.Params), req, r.Scheme)
@@ -91,7 +84,12 @@ func (r *StageRunner) EnsureRun(ctx context.Context, req *modelopsv1alpha1.Model
 		return stagecommon.StageStatus{}, err
 	}
 
-	return mapCondition(stage, &run), nil
+	details, resolveErr := resolveProviderDetails(ctx, r.Client, req.Namespace, stage)
+	checkResultMappings := details.checkResultMappings
+	if resolveErr != nil {
+		checkResultMappings = nil
+	}
+	return mapCondition(stage, &run, checkResultMappings), nil
 }
 
 // mapCondition maps a PipelineRun's "Succeeded" condition into a
@@ -103,7 +101,7 @@ func (r *StageRunner) EnsureRun(ctx context.Context, req *modelopsv1alpha1.Model
 //
 // Reason/Message pass through verbatim from the Tekton condition, same
 // as the pre-Phase-4 inline logic did.
-func mapCondition(stage stagecommon.StageSpec, run *tektonv1.PipelineRun) stagecommon.StageStatus {
+func mapCondition(stage stagecommon.StageSpec, run *tektonv1.PipelineRun, mappings []modelopsv1alpha1.CheckResultMapping) stagecommon.StageStatus {
 	cond := run.Status.GetCondition("Succeeded")
 	if cond == nil || cond.Status == corev1.ConditionUnknown {
 		reason, message := "Running", fmt.Sprintf("%s pipeline is running", stage.Name)
@@ -115,7 +113,29 @@ func mapCondition(stage stagecommon.StageSpec, run *tektonv1.PipelineRun) stagec
 	if cond.Status == corev1.ConditionFalse {
 		return stagecommon.StageStatus{Phase: stagecommon.StageFailed, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName}
 	}
-	return stagecommon.StageStatus{Phase: stagecommon.StageSucceeded, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName}
+	status := stagecommon.StageStatus{Phase: stagecommon.StageSucceeded, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName}
+	if len(mappings) > 0 {
+		status.CheckResults = buildCheckResults(run.Status.Results, mappings)
+	}
+	return status
+}
+
+func buildCheckResults(results []tektonv1.PipelineRunResult, mappings []modelopsv1alpha1.CheckResultMapping) []stagecommon.CheckResult {
+	var cr []stagecommon.CheckResult
+	for _, m := range mappings {
+		for _, r := range results {
+			if r.Name == m.ResultName {
+				passed := r.Value.StringVal == m.PassedValue
+				cr = append(cr, stagecommon.CheckResult{
+					Type:   string(m.CheckType),
+					Passed: passed,
+					Reason: r.Value.StringVal,
+				})
+				break
+			}
+		}
+	}
+	return cr
 }
 
 // toTektonParams converts a provider-agnostic param map into

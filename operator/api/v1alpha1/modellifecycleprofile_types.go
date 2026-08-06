@@ -52,6 +52,25 @@ type ModelLifecycleProfileSpec struct {
 	Stages []ProfileStageSpec `json:"stages,omitempty"`
 }
 
+// CheckType classifies what kind of governance/validation check a stage
+// performs. This is a validated CRD enum -- deliberately the opposite
+// choice from Kind (unvalidated, Phase 6) -- for exactly one reason:
+// checkTypes is a curated governance vocabulary that audit tooling will
+// eventually query against ("show me every ModelRequest where a
+// ComplianceScan stage Failed"), so a typo here should be a rejected
+// write, not a silent gap in the evidence chain. A new check type is a
+// deliberate nouns-to-the-taxonomy change the project should approve
+// explicitly, not something one user should be able to silently add by
+// misspelling "SecurityScan" and having nothing reconcile it.
+// +kubebuilder:validation:Enum=SecurityScan;ComplianceScan;Benchmark
+type CheckType string
+
+const (
+	CheckTypeSecurityScan   CheckType = "SecurityScan"
+	CheckTypeComplianceScan CheckType = "ComplianceScan"
+	CheckTypeBenchmark      CheckType = "Benchmark"
+)
+
 // ProfileStageSpec declares one named stage in a ModelLifecycleProfile's
 // lifecycle sequence. See docs/REFACTOR_PLAN.md Phase 6 for the design
 // rationale (this is what replaces the hardcoded capacity-planning ->
@@ -71,6 +90,19 @@ type ProfileStageSpec struct {
 	// this up in a map; it is never hardcoded/switched on in Go, so
 	// adding a new execution engine never requires a walker change.
 	Kind string `json:"kind"`
+
+	// CheckTypes declares which governance checks this stage performs.
+	// When multiple checkTypes are listed (the combined shape), a single
+	// stage run covers all of them -- the entire stage shares one
+	// aggregate Phase, and optional per-check granular evidence
+	// (Status.CheckResults) can surface which individual checks passed
+	// or failed within that one run.
+	//
+	// When checkTypes is empty or unset (the pre-Phase-B default),
+	// nothing changes -- backward-compatible with every existing
+	// profile.
+	// +optional
+	CheckTypes []CheckType `json:"checkTypes,omitempty"`
 
 	// ProviderConfigRef, when set, is passed through unmodified to
 	// whichever StageRunner handles Kind -- same passthrough contract

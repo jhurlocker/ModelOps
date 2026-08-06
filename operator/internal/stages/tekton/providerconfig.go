@@ -33,10 +33,11 @@ const supportedProviderType = "tekton"
 // set) or by defaultProviderDetails (the DEPRECATED fallback, matching
 // today's hardcoded shape exactly).
 type providerDetails struct {
-	pipelineName       string
-	serviceAccountName string
-	pipelineTimeout    metav1.Duration
-	workspaces         []tektonv1.WorkspaceBinding
+	pipelineName         string
+	serviceAccountName   string
+	pipelineTimeout      metav1.Duration
+	workspaces           []tektonv1.WorkspaceBinding
+	checkResultMappings  []modelopsv1alpha1.CheckResultMapping
 }
 
 // defaultProviderDetails reproduces, byte-for-byte, the values that used
@@ -147,6 +148,9 @@ func resolveProviderDetails(ctx context.Context, c client.Client, namespace stri
 	}
 	if len(cfg.Spec.Workspaces) > 0 {
 		details.workspaces = toWorkspaceBindings(cfg.Spec.Workspaces)
+	}
+	if len(cfg.Spec.CheckResultMappings) > 0 {
+		details.checkResultMappings = cfg.Spec.CheckResultMappings
 	}
 
 	return details, nil

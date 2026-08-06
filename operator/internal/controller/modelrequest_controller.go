@@ -464,7 +464,22 @@ func stageProgressEqual(a, b []modelopsv1alpha1.StageProgress) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != b[i] {
+		if !singleStageProgressEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func singleStageProgressEqual(a, b modelopsv1alpha1.StageProgress) bool {
+	if a.Name != b.Name || a.Namespace != b.Namespace || a.Phase != b.Phase || a.RunRef != b.RunRef || a.Message != b.Message {
+		return false
+	}
+	if len(a.CheckResults) != len(b.CheckResults) {
+		return false
+	}
+	for i := range a.CheckResults {
+		if a.CheckResults[i] != b.CheckResults[i] {
 			return false
 		}
 	}
@@ -474,12 +489,22 @@ func stageProgressEqual(a, b []modelopsv1alpha1.StageProgress) bool {
 func toStageProgressList(progress []stagewalk.Progress) []modelopsv1alpha1.StageProgress {
 	out := make([]modelopsv1alpha1.StageProgress, 0, len(progress))
 	for _, p := range progress {
+		cr := make([]modelopsv1alpha1.CheckResult, len(p.CheckResults))
+		for i, r := range p.CheckResults {
+			cr[i] = modelopsv1alpha1.CheckResult{
+				Type:    modelopsv1alpha1.CheckType(r.Type),
+				Passed:  r.Passed,
+				Reason:  r.Reason,
+				Message: r.Message,
+			}
+		}
 		out = append(out, modelopsv1alpha1.StageProgress{
-			Name:      p.Name,
-			Namespace: p.Namespace,
-			Phase:     string(p.Phase),
-			RunRef:    p.RunRef,
-			Message:   p.Message,
+			Name:         p.Name,
+			Namespace:    p.Namespace,
+			Phase:        string(p.Phase),
+			RunRef:       p.RunRef,
+			Message:      p.Message,
+			CheckResults: cr,
 		})
 	}
 	return out

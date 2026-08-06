@@ -248,13 +248,58 @@ func (r *StageRunner) pollJob(
 		reason = "JobFailed"
 	}
 
+	var checkResults []stagecommon.CheckResult
+	if cfg.StatusMapping.CheckResultsJsonPath != "" {
+		checkResults = extractCheckResults(result.Body, cfg.StatusMapping.CheckResultsJsonPath, &r.Extractor)
+	}
+
 	return stagecommon.StageStatus{
-		Phase:      mappedPhase,
-		Reason:     reason,
-		Message:    message,
-		RunRef:     stage.RunName,
-		DetailsURL: detailsURL,
+		Phase:         mappedPhase,
+		Reason:        reason,
+		Message:       message,
+		RunRef:        stage.RunName,
+		DetailsURL:    detailsURL,
+		CheckResults:  checkResults,
 	}, nil
+}
+
+func extractCheckResults(body []byte, jsonPath string, extractor *webhookcore.JSONPathExtractor) []stagecommon.CheckResult {
+	arr, err := extractor.Slice(body, jsonPath)
+	if err != nil || len(arr) == 0 {
+		return nil
+	}
+	var cr []stagecommon.CheckResult
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		cr = append(cr, stagecommon.CheckResult{
+			Type:    stringFromMap(m, "type"),
+			Passed:  boolFromMap(m, "passed"),
+			Reason:  stringFromMap(m, "reason"),
+			Message: stringFromMap(m, "message"),
+		})
+	}
+	return cr
+}
+
+func stringFromMap(m map[string]any, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func boolFromMap(m map[string]any, key string) bool {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
 }
 
 // mapPhase translates a provider status string into a StagePhase. The

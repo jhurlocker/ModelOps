@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"k8s.io/client-go/util/jsonpath"
 )
@@ -40,4 +41,52 @@ func (JSONPathExtractor) String(body []byte, jsonPath string) (string, error) {
 		return "", fmt.Errorf("jsonpath %q: no value found", jsonPath)
 	}
 	return result, nil
+}
+
+// Slice extracts the value at jsonPath from body as a []any slice. The
+// body must be valid JSON and the path must resolve to a JSON array.
+// Returns nil, nil when the path does not match anything -- callers
+// treat this as "no evidence extracted," not an error.
+func (JSONPathExtractor) Slice(body []byte, jsonPath string) ([]any, error) {
+	if jsonPath == "" {
+		return nil, nil
+	}
+	var data any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("parsing json: %w", err)
+	}
+	v, err := traverse(data, jsonPath)
+	if err != nil {
+		return nil, err
+	}
+	if v == nil {
+		return nil, nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("jsonpath %q did not resolve to an array", jsonPath)
+	}
+	return arr, nil
+}
+
+func traverse(data any, path string) (any, error) {
+	path = strings.TrimPrefix(path, "$")
+	path = strings.TrimPrefix(path, ".")
+	if path == "" {
+		return data, nil
+	}
+	parts := strings.Split(path, ".")
+	cur := data
+	for _, part := range parts {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, nil
+		}
+		v, exists := m[part]
+		if !exists {
+			return nil, nil
+		}
+		cur = v
+	}
+	return cur, nil
 }

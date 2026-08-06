@@ -47,6 +47,24 @@ type IntakeProviderConfigSpec struct {
 	// guidellm-output-pvc PVC, manifests -> mmlu-manifest ConfigMap,
 	// custom-mmlu -> custom-mmlu ConfigMap).
 	Workspaces []IntakeProviderWorkspace `json:"workspaces,omitempty"`
+
+	// CheckResultMappings maps Tekton PipelineRun result names to
+	// CheckTypes for per-check evidence extraction from combined-stage
+	// PipelineRuns. Each entry declares which PipelineRun result name
+	// holds the pass/fail value for which CheckType. If the result is
+	// missing or has an unexpected value, that entry is silently
+	// omitted -- no error, just no evidence for that check. When
+	// unset or empty, no per-check evidence is extracted.
+	// +optional
+	CheckResultMappings []CheckResultMapping `json:"checkResultMappings,omitempty"`
+}
+
+// CheckResultMapping maps a single Tekton PipelineRun result to a
+// CheckType for per-check evidence extraction.
+type CheckResultMapping struct {
+	ResultName  string    `json:"resultName"`
+	CheckType   CheckType `json:"checkType"`
+	PassedValue string    `json:"passedValue"`
 }
 
 // IntakeProviderWorkspace is a single Tekton workspace binding, reduced

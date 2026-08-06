@@ -164,6 +164,28 @@ type StageProgress struct {
 	Phase     string `json:"phase"`
 	RunRef    string `json:"runRef,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// CheckResults is optional per-check governance evidence, distinct
+	// from and in addition to the stage's single aggregate Phase.
+	// Populated only when a stage has multiple CheckTypes and the
+	// provider can produce structured per-check output. A consumer
+	// querying governance evidence should consult this field, not
+	// derive check outcomes from Phase.
+	// +optional
+	CheckResults []CheckResult `json:"checkResults,omitempty"`
+}
+
+// CheckResult is optional per-check granular governance evidence a
+// StageRunner may populate alongside the stage's aggregate Phase. Only
+// meaningful when a stage's ProfileStageSpec.CheckTypes has more than
+// one entry (the combined case). Deliberately a plain struct in
+// api/v1alpha1 rather than imported from internal/stagecommon -- same
+// decoupling principle as StageProgress.Phase (a plain string, not
+// stagecommon.StagePhase).
+type CheckResult struct {
+	Type    CheckType `json:"type"`
+	Passed  bool      `json:"passed"`
+	Reason  string    `json:"reason,omitempty"`
+	Message string    `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true

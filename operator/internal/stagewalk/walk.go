@@ -58,11 +58,12 @@ type Input struct {
 // Progress is one (stage, namespace) outcome recorded during a Walk
 // call, in the order attempted.
 type Progress struct {
-	Name      string
-	Namespace string
-	Phase     stagecommon.StagePhase
-	RunRef    string
-	Message   string
+	Name         string
+	Namespace    string
+	Phase        stagecommon.StagePhase
+	RunRef       string
+	Message      string
+	CheckResults []stagecommon.CheckResult
 }
 
 // Result summarizes one Walk call.
@@ -138,11 +139,12 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 			}
 
 			progress = append(progress, Progress{
-				Name:      stage.Name,
-				Namespace: ns,
-				Phase:     status.Phase,
-				RunRef:    status.RunRef,
-				Message:   status.Message,
+				Name:         stage.Name,
+				Namespace:    ns,
+				Phase:        status.Phase,
+				RunRef:       status.RunRef,
+				Message:      status.Message,
+				CheckResults: status.CheckResults,
 			})
 
 			switch status.Phase {
