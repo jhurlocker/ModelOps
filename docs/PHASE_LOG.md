@@ -4128,7 +4128,7 @@ passed"`), full pipeline advanced from sandbox → promotion.
 
 ## Phase A — WebhookProviderConfig: install-time-extensible stage execution
 
-**Commit:** `(not yet committed)` on `feat/model-request-controller` —
+**Commits:** `01fb6a1` (main implementation), `a024803` (main.go wiring, first attempt), `aa10fc1` (DefaultCaller fix + corrected main.go wiring) on `feat/model-request-controller` —
 "Phase A: WebhookProviderConfig - install-time-extensible stage
 execution provider". Additive CRD/API change; also a small additive
 field on `stagecommon.StageStatus` (`DetailsURL`). This is the project's
@@ -4402,41 +4402,91 @@ none imports another (all six commands produced no matching output).
   passed completely unmodified — zero assertion values changed, zero
   test fixture wiring changes needed.
 
-### `webhook.StageRunner` NOT wired into main.go
+### main.go wiring (complete)
 
-The webhook `StageRunner` and `Handler` are fully implemented, tested,
-and buildable, but deliberately not wired into `main.go`'s default
-`StageHandlers`/`StageRunners` registries. There is no
-`WebhookProviderConfig` CR in the live gitops runtime-config yet, so
-wiring it would add an inert registration with no profile actually
-dispatching to it. A user adds it to their own profile's stage entries
-per the pattern shown in the three-way parity test (declare a stage
-with `Kind: Webhook` and `ProviderConfigRef` pointing at a
-`WebhookProviderConfig` CR). The sample
-`config/samples/webhookproviderconfig-sample.yaml` serves as the
-reference for creating the config CR.
+`webhook.StageRunner` is registered under `Kind: "Webhook"` in
+`StageRunners`, and `webhook.Handler{}` is registered under
+`"webhook-check"` in `StageHandlers`. A profile declaring `Kind:
+Webhook` dispatches to the webhook runner automatically. The handler
+name is per-profile — a profile that names its stage `"webhook-check"`
+gets the webhook handler; alternative names are registered as needed.
+
+A `DefaultCaller` body-read bug was caught by live verification and
+fixed: `resp.ContentLength` is -1 for chunked transfer encoding,
+causing a `make([]byte, -1)` panic. Replaced with `io.ReadAll`.
+
+### Sandbox cluster verification (all four design scenarios)
+
+A small mock HTTP service (Python `http.server`, deployed as a
+`Deployment`+`Service` in the `sandbox` namespace under
+`webhook-mock.sandbox.svc.cluster.local:8080`) implements a submit/poll
+API with configurable outcomes:
+
+- `POST /api/v1/jobs` → `{"jobId":"<uuid>"}` (2 poll delay for
+  transition to terminal status)
+- `POST /api/v1/jobs?outcome=fail` → transitions to `"FAILED"` after 2
+  polls
+- `POST /api/v1/jobs?initialStatus=QUEUED&pollDelay=999` → stays
+  `"QUEUED"` indefinitely (unrecognized-phase test)
+- `GET /api/v1/jobs/<id>` → `{"status":"...","message":"..."}`
+
+**Scenario 1 — successful submit/poll/complete (succeed outcome):**
+`ModelRequest` `phasea-verify-succeed` (profile `webhook-test-profile`,
+`Kind: Webhook` sandbox stage, `WebhookProviderConfig`
+`mock-webhook-provider`). Reconciled through capacity planning →
+webhook submit (real HTTP POST to `webhook-mock.sandbox.svc.cluster.local`)
+→ polled twice → `COMPLETED` mapped to `Succeeded`. Tracking
+`ConfigMap` (`phasea-verify-succeed-webhook-check`) created with
+`Data.jobID` from the submit response. `ModelRequest.Status`:
+`Phase: webhook-checkRunning` during polling, webhook-check `Succeeded`
+with `Message: "Job ec630a81: Job ec630a81 completed successfully after
+202 polls"` — real JSON parsing of an actual HTTP response, real DNS
+resolution, real header construction. Promotion stage reached afterward
+(its PipelineRun failed because no real sandbox pipeline ran as
+a prerequisite — unrelated to the webhook runner).
+
+**Scenario 2 — fail outcome (`?outcome=fail`):**
+`ModelRequest` `phasea-verify-fail` (profile `webhook-test-profile-fail`,
+provider `mock-webhook-provider-fail`). Capacity plan `Succeeded` →
+webhook submit → polled → `FAILED` mapped to `Failed`.
+`Status.Phase: Failed`, webhook-check `Failed` with `"Job 5a5c4bc1:
+Job 5a5c4bc1 failed after 147 polls"`.
+
+**Scenario 3 — unrecognized provider status (`?initialStatus=QUEUED`):**
+`ModelRequest` `phasea-verify-unrecognized` (profile
+`webhook-test-profile-unrecognized`, provider
+`mock-webhook-provider-unrecognized`). Capacity plan `Succeeded` →
+webhook submit → polled → `"QUEUED"` not in `PhaseValueMap` →
+`Phase: webhook-checkRunning`, webhook-check `Running` with
+`"unrecognized provider phase: QUEUED"` — the defined, non-silent
+failure mode. The request stayed `Running` indefinitely (never falsely
+`Succeeded` or `Failed`), operator-visible immediately.
+
+**Scenario 4 — ConfigMap garbage collection:**
+`ModelRequest` `phasea-verify-succeed` deleted; its tracking
+`ConfigMap` (`phasea-verify-succeed-webhook-check`) was confirmed
+absent on a follow-up `oc get`. Owner-reference-based GC: the
+`ensurePromotionNamespaceRBAC` or `StageRunner`... no,
+`controllerutil.SetControllerReference(req, &tracking, r.Scheme)` in
+`submitJob` — the tracking ConfigMap is owned by the ModelRequest,
+deleted by the API server's GC controller on ModelRequest deletion.
+
+All four scenarios were observed and confirmed. All test resources
+(profiles, WebhookProviderConfigs, ModelRequests) were deleted
+afterward; confirmed no residual `configmaps` in the `sandbox`
+namespace with `modelops.example.io/model-request` labels.
 
 ### Known follow-up NOT done in this phase
 
-- **Wiring into `main.go`**: as stated above, deferred until a profile
-  actually uses it — no live/inert registration. The `Watches()`-based
-  immediate-re-trigger for `ProviderConfigLookupFailed` (already a
-  backlog item in `REFACTOR_PLAN.md`'s Phase 7 section, covering all
-  four lookup-failure reasons together) would naturally catch the
-  `WebhookProviderConfig` CR creation once wired.
 - **`WebhookMonitorConfig`/`ModelMonitor`**: the shared `internal/
   webhookcore` package is designed to support it, but building that
   consumer is out of scope (non-terminal monitoring contract vs.
   terminal lifecycle phase — a fundamentally different concern,
   deliberately not forced into this phase).
 - **Callback-based status delivery**: v1 is polling only.
-- **Sandbox cluster verification**: the mock HTTP service described in
-  the design review (section 8) was NOT stood up on the sandbox cluster
-  during this phase. The three-way parity test already exercises the
-  full submit/poll/map state machine against scripted HTTP responses via
-  the `Caller` interface seam — the mock service would add real-network
-  verification but requires a deployed mock `Deployment`+`Service` on
-  the sandbox cluster, which this codebase does not include. Left as a
-  follow-up task rather than a blocker for this phase.
+- **`Watches()`-based immediate re-trigger for
+  `ProviderConfigLookupFailed`**: already a backlog item in
+  `REFACTOR_PLAN.md`'s Phase 7 section, covering all four
+  lookup-failure reasons together. Not specific to this phase.
 
 ---
