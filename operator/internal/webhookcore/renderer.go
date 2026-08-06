@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -75,13 +76,11 @@ func (c *DefaultCaller) Call(ctx context.Context, cfg CallConfig) (CallResult, e
 	}
 	defer resp.Body.Close()
 
-	buf := make([]byte, 0)
-	if resp.ContentLength != 0 {
-		body := make([]byte, resp.ContentLength)
-		n, _ := resp.Body.Read(body)
-		buf = body[:n]
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return CallResult{}, fmt.Errorf("reading response body: %w", err)
 	}
-	return CallResult{StatusCode: resp.StatusCode, Body: buf}, nil
+	return CallResult{StatusCode: resp.StatusCode, Body: body}, nil
 }
 
 // Renderer executes Go templates against an arbitrary data context using

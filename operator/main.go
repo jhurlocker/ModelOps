@@ -80,6 +80,13 @@ func main() {
 			"capacity":  capacityplanning.Handler{},
 			"sandbox":   sandbox.Handler{},
 			"promotion": promotion.Handler{},
+			// webhook.Handler{} is the generic handler for any
+			// profile stage whose Kind is "Webhook" (Phase A).
+			// Registered under the names profiles actually use;
+			// the three-way parity test in
+			// webhook_provider_test.go references "sandbox"
+			// demonstrating this re-dispatch pattern.
+			"webhook-check": webhook.Handler{},
 		},
 		StageRunners: map[string]stagecommon.StageRunner{
 			"CapacityPlan": &capacityplanning.StageRunner{
