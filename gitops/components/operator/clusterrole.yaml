@@ -58,6 +58,14 @@ rules:
   - apiGroups:
       - modelops.example.io
     resources:
+      - webhookproviderconfigs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - modelops.example.io
+    resources:
       - capacityplans
     verbs:
       - create
@@ -101,6 +109,17 @@ rules:
       - create
       - update
       - patch
+  # configmaps get;create is the webhook StageRunner's tracking-job-ID
+  # ConfigMap (Phase A, docs/PHASE_LOG.md) -- owned, named after the
+  # stage's RunName, garbage-collected on ModelRequest deletion. The
+  # narrowest RBAC footprint for state persistence across reconciles.
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - create
   - apiGroups:
       - ""
     resources:

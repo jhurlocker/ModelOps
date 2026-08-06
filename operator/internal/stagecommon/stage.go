@@ -43,6 +43,14 @@ type StageStatus struct {
 	// chose before calling EnsureRun and must not depend on this field
 	// for correctness.
 	RunRef string
+	// DetailsURL is an optional human-facing link out to the provider's
+	// own console, logs, or job page -- a different kind of thing than
+	// Reason (a fixed, short status token across all StageRunners). Set
+	// only by StageRunners whose execution surface is genuinely external
+	// (currently: webhook.StageRunner, via its statusMapping's
+	// detailsUrlTemplate); every other runner (tekton, noop,
+	// capacityplanning) leaves it empty.
+	DetailsURL string
 }
 
 // StageKind classifies which named "slot" of a shared provider config a

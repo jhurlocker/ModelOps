@@ -1,0 +1,39 @@
+apiVersion: modelops.example.io/v1alpha1
+kind: WebhookProviderConfig
+metadata:
+  name: example-webhook-provider
+  labels:
+    app.kubernetes.io/name: modelops-operator
+spec:
+  providerType: webhook
+  submitEndpoint: https://vendor.example.com/api/v1/jobs
+  method: POST
+  authSecretRef:
+    name: webhook-credentials
+    key: api-token
+  requestTemplate: |
+    {
+      "modelId": "{{.ModelRequest.Spec.Model.URI}}",
+      "namespace": "{{.Namespace}}",
+      "stage": "{{.Stage.Name}}"
+    }
+  submitJobIDJsonPath: "{$.jobId}"
+  statusEndpoint: "https://vendor.example.com/api/v1/jobs/{{.JobID}}/status"
+  statusMapping:
+    phaseJsonPath: "{$.status}"
+    phaseValueMap:
+      RUNNING: Running
+      COMPLETED: Succeeded
+      FAILED: Failed
+      CANCELLED: Failed
+    messageTemplate: |
+      Job {{.JobID}} in namespace {{.Namespace}}: {{.Response.status}} - {{.Response.message}}
+    detailsUrlTemplate: "https://vendor.example.com/console/jobs/{{.JobID}}"
+  submitTimeout: 30s
+  pollTimeout: 15s
+  submitRetry:
+    maxAttempts: 3
+    backoff: 2s
+  pollRetry:
+    maxAttempts: 2
+    backoff: 5s

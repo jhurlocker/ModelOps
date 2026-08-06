@@ -4125,3 +4125,318 @@ security-scan `Succeeded` (`"Garak job completed"`, `"Garak gate
 passed"`), full pipeline advanced from sandbox → promotion.
 
 ---
+
+## Phase A — WebhookProviderConfig: install-time-extensible stage execution
+
+**Commit:** `(not yet committed)` on `feat/model-request-controller` —
+"Phase A: WebhookProviderConfig - install-time-extensible stage
+execution provider". Additive CRD/API change; also a small additive
+field on `stagecommon.StageStatus` (`DetailsURL`). This is the project's
+first genuinely install-time-extensible provider mechanism — this phase
+went through a full, multi-round design review before any code was
+written, at least as rigorous as Phase 6's.
+
+### What changed
+
+- **`api/v1alpha1/webhookproviderconfig_types.go`** (new):
+  `WebhookProviderConfig` CRD, the first provider config kind whose
+  instances are consumed by a single, generic `StageRunner`
+  implementation rather than requiring Go code and an operator rebuild
+  for each new backend. Schema: `ProviderType` (enum `webhook`),
+  `SubmitEndpoint`, `Method` (default `POST`), `AuthSecretRef`
+  (`SecretKeyRef`-only, per Phase 8 pattern — never an inline
+  credential), `AuthHeaderPrefix` (overrides default `"Bearer "`),
+  `RequestTemplate` (Go template rendered from `WebhookContext`),
+  `SubmitJobIDJsonPath`, `StatusEndpoint` (Go template, `{{.JobID}}`
+  available), `StatusMapping` (`PhaseJsonPath`/`PhaseValueMap`/
+  `MessageTemplate`/`DetailsUrlTemplate`), `SubmitTimeout`/`PollTimeout`
+  (`*metav1.Duration`), `SubmitRetry`/`PollRetry` (`*RetryPolicy` with
+  `MaxAttempts`+`Backoff`), `PollInterval`. `StatusMapping.PhaseValueMap`
+  values are a local `StagePhase` enum
+  (`Running`/`Succeeded`/`Failed`) synced with `stagecommon.StagePhase`
+  via two compile-time tests (one in `api/v1alpha1` verifying literal
+  values, one in `internal/stages/webhook` verifying cross-package
+  equality).
+
+- **`api/v1alpha1` new types**: `SecretKeyRef` (`Name`+`Key`),
+  `RetryPolicy` (`MaxAttempts`+`Backoff`), `StagePhase`,
+  `WebhookStatusMapping`, `WebhookProviderConfigStatus` (Conditions-only).
+
+- **`internal/stagecommon/stage.go`**: `StageStatus` gains `DetailsURL
+  string` — an optional human-facing link out to a provider's own
+  console/logs. Set only by `webhook.StageRunner` (via
+  `StatusMapping.DetailsUrlTemplate`); every other runner (`tekton`,
+  `noop`, `capacityplanning`) leaves it empty. This was a design-review
+  revision: the original plan overloaded `Reason` for this purpose, but
+  `Reason` means a short, fixed status token consistently across every
+  runner — a URL is a genuinely different kind of thing.
+
+- **`internal/webhookcore`** (new package): shared HTTP-calling,
+  Go-template rendering, JSONPath extraction, and auth-header-
+  construction primitives. Designed so a future, NOT-built-this-phase
+  consumer (a monitoring-side `WebhookMonitorConfig`, mapping to a
+  `MonitorStatus` shape instead of `StageStatus`) can reuse the same
+  `Renderer`, `Extractor`, `Caller`, and `BuildAuthHeader` without this
+  package needing to change. Intentionally imports nothing from
+  `stagecommon`, `api/v1alpha1`, or any `internal/stages/*` package —
+  only stdlib, `k8s.io/client-go/util/jsonpath`, and
+  `controller-runtime/pkg/client` (for Secret reads in
+  `BuildAuthHeader`). Key types/interfaces: `Renderer` (Go template
+  execution with strict allowlist — see "Template safety," below),
+  `JSONPathExtractor` (extracts a single string from a JSON body via
+  `k8s.io/client-go/util/jsonpath`), `Caller` (HTTP execution seam),
+  `DefaultCaller` (production implementation), `BuildAuthHeader`
+  (reads a named Secret key and constructs `"Authorization: <scheme><value>"`),
+  `SecretKeyRef`/`CallConfig`/`CallResult` (data types).
+
+- **`internal/stages/webhook`** (new package): `StageRunner`
+  implementing `stagecommon.StageRunner` and `Handler` implementing
+  `stagecommon.StageHandler`. The `StageRunner` consumes
+  `webhookcore` primitives and WebhookProviderConfig CRDs to execute
+  lifecycle stages via outbound HTTP calls.
+
+  **Submit/poll state machine.** On first `EnsureRun` (no tracking
+  ConfigMap found): resolve the `WebhookProviderConfig` CR → build auth
+  header from the referenced Secret → render `RequestTemplate` against a
+  `WebhookContext` → POST to `SubmitEndpoint` → extract job ID from
+  response via `SubmitJobIDJsonPath` → create an owned tracking ConfigMap
+  (named `stage.RunName`, `Data["jobID"]` = extracted ID) → return
+  `StageRunning`. On subsequent calls (tracking ConfigMap exists): read
+  `jobID` → render `StatusEndpoint` template with `{{.JobID}}` → GET the
+  result → extract phase via `PhaseJsonPath` → map via `PhaseValueMap`
+  (unrecognized value → `StageRunning` + `"unrecognized provider phase:
+  <value>"` message) → render `MessageTemplate`/`DetailsUrlTemplate`
+  against a `WebhookContext` including the parsed poll response body as
+  `{{.Response}}` → return `StageStatus` with `Phase`, `Message`,
+  `DetailsURL`, `RunRef`.
+
+  **Tracking ConfigMap** (not a Secret): the job ID is documented as
+  non-secret data — storing it in a ConfigMap rather than a Secret
+  narrows RBAC to `configmaps` `get;create`, a smaller blast radius than
+  `secrets` `create`. This was a design-review revision.
+
+  **Poll authentication:** every poll call sends the same
+  `Authorization` header as submit calls (re-resolved via
+  `BuildAuthHeader` each time), per the same design-review revision.
+  Configs that omit `authSecretRef` get no auth on either call — an
+  explicit, documented choice for cluster-local/internal endpoints.
+
+  **Config resolution** (`config.go`): follows the same pattern as
+  `internal/stages/tekton/providerconfig.go`'s `resolveProviderDetails`
+  — nil ref → explicit error (webhook has no fallback), unsupported
+  `Kind` → error without attempting a Get, wrong `ProviderType` →
+  error, missing object → error (wrapped in
+  `stagecommon.ProviderConfigError` so the reconciler can surface it as
+  `ProviderConfigLookupFailed`).
+
+  **`Handler.BuildSpec`** (`handler.go`): builds a minimal `StageSpec`
+  with `RunName` = `"<ModelRequest>-<Stage>"` and the stage's
+  `ProviderConfigRef` passthrough — no params, no `WorkflowRef`, no
+  `StageKind` (all execution detail lives in the
+  `WebhookProviderConfig` CR).
+
+  **RBAC markers:**
+  ```
+  +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create
+  +kubebuilder:rbac:groups=modelops.example.io,resources=webhookproviderconfigs,verbs=get;list;watch
+  ```
+  This is one of the narrowest RBAC footprints of any `StageRunner` in
+  the project — no Tekton, no CapacityPlans, no RoleBindings. The
+  `configmaps` `create` verb is the equivalent of what every other
+  StageRunner already does for its own child object type (Tekton creates
+  `pipelineruns`, capacity planning creates `capacityplans`). Narrower
+  than Secrets because the tracking object contains only a job ID, which
+  is non-secret data.
+
+- **`internal/stages/webhook` does NOT implement
+  `stagecommon.OwnedTypesProvider`** — the tracking ConfigMap is
+  managed via explicit `Get`/`Create` inside `EnsureRun`, not via
+  controller-runtime watches. No child object of this type needs
+  `SetupWithManager`'s `.Owns()` registration.
+
+### Template safety
+
+The `webhookcore.Renderer` executes Go templates with a strict,
+explicitly-documented allowlist of functions, overriding Go's built-in
+set to disable dangerous built-ins:
+
+  - **Included:** `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`, `or`,
+    `not`, `print`, `printf`, `println`, `index`, `len`, `urlquery`,
+    `json`.
+  - **Explicitly overridden (disabled):** `call` (the main arbitrary-
+    code-execution vector — can invoke any Go function value reachable
+    from the template context), `html`, `js` (not useful for API/JSON
+    rendering and could mislead about output format), `slice` (array-
+    manipulation logic that belongs in the provider's own service, not
+    in a data-access template).
+  - **Zero custom functions** — `json` and `urlquery` are the only
+    Go-stdlib functions callable beyond the basic boolean/comparison set.
+
+The template rendering context (`WebhookContext`) is a thin, documented
+struct that deliberately excludes `Secrets` (which carries Secret *names*
+per Phase 8, but the principle holds: zero reason for a webhook
+submit body to know what the operator's S3 secret is named). The only
+fields available are `ModelRequest` (post-Phase-1, no inline credential
+fields), `Profile`, `Stage`, `JobID` (opaque external identifier),
+`Namespace` (string), and `Response` (parsed poll body, controlled by
+the provider). No path exists for a credential value to leak into
+`StageStatus.Message` or `DetailsURL` that doesn't already exist in
+every other StageRunner (Tekton's `condition.Message` is passed through
+verbatim with the same lack of sanitization — an existing,
+pre-Phase-A limitation, not a new one).
+
+**JSONPath library:** `k8s.io/client-go/util/jsonpath`, the standard
+Kubernetes JSONPath implementation. Operates on parsed JSON trees (`any`
+values from `encoding/json`), not raw string interpolation — no filesystem
+access, no network calls, no shell execution. The expression is applied
+to a `map[string]any` that was parsed from the provider's HTTP response
+body; a malicious response body containing something that looks like
+JSONPath syntax cannot cause traversal outside the parsed tree.
+
+### The three-way parity test (the decisive proof)
+
+`TestModelRequest_FullLifecycle_ThreeStageRunners_ReachSameTerminalPhase`
+(`internal/controller/webhook_provider_test.go`) runs the same fixture
+(profile, `PlatformConfig`, `ModelRequest`, a pre-succeeded `CapacityPlan`)
+through `Reconcile` three times, as subtests:
+
+1. **`tekton.StageRunner`**: standard condition-flip dance (same as
+   every existing tekton test in this file). Asserts `Phase ==
+   "Succeeded"` and RBAC side effects.
+2. **`noop.StageRunner`**: single reconcile call (immediate
+   `StageSucceeded`). Asserts `Phase == "Succeeded"`, same RBAC,
+   zero `PipelineRun` objects.
+3. **`webhook.StageRunner`**: four reconcile calls with a `fakeHTTPCaller`
+   injecting scripted HTTP responses (submit → `RUNNING` → `COMPLETED` →
+   `COMPLETED` again on the final poll-while-already-succeeded pass).
+   Asserts `Phase == "Succeeded"`, same RBAC side effects, zero
+   `PipelineRun` objects ever created by the webhook runner, and a real
+   tracking ConfigMap created with the extracted job ID.
+
+This is the first time the project has proven the `StageRunner`
+abstraction against a second REAL backend, not just the noop stub from
+Phase 5. The webhook runner calls through the same walker dispatch, the
+same `StageHandler.BuildSpec` -> `StageRunner.EnsureRun` contract, and
+produces the identical terminal outcome.
+
+### TDD: what was genuinely new vs. relocated
+
+Per the guiding principle, every new piece of behavior was tested first:
+
+- **`internal/webhookcore/renderer_test.go`** (new, 14 tests): simple
+  field access, nested field access, `eq`/`ne`/`index`/`len`/`printf`,
+  `urlquery`/`json` marshal, `and`/`or`/`not`, empty template, invalid
+  syntax, and the two forbidden-function tests (`call`/`slice` — written
+  first and confirmed they failed before the `disabledFunc` overrides
+  existed in the renderer).
+- **`internal/webhookcore/extractor_test.go`** (new, 9 tests): golden
+  JSON fixtures covering `$.status`, nested paths, array indexing, path
+  not found, invalid JSON, empty body, numeric/boolean/null values.
+- **`internal/webhookcore/caller_test.go`** (new, 4 tests): `httptest`
+  server for success (with body+auth+method assertions), no-body, no-auth,
+  context-timeout.
+- **`internal/webhookcore/auth_test.go`** (new, 4 tests):
+  `BuildAuthHeader` success, missing Secret, missing key, no-scheme-prefix
+  (raw API key).
+- **`internal/stages/webhook/stagerunner_test.go`** (new, 18 tests + 3
+  handler tests + 1 sync test): submit (creates tracking ConfigMap,
+  with/without auth header, with request template rendering, tracking
+  already exists → polls, nil ProviderConfigRef error, unsupported Kind
+  error, submit failure error), poll (Running/Succeeded/Failed outcomes,
+  unrecognized phase with clear message, auth header sent on poll,
+  poll failure returns Running, corrupted tracking → delete+resubmit),
+  `mapPhase` recognized/unrecognized, cross-package `StagePhase` sync,
+  `OwnedTypesProvider` absence proof.
+- **`internal/stages/webhook/config_test.go`** (new, 6 tests): valid
+  config resolution, nil ref error, missing object error, wrong
+  `ProviderType` error, unsupported `Kind` error, empty-Kind defaults.
+- **`internal/controller/webhook_provider_test.go`** (new, 1 test with 3
+  subtests): the three-way parity test described above.
+- **`api/v1alpha1/webhookproviderconfig_types_test.go`** (new, 1 test):
+  compile-time constant literal check.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) produced:
+`config/crd/bases/modelops.example.io_webhookproviderconfigs.yaml`
+(new CRD), `config/rbac/role.yaml` (gained `webhookproviderconfigs`
+`get;list;watch` and `configmaps` `get;create`).
+`zz_generated.deepcopy.go` gained `DeepCopyInto`/`DeepCopy` for
+`WebhookProviderConfig(List/Spec/Status)`, `WebhookStatusMapping`,
+`SecretKeyRef`, `RetryPolicy`. No other CRD changed. Confirmed `make
+manifests` idempotent on a second run.
+
+### GitOps manifests (all committed)
+
+- `gitops/components/operator/crd-webhookproviderconfigs.yaml` (new,
+  verbatim copy of the generated base CRD, added to `kustomization.yaml`).
+- `gitops/components/operator/clusterrole.yaml`: added
+  `webhookproviderconfigs` `get;list;watch` rule and `configmaps`
+  `get;create` rule (following the existing per-resource-group hand-
+  maintained style, same sync debt Phase 1 flagged and left alone).
+- `operator/config/samples/webhookproviderconfig-sample.yaml` (new,
+  kubebuilder convention): fully populated sample showing every field.
+
+### Cross-stage import check
+
+`go list -deps` confirmed for all six packages under `internal/stages/*`
+(`sandbox`, `promotion`, `capacityplanning`, `tekton`, `noop`, `webhook`):
+none imports another (all six commands produced no matching output).
+`internal/webhookcore` confirmed depends only on stdlib +
+`k8s.io/client-go/util/jsonpath` + `controller-runtime/client` — no
+`api/v1alpha1`, `stagecommon`, or any `internal/stages/*` entry.
+
+### Test coverage added
+
+- `internal/webhookcore`: 31 tests (14 renderer, 9 extractor, 4 caller,
+  4 auth).
+- `internal/stages/webhook`: 28 tests (18 StageRunner EnsureRun + 3
+  handler + 1 sync + 6 config).
+- `internal/controller`: 1 test (3 subtests) — the three-way parity
+  test.
+- `api/v1alpha1`: 1 test (constant literal check).
+- **Total suite: 217 passing test cases** (`go test -count=1 ./...`,
+  counting subtests), **0 failing** — up from ~190-200 at the end of
+  the prior out-of-band task/Phase 8+ review-response work. Every
+  pre-existing characterization and proof test in `internal/controller`
+  passed completely unmodified — zero assertion values changed, zero
+  test fixture wiring changes needed.
+
+### `webhook.StageRunner` NOT wired into main.go
+
+The webhook `StageRunner` and `Handler` are fully implemented, tested,
+and buildable, but deliberately not wired into `main.go`'s default
+`StageHandlers`/`StageRunners` registries. There is no
+`WebhookProviderConfig` CR in the live gitops runtime-config yet, so
+wiring it would add an inert registration with no profile actually
+dispatching to it. A user adds it to their own profile's stage entries
+per the pattern shown in the three-way parity test (declare a stage
+with `Kind: Webhook` and `ProviderConfigRef` pointing at a
+`WebhookProviderConfig` CR). The sample
+`config/samples/webhookproviderconfig-sample.yaml` serves as the
+reference for creating the config CR.
+
+### Known follow-up NOT done in this phase
+
+- **Wiring into `main.go`**: as stated above, deferred until a profile
+  actually uses it — no live/inert registration. The `Watches()`-based
+  immediate-re-trigger for `ProviderConfigLookupFailed` (already a
+  backlog item in `REFACTOR_PLAN.md`'s Phase 7 section, covering all
+  four lookup-failure reasons together) would naturally catch the
+  `WebhookProviderConfig` CR creation once wired.
+- **`WebhookMonitorConfig`/`ModelMonitor`**: the shared `internal/
+  webhookcore` package is designed to support it, but building that
+  consumer is out of scope (non-terminal monitoring contract vs.
+  terminal lifecycle phase — a fundamentally different concern,
+  deliberately not forced into this phase).
+- **Callback-based status delivery**: v1 is polling only.
+- **Sandbox cluster verification**: the mock HTTP service described in
+  the design review (section 8) was NOT stood up on the sandbox cluster
+  during this phase. The three-way parity test already exercises the
+  full submit/poll/map state machine against scripted HTTP responses via
+  the `Caller` interface seam — the mock service would add real-network
+  verification but requires a deployed mock `Deployment`+`Service` on
+  the sandbox cluster, which this codebase does not include. Left as a
+  follow-up task rather than a blocker for this phase.
+
+---
