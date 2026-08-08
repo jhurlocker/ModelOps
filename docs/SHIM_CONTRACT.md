@@ -163,9 +163,11 @@ spec:
     key: token
   requestTemplate: |
     {
-      "modelId": "{{.ModelRequest.Spec.Model.URI}}",
-      "namespace": "{{.Namespace}}",
-      "stage": "{{.Stage.Name}}"
+      "pipelineName": "model-validation",
+      "pipelineParameters": {
+        "modelId": "{{.ModelRequest.Spec.Model.URI}}"
+      },
+      "pipelineExecutionDisplayName": "{{.ModelRequest.Name}}"
     }
   submitJobIDJsonPath: "{.jobId}"
   statusEndpoint: "http://sagemaker-shim.sandbox.svc.cluster.local:8080/jobs/{{.JobID}}"
@@ -195,9 +197,12 @@ spec:
     key: token
   requestTemplate: |
     {
-      "modelId": "{{.ModelRequest.Spec.Model.URI}}",
-      "namespace": "{{.Namespace}}",
-      "stage": "{{.Stage.Name}}"
+      "experimentName": "model-validation",
+      "displayName": "{{.ModelRequest.Name}}",
+      "pipelineDefinitionId": "model-intake-pipeline",
+      "parameters": {
+        "modelId": "{{.ModelRequest.Spec.Model.URI}}"
+      }
     }
   submitJobIDJsonPath: "{.jobId}"
   statusEndpoint: "http://azure-ai-shim.sandbox.svc.cluster.local:8080/jobs/{{.JobID}}"
