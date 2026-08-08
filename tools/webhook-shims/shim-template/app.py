@@ -1,4 +1,6 @@
+import hmac
 import os
+import sys
 
 from flask import Flask, jsonify, request
 
@@ -18,8 +20,10 @@ def _auth_required():
     if request.path == "/health":
         return None
     token = _bearer_token_from_header()
+    if token is None:
+        return jsonify({}), 401
     expected = os.environ["SHIM_AUTH_TOKEN"]
-    if not token or token != expected:
+    if not hmac.compare_digest(token, expected):
         return jsonify({}), 401
     return None
 
@@ -71,4 +75,8 @@ def check_status_on_platform(job_id):
 
 
 if __name__ == "__main__":
+    token = os.environ.get("SHIM_AUTH_TOKEN", "")
+    if not token:
+        print("SHIM_AUTH_TOKEN is required and must not be empty.", file=sys.stderr)
+        sys.exit(1)
     app.run(host="0.0.0.0", port=8080)

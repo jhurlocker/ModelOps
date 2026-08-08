@@ -1,4 +1,7 @@
 import os
+import subprocess
+import sys
+
 import pytest
 
 from app import app as flask_app
@@ -19,6 +22,26 @@ def patch_submit_and_check(monkeypatch):
         "app.check_status_on_platform",
         lambda job_id: ("Running", "Job is executing", "https://example.com/jobs/mock-job-1"),
     )
+
+
+class TestStartupGuard:
+    def test_module_imports_when_token_set(self):
+        """Proves the startup guard is in __main__, not at import time."""
+        import app
+        assert app.app is not None
+
+    def test_main_exits_when_token_unset(self):
+        import pathlib
+        app_path = pathlib.Path(__file__).resolve().parent.parent / "app.py"
+        result = subprocess.run(
+            [sys.executable, str(app_path)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "SHIM_AUTH_TOKEN": ""},
+            timeout=5,
+        )
+        assert result.returncode == 1
+        assert "SHIM_AUTH_TOKEN is required and must not be empty" in result.stderr
 
 
 class TestAuthMiddleware:
