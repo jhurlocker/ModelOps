@@ -124,8 +124,13 @@ Stop after step 8 and wait for review before writing any code.
 Read docs/REFACTOR_PLAN.md, docs/PHASE_LOG.md, docs/REVIEW_RESPONSE_PLAN.md,
 and confirm Phase A (WebhookProviderConfig) is merged before starting.
 
-New phase - check-type stage decomposition. Design-review-first, same
+Phase B - check-type stage decomposition. Design-review-first, same
 rigor as Phase A.
+
+Two small things worth a look before moving to Phase B, not blockers:
+
+Confirm webhook.StageRunner's RBAC actually needs create on configmaps now that it's wired into main.go for real — worth a quick check that the marker from the design proposal made it in and matches what's actually used, the same spot-check that caught the dead service-ca.crt path a while back.
+The io.ReadAll fix has no explicit size bound. Not a blocker for a controlled sandbox mock, but worth a one-line note in PHASE_LOG.md's follow-up list if it doesn't already have one — a malicious or misbehaving webhook provider returning an unbounded response body is a real (if low-priority) resource-exhaustion consideration for a v2 hardening pass, distinct from the correctness bug that got fixed here.
 
 Do NOT write any implementation code yet. Propose:
 
