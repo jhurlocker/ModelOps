@@ -70,6 +70,45 @@ EOF
 oc wait --for=condition=Available deployment/openshift-gitops-server -n openshift-gitops --timeout=300s
 ```
 
+#### Step 1a: Grant ArgoCD cluster-wide permissions (sandbox only)
+
+The OpenShift GitOps operator creates an ArgoCD instance with a restricted
+ServiceAccount. For a disposable sandbox cluster, grant it cluster-admin so it
+can create CRDs, namespaces, and all resource types across the cluster:
+
+```bash
+oc adm policy add-cluster-role-to-user cluster-admin \
+  -z openshift-gitops-argocd-application-controller \
+  -n openshift-gitops
+```
+
+For production, scope this to the specific API groups and resources the
+platform actually needs instead of using cluster-admin.
+
+#### Step 1b: Configure ArgoCD UI RBAC
+
+By default the ArgoCD UI is only visible to OpenShift users in the
+`cluster-admins` group. Update the `ArgoCD` CR's `spec.rbac` so every
+authenticated user can at least view applications (sandbox-default
+`role:readonly`), and the local `admin` account works:
+
+> **Important:** The OpenShift GitOps operator owns the `argocd-rbac-cm`
+> ConfigMap and will revert any direct edits to it. Configure RBAC through
+> the `ArgoCD` custom resource instead.
+
+```bash
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
+{
+  "spec": {
+    "rbac": {
+      "defaultPolicy": "role:readonly",
+      "policy": "g, system:cluster-admins, role:admin\ng, cluster-admins, role:admin\ng, admin, role:admin\n",
+      "scopes": "[groups]"
+    }
+  }
+}'
+```
+
 ### Step 2: Deploy the platform
 
 ```bash
