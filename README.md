@@ -394,6 +394,93 @@ Package layout (`operator/internal/`):
 
 **Adding a new provider**: implement `stagecommon.StageHandler`/`StageRunner` in a new package under `internal/stages/`, following the same package-isolation rule as every existing stage package (never import a sibling `internal/stages/*` package — shared code goes in `stagecommon`). `internal/stages/noop` is the smallest possible `StageRunner` to start from; `internal/stages/tekton` is the real, full-featured example (provider config resolution, condition mapping, `OwnedTypesProvider` for RBAC/watch wiring). Register the new packages in `main.go`'s `StageHandlers`/`StageRunners` maps under whatever `Name`/`Kind` a `ModelLifecycleProfile` should reference, and grant the new package's own `+kubebuilder:rbac` markers (see `docs/RBAC.md` for how permissions are currently split by package).
 
+## Integrating a new tool or platform
+
+### The shape-based integration model
+
+Not every external tool needs a bespoke Go adapter in the operator.
+During this project's own design process, external platforms were
+classified by the *shape* of their integration API — how a client
+submits work, tracks it, and learns the outcome — rather than by
+vendor. Five shapes cover the vast majority of tools:
+
+| Integration shape | Operator-side contract | Status | Concrete example in this repo |
+|---|---|---|---|
+| **Kubernetes-native watchable object** | `StageHandler` + `StageRunner` that creates, owns, and condition-watches a CRD-backed child resource | **Implemented** | `internal/stages/tekton` — creates and tracks a `tektonv1.PipelineRun` |
+| **HTTP submit-then-poll** | `internal/stages/webhook` — a generic `StageRunner` driven entirely by a `WebhookProviderConfig` CR; no per-platform Go code | **Implemented** | `WebhookProviderConfig` CRD (`operator/api/v1alpha1/webhookproviderconfig_types.go`), plus the `webhook.StageRunner` (`operator/internal/stages/webhook/`) |
+| **HTTP synchronous single-call** (one request, synchronous response with no polling) | `StageRunner` that POSTs a payload, parses the response body, returns `Succeeded`/`Failed` immediately | Roadmap | Not yet implemented |
+| **HTTP push/callback** (third-party platform calls back with results rather than being polled) | Would require a callback endpoint on the operator or a companion service; `StageRunner` records `Running` until the callback arrives | Roadmap | Not yet implemented |
+| **Arbitrary script/container** (CLI tool, Python script, any image) | A `StageRunner` that wraps a Kubernetes `Job` with pluggable container image, arguments, and result extraction | Roadmap | Not yet implemented |
+
+A new commercial platform that fits the submit-then-poll shape needs
+only a `WebhookProviderConfig` instance in the cluster — no new
+controller code, no new Go package, nothing to recompile. The operator
+templatizes the submit request, POSTs it, extracts a `jobId` from the
+response, polls `statusEndpoint` with that `jobId`, and maps the
+response into `Running`/`Succeeded`/`Failed` using the CR's JSON-path
+and template fields. This is the model that makes the decouple-tooling-
+from-governance premise concrete at the operator level.
+
+### When a shim is needed (and when it isn't)
+
+`WebhookProviderConfig` covers the HTTP submit-then-poll shape without
+any per-platform code, provided the platform accepts a static bearer
+token for authentication. When a platform's native API requires
+something the operator cannot express in configuration alone —
+request signing with a client SDK rather than a static token, for
+example — a small shim service translates between the platform's real
+API and the canonical contract.
+
+The canonical shim contract is a three-endpoint HTTP API (submit,
+status check, health), fully specified in `docs/SHIM_CONTRACT.md`. A
+conformant shim accepts the same `POST /jobs` request body the operator
+would have sent directly, translates it into the platform's native
+SDK call, and returns the canonical `{phase, message, detailsUrl}`
+response on `GET /jobs/{jobId}` — completely hiding the platform's
+auth mechanism from the operator. The operator continues to use
+identical `WebhookProviderConfig` field values (same `phaseJsonPath`,
+`phaseValueMap`, template expressions) regardless of which shim it
+addresses; only the shim's service hostname and its bearer-token
+`Secret` reference change between providers.
+
+A reusable Flask skeleton at `tools/webhook-shims/shim-template/app.py`
+provides the HTTP routing, canonical JSON shapes, and bearer-token
+auth middleware. A shim author fills in exactly two functions —
+`submit_to_platform` and `check_status_on_platform` — and everything
+else is boilerplate.
+
+### Reference shims
+
+Two reference implementations prove the contract against the two
+auth patterns identified during this project's design process:
+
+- **SageMaker** (`tools/webhook-shims/sagemaker/app.py`) — uses boto3's
+  `sagemaker.start_pipeline_execution` / `describe_pipeline_execution`,
+  proving the SigV4 request-signing pattern: no static API token exists,
+  and the operator never sees AWS credentials.
+- **Azure AI** (`tools/webhook-shims/azure-ai/app.py`) — uses
+  `azure-identity` (`DefaultAzureCredential`) and `azure-ai-ml`
+  (`MLClient`), proving the OAuth2 client-credentials pattern: token
+  acquisition and refresh are internal to the shim, invisible to the
+  operator.
+
+Both shims ship with pytest contract-conformance and auth-middleware
+tests that require no live cloud credentials (see
+`docs/SHIM_CONTRACT.md` for the full test strategy).
+
+### The shim catalog is not a permanent commitment
+
+The shims in this repo are reference implementations — worked examples
+that prove the contract against real, genuinely different platform
+auth models. The contract (`docs/SHIM_CONTRACT.md`) is the product;
+the shims are artifacts of that product's development. This project
+does not commit to maintaining a shim for every vendor's platform,
+and adding a new shim does not require upstream acceptance. Teams that
+need a shim for their own platform can fork the `shim-template`, fill
+in the two platform functions, and deploy it in their own cluster
+against the same `WebhookProviderConfig` contract — consistent with the
+whole decouple-tooling-from-governance premise this repo is built on.
+
 ## Getting started / deployment
 
 This platform is deployed via ArgoCD (OpenShift GitOps) — **not**
