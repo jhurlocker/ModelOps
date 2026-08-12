@@ -1,0 +1,26 @@
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: llama-32-3b-instruct
+  namespace: my-first-model
+  labels:
+    app.kubernetes.io/part-of: modelops
+spec:
+  modelRef:
+    kind: LLMInferenceService
+    name: llama-32-3b-instruct
+---
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSAuthPolicy
+metadata:
+  name: admin-access-policy
+  namespace: models-as-a-service
+  labels:
+    app.kubernetes.io/part-of: modelops
+spec:
+  modelRefs:
+  - name: llama-32-3b-instruct
+    namespace: my-first-model
+  subjects:
+    users:
+    - admin
