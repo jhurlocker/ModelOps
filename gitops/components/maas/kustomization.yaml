@@ -8,7 +8,7 @@ resources:
   - maas-db-secret.yaml
   - kuadrant-crds.yaml
   - maas-auth-proxy.yaml
-  - maas-auth-policy.yaml
+  - tenant.yaml
 
 patches:
   - path: patch-datasciencecluster.yaml
