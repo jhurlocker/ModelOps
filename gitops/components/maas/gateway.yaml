@@ -4,6 +4,9 @@ kind: Gateway
 metadata:
   name: maas-default-gateway
   namespace: openshift-ingress
+  annotations:
+    opendatahub.io/managed: "false"
+    security.opendatahub.io/authorino-tls-bootstrap: "true"
 spec:
   gatewayClassName: data-science-gateway-class
   listeners:
@@ -12,4 +15,7 @@ spec:
       protocol: HTTP
       allowedRoutes:
         namespaces:
-          from: All
+          from: Selector
+          selector:
+            matchLabels:
+              maas.opendatahub.io/gateway-access: "true"
