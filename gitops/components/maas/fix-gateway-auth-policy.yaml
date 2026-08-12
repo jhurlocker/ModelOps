@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fix-gateway-default-auth
+  namespace: openshift-ingress
+  labels:
+    app.kubernetes.io/part-of: modelops
+spec:
+  schedule: "*/2 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 60
+      template:
+        spec:
+          serviceAccountName: fix-gateway-auth
+          restartPolicy: OnFailure
+          containers:
+            - name: patch
+              image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -e
+                  TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  APISERVER="https://kubernetes.default.svc"
+                  APIPATH="/apis/kuadrant.io/v1/namespaces/openshift-ingress/authpolicies/gateway-default-auth"
+                  echo "checking gateway-default-auth..."
+                  HTTP_CODE=$(curl -sk -o /tmp/resp.json -w "%{http_code}" -H "Authorization: Bearer ${TOKEN}" "${APISERVER}${APIPATH}" 2>/dev/null)
+                  echo "HTTP status: ${HTTP_CODE}"
+                  if [ "$HTTP_CODE" != "200" ]; then
+                    echo "policy not found (HTTP ${HTTP_CODE}), skipping"
+                    exit 0
+                  fi
+                  HAS_RULES=$(grep -c '"authentication"' /tmp/resp.json 2>/dev/null || echo "0")
+                  if [ "$HAS_RULES" -gt 0 ] 2>/dev/null; then
+                    echo "defaults present, patching..."
+                    curl -sk -X PATCH -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/merge-patch+json" -d '{"spec":{"defaults":null}}' "${APISERVER}${APIPATH}" 2>/dev/null
+                    echo "patched"
+                  else
+                    echo "already clean"
+                  fi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fix-gateway-auth
+  namespace: openshift-ingress
+  labels:
+    app.kubernetes.io/part-of: modelops
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fix-gateway-auth
+  namespace: openshift-ingress
+  labels:
+    app.kubernetes.io/part-of: modelops
+rules:
+  - apiGroups: ["kuadrant.io"]
+    resources: ["authpolicies"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fix-gateway-auth
+  namespace: openshift-ingress
+  labels:
+    app.kubernetes.io/part-of: modelops
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fix-gateway-auth
+subjects:
+  - kind: ServiceAccount
+    name: fix-gateway-auth
+    namespace: openshift-ingress
