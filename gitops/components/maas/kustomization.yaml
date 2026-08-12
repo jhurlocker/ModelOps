@@ -6,9 +6,8 @@ resources:
   - namespace-maas-infra.yaml
   - maas-postgres.yaml
   - maas-db-secret.yaml
-  - maas-authorino.yaml
   - kuadrant-crds.yaml
-  - maas-api-route.yaml
+  - maas-auth-proxy.yaml
 
 patches:
   - path: patch-datasciencecluster.yaml
