@@ -141,3 +141,27 @@ def get_capacity_plan(name, namespace=None):
         plural="capacityplans",
         name=name,
     )
+
+
+def list_webhook_provider_configs(namespace=None, limit=50):
+    ns = namespace or PIPELINE_NAMESPACE
+    resp = custom_api().list_namespaced_custom_object(
+        group=MODELREQUEST_GROUP,
+        version=MODELREQUEST_VERSION,
+        namespace=ns,
+        plural="webhookproviderconfigs",
+        limit=limit,
+    )
+    return resp.get("items", [])
+
+
+def list_intake_provider_configs(namespace=None, limit=50):
+    ns = namespace or PIPELINE_NAMESPACE
+    resp = custom_api().list_namespaced_custom_object(
+        group=MODELREQUEST_GROUP,
+        version=MODELREQUEST_VERSION,
+        namespace=ns,
+        plural="intakeproviderconfigs",
+        limit=limit,
+    )
+    return resp.get("items", [])

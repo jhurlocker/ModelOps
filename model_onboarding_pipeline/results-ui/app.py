@@ -31,7 +31,7 @@ s3_client = boto3.client(
 )
 
 # Initialize the Flask web server
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 # --- HTML/JS Template ---
 # I've embedded your page here and modified the JavaScript.
@@ -43,9 +43,7 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Benchmark Results Viewer (Python Backend)</title>
-    <!-- js-yaml is only needed if we parse YAML on client, which we don't -->
-    <!-- <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script> -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/static/js/chart.min.js"></script>
     <style>
         body { font-family: sans-serif; line-height: 1.6; margin: 20px; background-color: #f4f4f4; color: #333; }
         h1, h2, h3 { color: #0056b3; }

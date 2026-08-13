@@ -48,7 +48,7 @@
     <div class="card-body">
         <div class="table-wrapper">
             <table>
-                <thead><tr><th>#</th><th>Stage</th><th>Namespace</th><th>Phase</th><th>Message</th></tr></thead>
+                <thead><tr><th>#</th><th>Stage</th><th>Namespace</th><th>Phase</th><th>Message</th><th>Details</th></tr></thead>
                 <tbody>
                     {% for s in status.stages %}
                     <tr>
@@ -59,6 +59,11 @@
                             <span class="badge {{ s.phase|stage_progress_badge_class }}">{{ s.phase }}</span>
                         </td>
                         <td>{{ s.message or '—' }}</td>
+                        <td>
+                            {% if s.detailsURL %}
+                            <a href="{{ s.detailsURL }}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline">View in provider console</a>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>

@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Now copy the application code
 COPY app.py .
+COPY static/ static/
 
 # Expose port 8080 (the default for OpenShift apps)
 EXPOSE 8080

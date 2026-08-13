@@ -65,4 +65,83 @@
         </table>
     </div>
 </div>
+
+{% if webhook_providers %}
+<div class="card">
+    <div class="card-header">
+        Webhook Provider Configs
+        <span style="font-size:12px;color:var(--color-text-muted);font-weight:400">read-only</span>
+    </div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table>
+                <thead><tr><th>Name</th><th>Provider Type</th><th>Submit Endpoint</th><th>Health</th></tr></thead>
+                <tbody>
+                    {% for wp in webhook_providers %}
+                    {% set meta = wp.metadata %}
+                    {% set spec = wp.spec %}
+                    <tr>
+                        <td><strong>{{ meta.name }}</strong></td>
+                        <td><code>{{ spec.providerType }}</code></td>
+                        <td><code class="form-hint">{{ spec.submitEndpoint }}</code></td>
+                        <td class="provider-health" data-health-url="{{ spec.submitEndpoint.rsplit('/', 1)[0] }}/health">
+                            <span class="badge badge-neutral">checking&hellip;</span>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if intake_providers %}
+<div class="card">
+    <div class="card-header">
+        Intake Provider Configs
+        <span style="font-size:12px;color:var(--color-text-muted);font-weight:400">read-only</span>
+    </div>
+    <div class="card-body">
+        <div class="table-wrapper">
+            <table>
+                <thead><tr><th>Name</th><th>Provider Type</th><th>Sandbox Pipeline</th><th>Promotion Pipeline</th><th>Service Account</th></tr></thead>
+                <tbody>
+                    {% for ip in intake_providers %}
+                    {% set meta = ip.metadata %}
+                    {% set spec = ip.spec %}
+                    <tr>
+                        <td><strong>{{ meta.name }}</strong></td>
+                        <td><code>{{ spec.providerType }}</code></td>
+                        <td><code>{{ spec.sandboxPipelineName or '—' }}</code></td>
+                        <td><code>{{ spec.promotionPipelineName or '—' }}</code></td>
+                        <td><code>{{ spec.serviceAccountName or '—' }}</code></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+(function() {
+    document.querySelectorAll('.provider-health').forEach(function(cell) {
+        var healthUrl = cell.dataset.healthUrl;
+        fetch('/configuration/providers/health?url=' + encodeURIComponent(healthUrl))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.reachable) {
+                    cell.innerHTML = '<span class="badge badge-success">Reachable</span>';
+                } else {
+                    cell.innerHTML = '<span class="badge badge-danger">Unreachable</span> <span class="form-hint" style="display:inline">' + (data.error || 'status ' + data.status) + '</span>';
+                }
+            })
+            .catch(function(err) {
+                cell.innerHTML = '<span class="badge badge-warning">Error</span>';
+            });
+    });
+})();
+</script>
 {% endblock %}
