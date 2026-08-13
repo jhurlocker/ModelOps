@@ -63,6 +63,7 @@ type Progress struct {
 	Phase        stagecommon.StagePhase
 	RunRef       string
 	Message      string
+	DetailsURL   string
 	CheckResults []stagecommon.CheckResult
 }
 
@@ -144,6 +145,7 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 				Phase:        status.Phase,
 				RunRef:       status.RunRef,
 				Message:      status.Message,
+				DetailsURL:   status.DetailsURL,
 				CheckResults: status.CheckResults,
 			})
 

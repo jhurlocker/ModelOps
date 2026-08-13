@@ -164,6 +164,13 @@ type StageProgress struct {
 	Phase     string `json:"phase"`
 	RunRef    string `json:"runRef,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// DetailsURL is an optional human-facing link out to the provider's
+	// own console, logs, or job page. Set only by providers whose
+	// execution surface is genuinely external (webhook provider, via
+	// its statusMapping.detailsUrlTemplate); every other provider
+	// leaves it empty.
+	// +optional
+	DetailsURL string `json:"detailsURL,omitempty"`
 	// CheckResults is optional per-check governance evidence, distinct
 	// from and in addition to the stage's single aggregate Phase.
 	// Populated only when a stage has multiple CheckTypes and the

@@ -241,6 +241,72 @@ func TestModelRequest_CheckResults_SurvivesFullPathFromStageRunnerToPersistedSta
 	require.Equal(t, "policy-ok", sandboxStatus.CheckResults[1].Reason)
 }
 
+func TestModelRequest_DetailsURL_SurvivesFullPathFromStageRunnerToPersistedStatus(t *testing.T) {
+	ns := newTestNamespace(t)
+	ensureNamespace(t, "staging")
+	newPlatformConfig(t, ns, "cfg-1", modelopsv1alpha1.PlatformConfigSpec{})
+
+	fakeRunner := stagecommon.NewFakeStageRunner()
+
+	profileSpec := modelopsv1alpha1.ModelLifecycleProfileSpec{
+		Workflow: modelopsv1alpha1.WorkflowRef{
+			Engine:      "tekton",
+			PipelineRef: "model-intake-sandbox",
+		},
+		PlatformConfigRef: "cfg-1",
+		Stages: []modelopsv1alpha1.ProfileStageSpec{
+			{Name: "capacity", Kind: "CapacityPlan"},
+			{Name: "sandbox", Kind: "PipelineRun"},
+			{
+				Name:         "promotion",
+				Kind:         "PipelineRun",
+				PerNamespace: true,
+				NamespaceSetup: &modelopsv1alpha1.StageNamespaceSetup{
+					EnsureRBAC: true,
+					Labels:     map[string]string{"maas.opendatahub.io/gateway-access": "true"},
+				},
+			},
+		},
+	}
+	newProfile(t, ns, "profile-dr", profileSpec)
+
+	newModelRequest(t, ns, "mr-dr", "profile-dr", nil)
+	setupSucceededCapacityPlan(t, ns, "mr-dr")
+
+	fakeRunner.ScriptStage("sandbox", stagecommon.StageStatus{
+		Phase:      stagecommon.StageSucceeded,
+		Reason:     "JobSucceeded",
+		Message:    "sandbox complete",
+		DetailsURL: "https://provider.example.com/console/jobs/j-12345",
+	})
+	fakeRunner.ScriptStage("promotion", stagecommon.StageStatus{
+		Phase:   stagecommon.StageSucceeded,
+		Reason:  "JobSucceeded",
+		Message: "promoted",
+	})
+
+	r := &ModelRequestReconciler{
+		Client:        k8sClient,
+		Scheme:        testRuntimeScheme(),
+		StageHandlers: newStageHandlers(),
+		StageRunners:  newStageRunners(k8sClient, testRuntimeScheme(), fakeRunner),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nsName(ns, "mr-dr")})
+	require.NoError(t, err)
+	got := getModelRequest(t, ns, "mr-dr")
+	require.Equal(t, "promotionRunning", got.Status.Phase, "sandbox completes in first pass, promotion is pending")
+
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: nsName(ns, "mr-dr")})
+	require.NoError(t, err)
+	got = getModelRequest(t, ns, "mr-dr")
+	require.Len(t, got.Status.Stages, 3)
+
+	sandboxStatus := got.Status.Stages[1]
+	require.Equal(t, "sandbox", sandboxStatus.Name)
+	require.Equal(t, "https://provider.example.com/console/jobs/j-12345", sandboxStatus.DetailsURL)
+}
+
 func getProfile(t *testing.T, ns, name string) *modelopsv1alpha1.ModelLifecycleProfile {
 	t.Helper()
 	var p modelopsv1alpha1.ModelLifecycleProfile

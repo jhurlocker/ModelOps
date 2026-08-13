@@ -333,6 +333,14 @@ spec:
                         - type
                         type: object
                       type: array
+                    detailsURL:
+                      description: |-
+                        DetailsURL is an optional human-facing link out to the provider's
+                        own console, logs, or job page. Set only by providers whose
+                        execution surface is genuinely external (webhook provider, via
+                        its statusMapping.detailsUrlTemplate); every other provider
+                        leaves it empty.
+                      type: string
                     message:
                       type: string
                     name:

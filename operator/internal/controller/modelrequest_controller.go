@@ -472,7 +472,7 @@ func stageProgressEqual(a, b []modelopsv1alpha1.StageProgress) bool {
 }
 
 func singleStageProgressEqual(a, b modelopsv1alpha1.StageProgress) bool {
-	if a.Name != b.Name || a.Namespace != b.Namespace || a.Phase != b.Phase || a.RunRef != b.RunRef || a.Message != b.Message {
+	if a.Name != b.Name || a.Namespace != b.Namespace || a.Phase != b.Phase || a.RunRef != b.RunRef || a.Message != b.Message || a.DetailsURL != b.DetailsURL {
 		return false
 	}
 	if len(a.CheckResults) != len(b.CheckResults) {
@@ -504,6 +504,7 @@ func toStageProgressList(progress []stagewalk.Progress) []modelopsv1alpha1.Stage
 			Phase:        string(p.Phase),
 			RunRef:       p.RunRef,
 			Message:      p.Message,
+			DetailsURL:   p.DetailsURL,
 			CheckResults: cr,
 		})
 	}
