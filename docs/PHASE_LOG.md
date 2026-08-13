@@ -4681,3 +4681,101 @@ types or verbs are needed. `kustomize build` confirmed clean for both
   list above.
 
 ---
+
+## Phase C — Thread DetailsURL through StageProgress to persisted CRD status
+
+**Commit:** `a1fbd5b` on `feat/model-request-controller` — "feat(operator):
+thread DetailsURL through StageProgress to persisted CRD status".
+
+This is the same class of fix as Phase B's `CheckResults` threading: a
+field (`DetailsURL`) was added to the internal `stagecommon.StageStatus`
+contract in Phase A, and StageRunners correctly populate it (the webhook
+StageRunner via `detailsUrlTemplate`), but the intermediate types and
+copy sites that wire the internal value into the persisted CRD were
+never updated — meaning the value was computed correctly and then
+silently dropped before `kubectl get modelrequest -o yaml` could ever
+show it. See `docs/REVIEW_CONVENTIONS.md` for the design-review
+principle that prevents this class of bug.
+
+### What changed
+
+- **`api/v1alpha1/modelrequest_types.go`**: `DetailsURL` added to
+  `StageProgress` as `json:"detailsURL,omitempty"`. Same decoupling
+  pattern as `Phase` (a plain `string`, not imported from
+  `internal/stagecommon`) and `CheckResults` — the `api/v1alpha1`
+  package never imports `internal/stagecommon`.
+
+- **`internal/stagewalk/walk.go`**: `Progress.DetailsURL` added; the
+  Walk loop copies `status.DetailsURL` through alongside the existing
+  `CheckResults` pass-through. Purely additive — zero control-flow
+  changes.
+
+- **`internal/controller/modelrequest_controller.go`**: `toStageProgressList`
+  maps `stagewalk.Progress.DetailsURL` to `api/v1alpha1.StageProgress.
+  DetailsURL` at the copy site (line ~507) alongside the existing
+  `CheckResults` mapping. `singleStageProgressEqual` includes
+  `DetailsURL` in its comparison alongside `Message`/`RunRef`/
+  `CheckResults`.
+
+### TDD: test written first or alongside
+
+- **Full-path survival** (`internal/controller/checktype_controller_
+  test.go`, `TestModelRequest_DetailsURL_SurvivesFullPathFrom
+  StageRunnerToPersistedStatus`): mirrors the existing Phase B test
+  `TestModelRequest_CheckResults_SurvivesFullPathFromStageRunnerTo
+  PersistedStatus` exactly — creates a `FakeStageRunner` scripted to
+  return `DetailsURL: "https://provider.example.com/console/jobs/
+  j-12345"` on the sandbox stage, reconciles twice, and asserts
+  `ModelRequest.Status.Stages[1].DetailsURL` matches the scripted value
+  exactly as supplied by the fake runner. All pre-existing controller
+  and stage tests pass unmodified — zero assertion values changed, zero
+  test names changed.
+
+### Manifest regeneration
+
+`make manifests generate` (controller-gen v0.16.5) picked up the new
+`detailsURL` field on the `modelrequests.modelops.example.io` CRD only
+— purely additive, 8 new lines describing the string field and its
+documentation. No other CRDs changed. `zz_generated.deepcopy.go` needed
+no changes (the new `DetailsURL` field is a plain `string`, which Go's
+default shallow copy handles). Confirmed idempotent on a second
+`make manifests generate`. No RBAC change — `detailsURL` is purely a
+data field on an existing CRD that already exists in the schema.
+
+### GitOps manifests
+
+`gitops/components/operator/crd-modelrequests.yaml` synced verbatim from
+the regenerated base (confirmed byte-identical after copy). No other
+gitops files changed.
+
+### Sandbox cluster verification
+
+- Pushed branch, applied updated CRD directly to the sandbox cluster
+  (`oc apply -f`), confirmed `detailsURL` appears in the CRD schema.
+- Built manager image via `oc new-build --binary --strategy=docker`,
+  deployed to `modelops-operator` deployment, confirmed manager starts
+  cleanly with all `EventSource`s registered.
+- Created a `WebhookProviderConfig` with `detailsUrlTemplate:
+  "{{.Response.detailsUrl}}"` and a live webhook mock service returning
+  `{"status":"completed","detailsUrl":"https://example.com/console/
+  jobs/test-job-12345","message":"all checks passed"}`.
+- Created a `ModelRequest` (`test-details-url-mr`) referencing a
+  `ModelLifecycleProfile` with `kind: Webhook` and `providerConfigRef`
+  pointing at the webhook provider. Reconciled through to `Succeeded`.
+- **`kubectl get modelrequest test-details-url-mr -n sandbox -o yaml`
+  confirmed `detailsURL: https://example.com/console/jobs/test-job-12345`
+  in `status.stages[0]`** — the value survived the full path from
+  webhook StageRunner → stagewalk.Progress → toStageProgressList →
+  persisted CRD status.
+- All test resources deleted after verification.
+
+### Known follow-up NOT done in this phase
+
+- **No operator image publishing to quay.io**: this phase's `make
+  docker-push` target requires `quay.io/jhurlocker/modelops-operator`
+  credentials that weren't available in the development environment.
+  The manager image was built locally via `oc new-build` and deployed
+  to the sandbox for verification; future pushes to quay.io will
+  pick up the built image from the same `Containerfile`.
+
+---
