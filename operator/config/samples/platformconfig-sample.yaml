@@ -25,7 +25,7 @@ spec:
   chartVersion: "0.7.1"
   hardwareProfileName: gpu-profile
   hardwareProfileNamespace: redhat-ods-applications
-  evalhubUrl: default-evalhub-redhat-ods-applications.apps.ocp.wpmzp.sandbox2855.opentlc.com
+  evalhubUrl: default-evalhub-redhat-ods-applications.apps.ocp.tkjpd.sandbox1883.opentlc.com
   approvalPollIntervalSeconds: 15
   approvalTimeoutSeconds: 3600
   benchmarkProfile: constant
