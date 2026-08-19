@@ -61,5 +61,20 @@ spec:
         ensureRBAC: true
         labels:
           opendatahub.io/generated-namespace: "true"
+          # Required so the TrustyAI Operator provisions the
+          # EvalHub ServiceAccount, RoleBindings, and
+          # CA ConfigMap in this namespace. The promotion
+          # pipeline's guidellm-benchmark task runs against
+          # EvalHub in the promotion target namespace, and
+          # without this label the operator never creates
+          # the RBAC grant its own service account needs
+          # there -- confirmed by a real "configmaps is
+          # forbidden" error for
+          # system:serviceaccount:redhat-ods-applications:
+          # default-evalhub-service in namespace "staging".
+          # Any future per-namespace promotion stage must
+          # include this label (matching what the sandbox
+          # stage already has).
+          evalhub.trustyai.opendatahub.io/tenant: ""
           maas.opendatahub.io/gateway-access: "true"
           opendatahub.io/dashboard: "true"
