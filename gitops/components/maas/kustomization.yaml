@@ -9,8 +9,4 @@ resources:
   - kuadrant-crds.yaml
   - maas-auth-proxy.yaml
   - tenant.yaml
-
-patches:
-  - path: patch-datasciencecluster.yaml
-    target:
-      kind: DataScienceCluster
+  - patch-datasciencecluster.yaml
