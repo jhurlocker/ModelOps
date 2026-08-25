@@ -10,6 +10,7 @@ gitops/
 ├── appproject.yaml            # ArgoCD AppProject for the platform
 ├── applications/              # Child Application manifests
 │   ├── evalhub.yaml
+│   ├── maas-prereqs.yaml
 │   ├── maas-subscriptions.yaml
 │   ├── maas.yaml
 │   ├── minio.yaml
@@ -24,6 +25,7 @@ gitops/
 │   └── runtime-config.yaml
 ├── components/                # Kustomize-based resource definitions
 │   ├── evalhub/               # EvalHub (TrustyAI) evaluation
+│   ├── maas-prereqs/          # RHCL operator, LeaderWorkerSet, Kuadrant CR (MaaS auth infrastructure)
 │   ├── maas-subscriptions/    # KServe MaaS subscription tiers (free/premium)
 │   ├── maas/                  # KServe Models-as-a-Service enablement
 │   ├── minio/                 # MinIO S3-compatible object storage
@@ -47,6 +49,9 @@ gitops/
 2. OpenShift AI (RHOAI) operator installed
 3. OpenShift Pipelines operator installed
 4. OpenShift GitOps operator installed (see below)
+5. cert-manager Operator for Red Hat OpenShift (often pre-installed; verify with `oc get csv -n cert-manager-operator | grep cert-manager`)
+6. Red Hat Connectivity Link operator (installed automatically by the `maas-prereqs` Application during deployment)
+7. Leader Worker Set Operator (installed automatically by the `maas-prereqs` Application during deployment)
 
 ### Step 1: Install OpenShift GitOps
 
@@ -129,20 +134,21 @@ oc apply -f gitops/appproject.yaml
 oc apply -f gitops/root-app.yaml
 ```
 
-ArgoCD will automatically sync all 13 child applications:
-1. EvalHub — TrustyAI evaluation platform
-2. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
-3. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
-4. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
-5. MLflow — experiment tracking via MlflowOperator
-6. Model Inference — example inference route (Granite 2B) deployed to staging
-7. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
-8. Model Registry — MySQL-backed Model Registry instance for registered model metadata
-9. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
-10. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
-11. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
-12. Results UI — frontend UI for viewing scan and benchmark results
-13. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
+ArgoCD will automatically sync all 14 child applications:
+1. MaaS Prereqs — RHCL operator, LeaderWorkerSet operator, Kuadrant CR (auth/rate-limiting infra)
+2. EvalHub — TrustyAI evaluation platform
+3. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
+4. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
+5. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
+6. MLflow — experiment tracking via MlflowOperator
+7. Model Inference — example inference route (Granite 2B) deployed to staging
+8. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
+9. Model Registry — MySQL-backed Model Registry instance for registered model metadata
+10. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
+11. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
+12. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
+13. Results UI — frontend UI for viewing scan and benchmark results
+14. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
 ### Application dependency chain and sync ordering
 
@@ -155,6 +161,7 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 
 | Wave | Applications | What it does / depends on |
 |------|--------------|---------------------------|
+| -1 | maas-prereqs | Installs RHCL + LWS operators, creates Kuadrant CR → async Authorino creation |
 | 1 | maas | Patches DataScienceCluster → triggers async RHOAI reconciliation for MaaS CRDs |
 | 2 | maas-subscriptions | Creates MaaSSubscription CRs — depends on CRDs registered by wave 1 |
 | 3 | modelops-pipelines | Creates `sandbox`, `staging`, `vllm`, `vllm-staging` namespaces |
@@ -170,6 +177,35 @@ All Applications with sync-waves also carry a retry policy
 (limit: 20, exponential backoff 10s → 5m max) so transient failures
 (failure reasons outside this repo's control, such as async operator reconciliation
 or namespace propagation) are handled automatically instead of failing fast.
+
+#### maas-prereqs dependency chain (wave -1)
+
+The **maas-prereqs** Application must sync before any MaaS resources because it
+deploys the infrastructure that the maas Application's Tenant, Gateway, and
+MaaSSubscription resources depend on:
+
+1. **Red Hat Connectivity Link (RHCL) operator**: Installed via Subscription
+   in `openshift-operators`. The RHCL operator only supports `AllNamespaces`
+   install mode, so it MUST go in `openshift-operators` — the global operator
+   namespace that already has a cluster-wide OperatorGroup. Installing it in
+   `kuadrant-system` (or any single namespace) will fail.
+
+2. **Leader Worker Set (LWS) operator**: Installed in `openshift-lws-operator`
+   namespace (OwnNamespace install mode). The `cert-manager Operator for
+   Red Hat OpenShift` must be pre-installed (verify with `oc get csv -n
+   cert-manager-operator`).
+
+3. **Kuadrant CR**: Created in `kuadrant-system`. When the RHCL operator
+   reconciles this CR, it asynchronously creates an Authorino instance
+   (operator `authorino-authorino-authorization` pod) and Limitador instance
+   for API authentication and rate limiting respectively. These components
+   are needed for the MaaS API key management that backs
+   `POST /maas/api/v1/api-keys/search`.
+
+The retry policy (20 attempts, 10s→5m backoff) handles the async operator
+reconciliation: the RHCL operator may take several minutes to install, then
+the Kuadrant CR reconciliation may take additional minutes to create Authorino
+and Limitador deployments.
 
 #### maas / maas-subscriptions dependency chain
 
@@ -217,6 +253,20 @@ If any Application's retry policy is ever exhausted (all 20 attempts fail),
 verify the dependency and force a re-sync:
 
 ```bash
+# ---- maas-prereqs ----
+
+# Check that RHCL operator is installed
+oc get csv rhcl-operator -n openshift-operators
+# Expected: Succeeded phase
+
+# Check that Kuadrant CR is ready
+oc get kuadrant kuadrant -n kuadrant-system
+oc get deployment authorino -n kuadrant-system
+
+# If Kuadrant reports MissingDependency (Istio race condition), restart the operator:
+oc delete pod -n openshift-operators \
+  $(oc get pods -n openshift-operators --no-headers | grep kuadrant-operator | awk '{print $1}')
+
 # ---- maas / maas-subscriptions ----
 
 # Check that the DataScienceCluster patch was applied
@@ -251,13 +301,153 @@ done
 
 #### ArgoCD controller memory
 
-During a cold bootstrap of all 13 Applications with retry policies, the
+During a cold bootstrap of all 14 Applications with retry policies, the
 ArgoCD application controller may exhaust its default 2Gi memory limit
 and be OOMKilled (exit 137). Increase the memory limit before deploying:
 
 ```bash
 oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
 {"spec":{"controller":{"resources":{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}}}}'
+```
+
+### Step 2a: Configure Authorino TLS (manual, one-time)
+
+After the `maas-prereqs` Application is synced and the Kuadrant CR is ready
+(`oc wait --for=condition=Ready kuadrant/kuadrant -n kuadrant-system`),
+the Kuadrant operator auto-creates an Authorino instance. TLS must be
+configured on that Authorino before MaaS API key operations will work.
+
+These steps mirror [RHOAI 3.4 docs section 1.4 (Configure TLS for Models-as-a-Service)](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/deploy-and-manage-models-as-a-service_maas#configure-tls-for-maas_maas-deploy).
+
+> **Why this can't be GitOps-managed**: The Authorino CR and its Service are
+> dynamically created by the Kuadrant operator when it reconciles the Kuadrant
+> CR. Annotating the Service, patching the Authorino CR, and setting deployment
+> environment variables are all modifications of operator-owned, auto-created
+> resources. Trying to pre-create them as Kustomize resources would either fail
+> (resource doesn't exist yet) or conflict with the operator (race on ownership).
+
+**Step 2a-1:** Verify Kuadrant is ready and Authorino exists:
+
+```bash
+oc wait --for=condition=Ready kuadrant/kuadrant -n kuadrant-system --timeout=300s
+oc get deployment authorino -n kuadrant-system
+```
+
+**Step 2a-2:** Annotate the Authorino service for TLS certificate generation:
+
+```bash
+oc annotate service authorino-authorino-authorization \
+  -n kuadrant-system \
+  service.beta.openshift.io/serving-cert-secret-name=authorino-server-cert \
+  --overwrite
+```
+
+The `service-ca-operator` generates a TLS certificate signed by the cluster
+service CA and stores it in the `authorino-server-cert` Secret.
+
+**Step 2a-3:** Verify the TLS secret was created:
+
+```bash
+oc get secret authorino-server-cert -n kuadrant-system
+# Expected: TYPE kubernetes.io/tls, DATA 2
+```
+
+**Step 2a-4:** Patch the Authorino CR to enable the TLS listener:
+
+```bash
+oc patch authorino authorino -n kuadrant-system --type=merge --patch '{
+  "spec": {
+    "listener": {
+      "tls": {
+        "enabled": true,
+        "certSecretRef": {
+          "name": "authorino-server-cert"
+        }
+      }
+    }
+  }
+}'
+```
+
+**Step 2a-5:** Configure Authorino deployment with TLS certificate environment variables:
+
+```bash
+oc -n kuadrant-system set env deployment/authorino \
+  SSL_CERT_FILE=/etc/ssl/certs/openshift-service-ca/service-ca-bundle.crt \
+  REQUESTS_CA_BUNDLE=/etc/ssl/certs/openshift-service-ca/service-ca-bundle.crt
+```
+
+Wait for the Authorino deployment to roll out:
+
+```bash
+oc wait --for=condition=Available deployment/authorino -n kuadrant-system --timeout=300s
+```
+
+**Step 2a-6:** Annotate the Gateway for Authorino TLS bootstrap:
+
+```bash
+oc annotate gateway maas-default-gateway -n openshift-ingress \
+  security.opendatahub.io/authorino-tls-bootstrap="true" --overwrite
+```
+
+The MaaS controller detects this annotation and creates an `EnvoyFilter`
+resource that configures the Envoy proxy to use TLS when communicating
+with Authorino.
+
+### Step 2b: Restart model controllers (manual, one-time)
+
+After Authorino TLS is configured, the RHOAI model controllers need to
+discover the updated MaaS infrastructure. Restart them:
+
+```bash
+oc delete pod -n redhat-ods-applications -l app=odh-model-controller
+oc delete pod -n redhat-ods-applications -l control-plane=kserve-controller-manager
+```
+
+Wait for both to be ready:
+
+```bash
+oc wait --for=condition=Ready pod -l app=odh-model-controller -n redhat-ods-applications --timeout=120s
+oc wait --for=condition=Ready pod -l control-plane=kserve-controller-manager -n redhat-ods-applications --timeout=120s
+```
+
+> **Why this can't be GitOps-managed**: Restarting a pod is not idempotent
+> or declarative — a `Job` that deletes pods would re-execute on every sync
+> cycle, causing unnecessary disruption. This is a one-time post-install step.
+
+### Step 2c: Verify Authorino TLS end-to-end
+
+Confirm the full Authorino TLS chain:
+
+```bash
+# Authorino service has the serving cert annotation
+oc get service authorino-authorino-authorization -n kuadrant-system \
+  -o jsonpath='{.metadata.annotations.service\.beta\.openshift\.io/serving-cert-secret-name}'
+# Expected: authorino-server-cert
+
+# Authorino CR has TLS enabled
+oc get authorino authorino -n kuadrant-system \
+  -o jsonpath='{.spec.listener.tls.enabled}'
+# Expected: true
+
+# Authorino deployment has TLS env vars
+oc get deployment/authorino -n kuadrant-system \
+  -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_FILE")].value}'
+# Expected: /etc/ssl/certs/openshift-service-ca/service-ca-bundle.crt
+
+# Gateway has TLS bootstrap annotation
+oc get gateway maas-default-gateway -n openshift-ingress \
+  -o jsonpath='{.metadata.annotations.security\.opendatahub\.io/authorino-tls-bootstrap}'
+# Expected: true
+
+# Tenant Degraded condition should clear
+oc get tenant default-tenant -n models-as-a-service \
+  -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}'
+# Should no longer mention "no Authorino instances found"
+
+# MaaS API key search should return non-500
+CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+curl -sk "https://maas.${CLUSTER_DOMAIN}/maas/api/v1/user"
 ```
 
 ### Step 3: Platform configuration (automatic)

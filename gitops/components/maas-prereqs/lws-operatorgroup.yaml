@@ -1,0 +1,8 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: lws-operatorgroup
+  namespace: openshift-lws-operator
+spec:
+  targetNamespaces:
+    - openshift-lws-operator
