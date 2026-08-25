@@ -6,4 +6,3 @@ resources:
   - lws-operatorgroup.yaml
   - lws-subscription.yaml
   - rhcl-subscription.yaml
-  - kuadrant.yaml

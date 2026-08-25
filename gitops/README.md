@@ -10,6 +10,7 @@ gitops/
 ├── appproject.yaml            # ArgoCD AppProject for the platform
 ├── applications/              # Child Application manifests
 │   ├── evalhub.yaml
+│   ├── maas-kuadrant.yaml
 │   ├── maas-prereqs.yaml
 │   ├── maas-subscriptions.yaml
 │   ├── maas.yaml
@@ -25,7 +26,8 @@ gitops/
 │   └── runtime-config.yaml
 ├── components/                # Kustomize-based resource definitions
 │   ├── evalhub/               # EvalHub (TrustyAI) evaluation
-│   ├── maas-prereqs/          # RHCL operator, LeaderWorkerSet, Kuadrant CR (MaaS auth infrastructure)
+│   ├── maas-kuadrant/         # Kuadrant CR (auth + rate-limiting infrastructure)
+│   ├── maas-prereqs/          # RHCL operator, LeaderWorkerSet subscriptions
 │   ├── maas-subscriptions/    # KServe MaaS subscription tiers (free/premium)
 │   ├── maas/                  # KServe Models-as-a-Service enablement
 │   ├── minio/                 # MinIO S3-compatible object storage
@@ -134,21 +136,22 @@ oc apply -f gitops/appproject.yaml
 oc apply -f gitops/root-app.yaml
 ```
 
-ArgoCD will automatically sync all 14 child applications:
-1. MaaS Prereqs — RHCL operator, LeaderWorkerSet operator, Kuadrant CR (auth/rate-limiting infra)
-2. EvalHub — TrustyAI evaluation platform
-3. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
-4. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
-5. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
-6. MLflow — experiment tracking via MlflowOperator
-7. Model Inference — example inference route (Granite 2B) deployed to staging
-8. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
-9. Model Registry — MySQL-backed Model Registry instance for registered model metadata
-10. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
-11. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
-12. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
-13. Results UI — frontend UI for viewing scan and benchmark results
-14. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
+ArgoCD will automatically sync all 15 child applications:
+1. MaaS Prereqs — RHCL operator + LeaderWorkerSet operator subscriptions
+2. MaaS Kuadrant — Kuadrant CR (triggers Authorino + Limitador creation)
+3. EvalHub — TrustyAI evaluation platform
+4. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
+5. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
+6. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
+7. MLflow — experiment tracking via MlflowOperator
+8. Model Inference — example inference route (Granite 2B) deployed to staging
+9. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
+10. Model Registry — MySQL-backed Model Registry instance for registered model metadata
+11. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
+12. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
+13. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
+14. Results UI — frontend UI for viewing scan and benchmark results
+15. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
 ### Application dependency chain and sync ordering
 
@@ -161,7 +164,8 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 
 | Wave | Applications | What it does / depends on |
 |------|--------------|---------------------------|
-| -1 | maas-prereqs | Installs RHCL + LWS operators, creates Kuadrant CR → async Authorino creation |
+| -1 | maas-prereqs | Installs RHCL + LWS operators (Subscriptions) |
+| 0 | maas-kuadrant | Creates Kuadrant CR — depends on RHCL operator CRDs from wave -1 |
 | 1 | maas | Patches DataScienceCluster → triggers async RHOAI reconciliation for MaaS CRDs |
 | 2 | maas-subscriptions | Creates MaaSSubscription CRs — depends on CRDs registered by wave 1 |
 | 3 | modelops-pipelines | Creates `sandbox`, `staging`, `vllm`, `vllm-staging` namespaces |
@@ -169,7 +173,7 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 
 All other Applications (evalhub, minio, mlflow, model-intake-ui, model-registry,
 modelops-operator) have no sync-wave and run in the default wave (0), starting
-immediately alongside wave 1.
+alongside maas-kuadrant.
 
 #### Retry policies
 
@@ -184,28 +188,29 @@ The **maas-prereqs** Application must sync before any MaaS resources because it
 deploys the infrastructure that the maas Application's Tenant, Gateway, and
 MaaSSubscription resources depend on:
 
-1. **Red Hat Connectivity Link (RHCL) operator**: Installed via Subscription
-   in `openshift-operators`. The RHCL operator only supports `AllNamespaces`
-   install mode, so it MUST go in `openshift-operators` — the global operator
-   namespace that already has a cluster-wide OperatorGroup. Installing it in
-   `kuadrant-system` (or any single namespace) will fail.
+1. **Red Hat Connectivity Link (RHCL) operator** (maas-prereqs, wave -1):
+   Installed via Subscription in `openshift-operators`. The RHCL operator only
+   supports `AllNamespaces` install mode, so it MUST go in `openshift-operators`
+   — the global operator namespace that already has a cluster-wide OperatorGroup.
+   Installing it in `kuadrant-system` (or any single namespace) will fail.
 
-2. **Leader Worker Set (LWS) operator**: Installed in `openshift-lws-operator`
-   namespace (OwnNamespace install mode). The `cert-manager Operator for
-   Red Hat OpenShift` must be pre-installed (verify with `oc get csv -n
-   cert-manager-operator`).
+2. **Leader Worker Set (LWS) operator** (maas-prereqs, wave -1): Installed in
+   `openshift-lws-operator` namespace (OwnNamespace install mode). The
+   `cert-manager Operator for Red Hat OpenShift` must be pre-installed (verify
+   with `oc get csv -n cert-manager-operator`).
 
-3. **Kuadrant CR**: Created in `kuadrant-system`. When the RHCL operator
-   reconciles this CR, it asynchronously creates an Authorino instance
-   (operator `authorino-authorino-authorization` pod) and Limitador instance
-   for API authentication and rate limiting respectively. These components
-   are needed for the MaaS API key management that backs
-   `POST /maas/api/v1/api-keys/search`.
+3. **Kuadrant CR** (maas-kuadrant, wave 0): Created in `kuadrant-system`.
+   When the RHCL operator reconciles this CR, it asynchronously creates an
+   Authorino instance and Limitador instance for API authentication and rate
+   limiting. The maas-kuadrant Application is a separate Application from
+   maas-prereqs because the Kuadrant CRD (`kuadrants.kuadrant.io`) is only
+   registered after the RHCL operator installs — ArgoCD can't validate the
+   Kuadrant CR during the same sync operation as the operator Subscription.
 
-The retry policy (20 attempts, 10s→5m backoff) handles the async operator
-reconciliation: the RHCL operator may take several minutes to install, then
-the Kuadrant CR reconciliation may take additional minutes to create Authorino
-and Limitador deployments.
+The retry policy on maas-kuadrant (20 attempts, 10s→5m backoff) handles the
+async operator installation: the RHCL operator may take several minutes to
+install and register CRDs, during which the Kuadrant CR will fail validation.
+Once the CRD is registered, the Kuadrant CR syncs automatically.
 
 #### maas / maas-subscriptions dependency chain
 
@@ -301,7 +306,7 @@ done
 
 #### ArgoCD controller memory
 
-During a cold bootstrap of all 14 Applications with retry policies, the
+During a cold bootstrap of all 15 Applications with retry policies, the
 ArgoCD application controller may exhaust its default 2Gi memory limit
 and be OOMKilled (exit 137). Increase the memory limit before deploying:
 
