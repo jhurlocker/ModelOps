@@ -268,9 +268,21 @@ oc get csv rhcl-operator -n openshift-operators
 oc get kuadrant kuadrant -n kuadrant-system
 oc get deployment authorino -n kuadrant-system
 
-# If Kuadrant reports MissingDependency (Istio race condition), restart the operator:
+# If Kuadrant shows no status conditions after 2+ minutes, the operator may
+# have a RESTMapping error ("cannot find RESTMapping for APIVersion
+# kuadrant.io/v1beta1 Kind Kuadrant") — this happens when the operator starts
+# before its own CRDs are fully registered. Restart the operator pod:
 oc delete pod -n openshift-operators \
   $(oc get pods -n openshift-operators --no-headers | grep kuadrant-operator | awk '{print $1}')
+
+# If Kuadrant reports MissingDependency (Istio race condition), restart the operator
+# pod in the same way.
+
+# If the Tenant still shows "no Authorino instances found" after Authorino is
+# deployed, the Tenant controller hasn't re-reconciled. Annotate the Tenant to
+# trigger a fresh reconciliation:
+oc annotate tenant default-tenant -n models-as-a-service \
+  force-reconcile="$(date +%s)" --overwrite
 
 # ---- maas / maas-subscriptions ----
 
