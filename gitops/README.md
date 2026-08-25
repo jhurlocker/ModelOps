@@ -134,6 +134,55 @@ ArgoCD will automatically sync all 13 child applications:
 12. Results UI — frontend UI for viewing scan and benchmark results
 13. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
+### maas / maas-subscriptions dependency chain
+
+The **maas** Application patches the `DataScienceCluster` to enable KServe
+Models-as-a-Service (`kserve.modelsAsService.managementState: Managed`).
+When RHOAI's operator asynchronously reconciles this change, it registers
+the `MaaSSubscription` CRD. The **maas-subscriptions** Application then
+creates `MaaSSubscription` resources that depend on that CRD being available.
+
+Because the CRD registration is asynchronous and outside this repo's control,
+there is a race condition: maas-subscriptions can fail if RHOAI has not
+finished registering the CRD yet. Two mechanisms mitigate this:
+
+1. **Sync-wave ordering**: maas has `argocd.argoproj.io/sync-wave: "1"`
+   and maas-subscriptions has sync-wave `"2"`, so ArgoCD will not attempt
+   maas-subscriptions until maas has finished syncing.
+
+2. **Retry policy**: Both Applications carry a generous retry policy
+   (limit: 20, exponential backoff 10s → 5m max). If RHOAI's reconciliation
+   takes longer than a single sync cycle, ArgoCD keeps retrying automatically
+   instead of failing fast.
+
+If the retry policy is ever exhausted (all 20 attempts fail), manually
+verify the RHOAI state and force a re-sync:
+
+```bash
+# Check that the DataScienceCluster patch was applied
+oc get dsc default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}'
+# Expected: Managed
+
+# Confirm the MaaSSubscription CRD is registered
+oc get crd maassubscriptions.maas.opendatahub.io
+# If "not found", RHOAI has not finished reconciling.
+# Check the RHOAI operator status:
+oc get deployment rhods-operator -n redhat-ods-operator
+
+# Once the CRD is confirmed present, force a manual re-sync:
+argocd app sync maas-subscriptions --grpc-web
+```
+
+The Kuadrant CRDs (`authpolicies.kuadrant.io`, `tokenratelimitpolicies.kuadrant.io`)
+deployed by the maas Application are self-contained CustomResourceDefinition
+resources (not instances of CRDs registered by an external operator), so they
+do not have a similar async timing dependency. The Gateway (`data-science-gateway-class`)
+and Tenant resources within maas also depend on RHOAI being installed, but
+their CRDs are registered during RHOAI installation — not gated behind
+`modelsAsService: Managed` — and are therefore unaffected by this race
+condition. The maas Application's retry policy covers any transient failures
+on those resources as well.
+
 ### Step 3: Platform configuration (automatic)
 
 No manual step is needed. The **Runtime Config** Application (application #13 above)
