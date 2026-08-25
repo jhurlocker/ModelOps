@@ -109,6 +109,16 @@ oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
 }'
 ```
 
+#### Step 1c: Increase ArgoCD controller memory (recommended)
+
+The default 2Gi memory limit can cause OOMKills during a cold bootstrap of
+all 13 Applications with retry policies enabled:
+
+```bash
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
+{"spec":{"controller":{"resources":{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}}}}'
+```
+
 ### Step 2: Deploy the platform
 
 ```bash
@@ -134,44 +144,62 @@ ArgoCD will automatically sync all 13 child applications:
 12. Results UI — frontend UI for viewing scan and benchmark results
 13. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
-### maas / maas-subscriptions dependency chain
+### Application dependency chain and sync ordering
+
+The child Applications have inter-dependencies that must be satisfied in order.
+
+#### Sync wave ordering
+
+ArgoCD sync-waves enforce a sequential ordering:
+no wave-N Application syncs until all wave-(N-1) Applications are Synced.
+
+| Wave | Applications | What it does / depends on |
+|------|--------------|---------------------------|
+| 1 | maas | Patches DataScienceCluster → triggers async RHOAI reconciliation for MaaS CRDs |
+| 2 | maas-subscriptions | Creates MaaSSubscription CRs — depends on CRDs registered by wave 1 |
+| 3 | modelops-pipelines | Creates `sandbox`, `staging`, `vllm`, `vllm-staging` namespaces |
+| 4 | modelops-runtime-config, results-ui, model-inference, modelops-rbac | Deploy into namespaces created by wave 3 |
+
+All other Applications (evalhub, minio, mlflow, model-intake-ui, model-registry,
+modelops-operator) have no sync-wave and run in the default wave (0), starting
+immediately alongside wave 1.
+
+#### Retry policies
+
+All Applications with sync-waves also carry a retry policy
+(limit: 20, exponential backoff 10s → 5m max) so transient failures
+(failure reasons outside this repo's control, such as async operator reconciliation
+or namespace propagation) are handled automatically instead of failing fast.
+
+#### maas / maas-subscriptions dependency chain
 
 The **maas** Application patches the `DataScienceCluster` to enable KServe
 Models-as-a-Service (`kserve.modelsAsService.managementState: Managed`).
 When RHOAI's operator asynchronously reconciles this change, it registers
-the `MaaSSubscription` CRD. The **maas-subscriptions** Application then
-creates `MaaSSubscription` resources that depend on that CRD being available.
+the `MaaSSubscription` and `Tenant` CRDs. The **maas-subscriptions** Application
+then creates `MaaSSubscription` resources that depend on those CRDs being available.
 
-Because the CRD registration is asynchronous and outside this repo's control,
-there is a race condition: maas-subscriptions can fail if RHOAI has not
-finished registering the CRD yet. Two mechanisms mitigate this:
+The DataScienceCluster patch must be a Kustomize **resource** (not a `patches`
+entry) because it targets a `DataScienceCluster` not owned by the maas
+kustomization. A Kustomize `patches` target with no matching resource in the
+kustomization's `resources` list is silently dropped — the patch is never
+applied. As a resource, ArgoCD applies it as a strategic merge patch against
+the existing cluster object.
 
-1. **Sync-wave ordering**: maas has `argocd.argoproj.io/sync-wave: "1"`
-   and maas-subscriptions has sync-wave `"2"`, so ArgoCD will not attempt
-   maas-subscriptions until maas has finished syncing.
+#### pipelines / namespace dependency chain
 
-2. **Retry policy**: Both Applications carry a generous retry policy
-   (limit: 20, exponential backoff 10s → 5m max). If RHOAI's reconciliation
-   takes longer than a single sync cycle, ArgoCD keeps retrying automatically
-   instead of failing fast.
+The **modelops-pipelines** Application (wave 3) creates the `sandbox` and
+`staging` namespaces that **modelops-runtime-config**, **results-ui**,
+**model-inference**, and **modelops-rbac** (wave 4) deploy into. Without
+sync-wave ordering, wave-4 apps exhaust their retries before the namespaces
+are ready, especially during a cold bootstrap.
 
-If the retry policy is ever exhausted (all 20 attempts fail), manually
-verify the RHOAI state and force a re-sync:
-
-```bash
-# Check that the DataScienceCluster patch was applied
-oc get dsc default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}'
-# Expected: Managed
-
-# Confirm the MaaSSubscription CRD is registered
-oc get crd maassubscriptions.maas.opendatahub.io
-# If "not found", RHOAI has not finished reconciling.
-# Check the RHOAI operator status:
-oc get deployment rhods-operator -n redhat-ods-operator
-
-# Once the CRD is confirmed present, force a manual re-sync:
-argocd app sync maas-subscriptions --grpc-web
-```
+The namespace YAML files live alongside the Tekton resources in
+`model_onboarding_pipeline/model-intake-pipeline/pipeline/`:
+- `platform-sandbox-ns.yaml` — creates the `sandbox` namespace
+- `platform-staging-ns.yaml` — creates the `staging` namespace
+- `sandbox-namespace.yaml` — creates the `vllm` namespace
+- `staging-namespace.yaml` — creates the `vllm-staging` namespace
 
 The Kuadrant CRDs (`authpolicies.kuadrant.io`, `tokenratelimitpolicies.kuadrant.io`)
 deployed by the maas Application are self-contained CustomResourceDefinition
@@ -182,6 +210,55 @@ their CRDs are registered during RHOAI installation — not gated behind
 `modelsAsService: Managed` — and are therefore unaffected by this race
 condition. The maas Application's retry policy covers any transient failures
 on those resources as well.
+
+#### Troubleshooting exhausted retries
+
+If any Application's retry policy is ever exhausted (all 20 attempts fail),
+verify the dependency and force a re-sync:
+
+```bash
+# ---- maas / maas-subscriptions ----
+
+# Check that the DataScienceCluster patch was applied
+oc get dsc default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}'
+# Expected: Managed
+
+# Confirm the MaaS CRDs are registered
+oc get crd maassubscriptions.maas.opendatahub.io tenants.maas.opendatahub.io
+
+# If "not found", RHOAI has not finished reconciling — check the operator:
+oc get deployment rhods-operator -n redhat-ods-operator
+
+# Once the CRDs are confirmed present, force a manual re-sync:
+oc patch application maas-subscriptions -n openshift-gitops --type merge \
+  -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"prune":true}}}'
+
+# ---- pipelines / namespace dependents ----
+
+# Check that namespaces exist
+oc get ns sandbox staging vllm vllm-staging
+
+# If missing, sync pipelines first:
+oc patch application modelops-pipelines -n openshift-gitops --type merge \
+  -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"prune":true}}}'
+
+# Then sync namespace-dependent apps:
+for app in modelops-runtime-config results-ui model-inference modelops-rbac; do
+  oc patch application $app -n openshift-gitops --type merge \
+    -p '{"operation":{"initiatedBy":{"username":"admin"},"sync":{"prune":true}}}'
+done
+```
+
+#### ArgoCD controller memory
+
+During a cold bootstrap of all 13 Applications with retry policies, the
+ArgoCD application controller may exhaust its default 2Gi memory limit
+and be OOMKilled (exit 137). Increase the memory limit before deploying:
+
+```bash
+oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
+{"spec":{"controller":{"resources":{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}}}}'
+```
 
 ### Step 3: Platform configuration (automatic)
 

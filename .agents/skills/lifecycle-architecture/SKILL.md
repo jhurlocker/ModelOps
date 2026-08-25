@@ -22,6 +22,20 @@ User or API
   → durable status and evidence
 ```
 
+## GitOps Kustomize gotchas
+
+When a Kustomize `patches` entry targets a resource not present in the
+kustomization's `resources` list (e.g., patching a cluster-scoped
+`DataScienceCluster` owned by an external operator), the patch is silently
+dropped from `kustomize build` output. Such patches must be listed as
+`resources` instead — they apply as strategic merge patches against the
+existing cluster object when ArgoCD or `oc apply` processes them.
+
+When modifying resources that are owned by external operators and
+asynchronously reconciled (e.g., RHOAI's DataScienceCluster), pair the
+change with an ArgoCD retry policy so the downstream Application can
+withstand the reconciliation delay.
+
 ## Lifecycle scope
 
 Design for eventual support of Model Intake, Catalog, Application Development, Evaluation, Promotion, Production Operations, Optimization, Fine-Tuning, Governance, Lineage, AI BOM, and Retirement.
