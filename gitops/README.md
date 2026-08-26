@@ -462,10 +462,59 @@ oc get tenant default-tenant -n models-as-a-service \
   -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}'
 # Should no longer mention "no Authorino instances found"
 
-# MaaS API key search should return non-500
+# MaaS Gateway health check
 CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
-curl -sk "https://maas.${CLUSTER_DOMAIN}/maas/api/v1/user"
+curl -sk "https://maas.${CLUSTER_DOMAIN}/maas-api/health"
+# Expected: {"status":"healthy"}
+
+# MaaS API key search should require auth (not 500/503)
+curl -sk -X POST "https://maas.${CLUSTER_DOMAIN}/maas-api/v1/api-keys/search" -H "Content-Type: application/json" -d '{}'
+# Expected: 401 (requires valid user token)
 ```
+
+### Step 2d: Gateway namespace label (manual, one-time)
+
+The `maas-default-gateway` restricts HTTPRoutes to namespaces labeled with
+`maas.opendatahub.io/gateway-access=true`. The `redhat-ods-applications`
+namespace (where the MaaS API HTTPRoute is created by RHOAI) needs this label:
+
+```bash
+oc label namespace redhat-ods-applications \
+  maas.opendatahub.io/gateway-access=true --overwrite
+```
+
+> RHOAI manages the `redhat-ods-applications` namespace, so this label
+> cannot be added via GitOps (ArgoCD would fight with the RHOAI operator).
+> It is a one-time manual step per cluster.
+
+Any additional namespaces serving models through the MaaS Gateway must also
+be labeled (`maas.opendatahub.io/gateway-access=true`).
+
+### Step 2e: MaaS Gateway architecture
+
+The `maas-prereqs` and `maas-kuadrant` Applications deploy the auth
+infrastructure (RHCL operator, Kuadrant, Authorino). The **maas** Application
+deploys the Gateway that routes API traffic:
+
+```
+Dashboard (rhods-dashboard)
+  └─ maas-ui sidecar (:8243)
+     └─ https://maas.apps.<cluster>/maas-api/v1/*
+        └─ OpenShift Router (re-encrypt Route)
+           └─ maas-default-gateway (HTTPS :443, TLS terminate)
+              └─ HTTPRoute (hostname: maas.apps.<cluster>)
+                 └─ maas-api Service (:8443)
+```
+
+The Gateway requires:
+1. An HTTPS listener with TLS termination using a service-ca certificate
+   (`maas-gw-service-tls`, auto-provisioned by the `maas-gw-options` ConfigMap)
+2. An OpenShift re-encrypt Route for `maas.apps.<cluster-domain>` pointing
+   to the Gateway's Service
+3. The `redhat-ods-applications` namespace labeled for Gateway access (Step 2d)
+
+The Gateway's hostname is hardcoded in `gitops/components/maas/gateway-route.yaml`.
+For other clusters, update the `spec.host` field to match `maas.apps.<cluster-domain>`.
 
 ### Step 3: Platform configuration (automatic)
 
