@@ -36,6 +36,13 @@ When documenting GitOps deployment steps, document:
 - Operator resource tuning (e.g., ArgoCD controller memory) needed for cold bootstrap
 - Kustomize gotchas: `patches` targeting resources not in the kustomization's `resources`
   list are silently dropped — such manifests must be listed as resources instead
+- Any manual steps that cannot be expressed declaratively, with clear explanations
+  of WHY they're manual (e.g., Authorino CR is auto-created by operator, Gateway
+  namespace is RHOAI-managed)
+- Cluster-specific values that need changing for new clusters (e.g., Route hostnames,
+  domain patterns). Mark these with clear comments in the YAML files themselves.
+- Operator install modes that constrain namespace placement (e.g., RHCL operator
+  requires AllNamespaces → must go in openshift-operators)
 
 ## Checklist
 
@@ -48,3 +55,6 @@ When documenting GitOps deployment steps, document:
 - [ ] roadmap separated from implemented behavior
 - [ ] inter-app dependencies and sync-waves documented in gitops/README.md
 - [ ] manual troubleshooting fallback documented in gitops/README.md
+- [ ] cluster-specific hostnames/domains documented with clear comments in YAML files
+- [ ] manual-only steps (operator-managed resources) documented with rationale
+- [ ] MaaS infrastructure dependency chain documented (operators, Gateway, Authorino TLS)

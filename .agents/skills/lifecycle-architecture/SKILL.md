@@ -36,6 +36,77 @@ asynchronously reconciled (e.g., RHOAI's DataScienceCluster), pair the
 change with an ArgoCD retry policy so the downstream Application can
 withstand the reconciliation delay.
 
+## Models-as-a-Service infrastructure dependency chain
+
+MaaS requires a specific infrastructure stack that must be deployed in
+order. Each layer has async readiness delays — the retry policy pattern
+from the DataScienceCluster patching applies here too, multiplied across
+three operators.
+
+### Required operators (RHOAI 3.4+)
+
+| Operator | Package | Channel | Namespace | Install Mode |
+|----------|---------|---------|-----------|-------------|
+| Red Hat Connectivity Link | `rhcl-operator` | `stable` | `openshift-operators` | AllNamespaces |
+| Leader Worker Set | `leader-worker-set` | `stable-v1.0` | `openshift-lws-operator` | OwnNamespace |
+| cert-manager for Red Hat OpenShift | `openshift-cert-manager-operator` | `stable-v1` | `cert-manager-operator` | (prerequisite, often pre-installed) |
+
+The RHCL operator **must** go in `openshift-operators` because it only
+supports `AllNamespaces` install mode. Installing it in `kuadrant-system`
+or any single namespace will fail.
+
+### Resource creation order
+
+```text
+RHCL Subscription
+  → kuadrant-operator pod running
+    → Kuadrant CR (kuadrant-system)
+      → Authorino CR auto-created by Kuadrant operator
+      → Limitador CR auto-created
+        → Authorino TLS config (manual — service annotation, CR patch, env vars)
+          → Gateway TLS bootstrap annotation
+            → Tenant re-reconciliation
+```
+
+### ArgoCD Application split pattern
+
+Resources that depend on a CRD registered by an operator must live in a
+**separate Application** from the operator Subscription. ArgoCD validates
+all resources in a single sync operation against the cluster's current CRD
+set — if the CRD isn't registered yet, the validation fails and the
+resource can't be created. The retry policy handles this only if the
+failing resource is in its own Application.
+
+Pattern:
+```text
+Application A (wave -1): operator Subscription + namespace
+Application B (wave 0):  CR that depends on CRDs from wave -1
+```
+
+Both carry retry policies (20 attempts, 10s→5m exponential backoff).
+
+### Gateway architecture (MaaS)
+
+The MaaS Gateway routes API traffic from the dashboard to the maas-api:
+
+```text
+Dashboard maas-ui sidecar (:8243)
+  → https://maas.apps.<cluster>/maas-api/v1/*
+    → OpenShift Router (re-encrypt Route, service-ca TLS)
+      → maas-default-gateway (HTTPS :443, TLS terminate)
+        → HTTPRoute (hostname: maas.apps.<cluster>)
+          → maas-api Service (:8443)
+```
+
+The Gateway requires:
+1. An HTTPS listener with TLS termination using a service-ca certificate
+2. An OpenShift re-encrypt Route for `maas.apps.<cluster-domain>`
+3. A `maas-gw-options` ConfigMap annotating the Gateway Service for service-ca
+4. The `redhat-ods-applications` namespace labeled with `maas.opendatahub.io/gateway-access=true` (RHOAI-managed namespace — manual step)
+
+Route hostnames are cluster-specific (pattern: `maas.apps.<cluster-domain>`).
+For new clusters, update `gitops/components/maas/gateway-route.yaml`.
+
 ## Lifecycle scope
 
 Design for eventual support of Model Intake, Catalog, Application Development, Evaluation, Promotion, Production Operations, Optimization, Fine-Tuning, Governance, Lineage, AI BOM, and Retirement.

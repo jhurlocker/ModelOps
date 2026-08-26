@@ -8,6 +8,8 @@ metadata:
     router.openshift.io/service-ca-certificate: "true"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
+  # Cluster-specific: the hostname follows the pattern maas.apps.<cluster-domain>.
+  # Find your cluster domain: oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'
   host: maas.apps.ocp.75pq4.sandbox1202.opentlc.com
   to:
     kind: Service

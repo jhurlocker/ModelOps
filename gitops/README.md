@@ -580,6 +580,60 @@ The operator will ensure each promotion namespace has:
 - A `pipeline` ServiceAccount
 - RoleBindings granting the pipeline SA access in that namespace
 
+## New Cluster Bootstrap Checklist
+
+When deploying to a fresh cluster, follow this order after prerequisites
+(Step 1-1c in Quick Start) are satisfied:
+
+1. **Set the Route hostname** — Edit `gitops/components/maas/gateway-route.yaml`:
+   ```bash
+   CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+   echo "Route host should be: maas.${CLUSTER_DOMAIN}"
+   # Update spec.host in gitops/components/maas/gateway-route.yaml
+   ```
+
+2. **Deploy root app** (Step 2) — ArgoCD syncs all 15 apps in wave order:
+   ```bash
+   oc apply -f gitops/appproject.yaml
+   oc apply -f gitops/root-app.yaml
+   ```
+
+3. **Wait for wave -1** and **wave 0** to complete:
+   ```bash
+   oc wait --for=jsonpath='{.status.sync.status}'=Synced application/maas-prereqs -n openshift-gitops --timeout=600s
+   oc wait --for=jsonpath='{.status.sync.status}'=Synced application/maas-kuadrant -n openshift-gitops --timeout=600s
+   oc wait --for=condition=Ready kuadrant/kuadrant -n kuadrant-system --timeout=300s
+   ```
+
+4. **Manual: Authorino TLS** (Step 2a) — service annotation, CR patch, env vars,
+   Gateway TLS bootstrap annotation. See Step 2a in Quick Start for commands.
+
+5. **Manual: Gateway namespace label** (Step 2d):
+   ```bash
+   oc label namespace redhat-ods-applications maas.opendatahub.io/gateway-access=true --overwrite
+   ```
+
+6. **Manual: Restart model controllers** (Step 2b):
+   ```bash
+   oc delete pod -n redhat-ods-applications -l app=odh-model-controller
+   oc delete pod -n redhat-ods-applications -l control-plane=kserve-controller-manager
+   ```
+
+7. **Verify** (Step 2c):
+   ```bash
+   # Tenant Degraded condition should have cleared "no Authorino instances found"
+   oc get tenant default-tenant -n models-as-a-service -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}'
+   # Gateway health
+   CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+   curl -sk "https://maas.${CLUSTER_DOMAIN}/maas-api/health"
+   # Expected: {"status":"healthy"}
+   ```
+
+8. **Verify all apps synced** (Step 4):
+   ```bash
+   oc get applications -n openshift-gitops
+   ```
+
 ## Customization
 
 Edit files in `gitops/components/` and push to the repo. ArgoCD automatically detects changes and syncs (when `automated.selfHeal` is enabled).
