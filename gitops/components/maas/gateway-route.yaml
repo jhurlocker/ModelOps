@@ -1,0 +1,20 @@
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: maas-gateway
+  namespace: openshift-ingress
+  annotations:
+    router.openshift.io/service-ca-certificate: "true"
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  host: maas.apps.ocp.75pq4.sandbox1202.opentlc.com
+  to:
+    kind: Service
+    name: maas-default-gateway-data-science-gateway-class
+    weight: 100
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
