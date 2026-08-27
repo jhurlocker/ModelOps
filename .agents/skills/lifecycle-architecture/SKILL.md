@@ -90,22 +90,29 @@ Both carry retry policies (20 attempts, 10s→5m exponential backoff).
 The MaaS Gateway routes API traffic from the dashboard to the maas-api:
 
 ```text
-Dashboard maas-ui sidecar (:8243)
+Dashboard maas-ui (standalone deployment :8243 in RHOAI 3.5)
   → https://maas.apps.<cluster>/maas-api/v1/*
-    → OpenShift Router (re-encrypt Route, service-ca TLS)
-      → maas-default-gateway (HTTPS :443, TLS terminate)
+    → OpenShift Router (passthrough Route)
+      → maas-default-gateway (HTTPS :443, TLS terminate, wildcard cert)
         → HTTPRoute (hostname: maas.apps.<cluster>)
           → maas-api Service (:8443)
 ```
 
 The Gateway requires:
-1. An HTTPS listener with TLS termination using a service-ca certificate
-2. An OpenShift re-encrypt Route for `maas.apps.<cluster-domain>`
-3. A `maas-gw-options` ConfigMap annotating the Gateway Service for service-ca
+1. An HTTPS listener with a **`hostname`** (`maas.apps.<cluster-domain>`) — RHOAI
+   3.5's maas-api reads `spec.listeners[].hostname` to discover its external URL,
+   and returns 500 on `GET /v1/tenants` if it's absent.
+2. TLS termination using the OpenShift **wildcard ingress certificate**
+   (`cert-manager-ingress-cert`, covers `*.apps.<domain>`), NOT the service-ca
+   cert (its SAN is the internal service name and won't serve the public hostname)
+3. An OpenShift **passthrough** Route — NOT `reencrypt` +
+   `router.openshift.io/service-ca-certificate`, which makes the Router present
+   SNI = internal service name and fails the hostname-filtered listener
+   (`filter_chain_not_found`)
 4. The `redhat-ods-applications` namespace labeled with `maas.opendatahub.io/gateway-access=true` (RHOAI-managed namespace — manual step)
 
 Route hostnames are cluster-specific (pattern: `maas.apps.<cluster-domain>`).
-For new clusters, update `gitops/components/maas/gateway-route.yaml`.
+For new clusters, update `gitops/components/maas/gateway.yaml` and `gateway-route.yaml`.
 
 ### AI Gateway (RHOAI 3.5+) resource limits
 

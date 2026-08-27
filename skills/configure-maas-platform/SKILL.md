@@ -275,8 +275,22 @@ oc patch httproute maas-api-route -n redhat-ods-applications --type json -p '[
 
 **9b. Create OpenShift Route for `maas.<cluster-domain>`:**
 
+> **RHOAI 3.5+ hostname requirement:** the gateway HTTPS listener MUST have a
+> `hostname` (maas-api reads `spec.listeners[].hostname` to discover the external
+> URL). With a hostname-filtered listener, use a **passthrough** Route and the
+> wildcard ingress cert — NOT `reencrypt` + `service-ca-certificate`, which sends
+> SNI = internal service name and fails with `filter_chain_not_found`.
+
 ```bash
 CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+
+# 1. Set the hostname + wildcard cert on the Gateway HTTPS listener
+oc patch gateway maas-default-gateway -n openshift-ingress --type json -p "[
+  {\"op\": \"add\", \"path\": \"/spec/listeners/1/hostname\", \"value\": \"maas.${CLUSTER_DOMAIN}\"},
+  {\"op\": \"replace\", \"path\": \"/spec/listeners/1/tls/certificateRefs\", \"value\": [{\"group\":\"\",\"kind\":\"Secret\",\"name\":\"cert-manager-ingress-cert\"}]}
+]"
+
+# 2. Passthrough Route (Gateway terminates TLS with the wildcard cert)
 oc apply -f - <<EOF
 apiVersion: route.openshift.io/v1
 kind: Route
@@ -289,10 +303,9 @@ spec:
     kind: Service
     name: maas-default-gateway-data-science-gateway-class
   port:
-    targetPort: "http"
+    targetPort: 443
   tls:
-    termination: edge
-    insecureEdgeTerminationPolicy: Redirect
+    termination: passthrough
 EOF
 ```
 

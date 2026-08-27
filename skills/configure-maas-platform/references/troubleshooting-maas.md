@@ -25,6 +25,54 @@ Common causes:
   ```
 - **Gateway OOMKill**: Wasm extensions push Istio gateway past 1Gi. See SKILL.md Gateway OOMKill Prevention section.
 
+## Dashboard Shows "Error loading API keys — maas-api is not available"
+
+Symptom: the dashboard loads, but the `/maas/keys-and-subs` page shows
+`Error loading API keys` / `maas-api is not available`, while
+`maas.apps.<domain>/maas-api/health` returns 200.
+
+Root cause: RHOAI 3.5.0's `maas-api` (now in `redhat-ai-gateway-infra`,
+not `redhat-ods-applications`) discovers its external URL via `GET /v1/tenants`,
+which reads the Gateway's `spec.listeners[].hostname`. If the listener has no
+hostname, `GET /v1/tenants` returns 500:
+
+```
+"Unable to determine external hostname from Gateway status"
+"Failed to resolve gateway"
+```
+
+Check the maas-ui (standalone `deployment/maas-ui` in RHOAI 3.5, no longer a
+rhods-dashboard sidecar):
+
+```bash
+oc logs -n redhat-ods-applications deploy/maas-ui --tail=50 | grep -i "discover\|error"
+# error="maas-api GET /v1/tenants returned 500: {..."Unable to determine external hostname"...}"
+```
+
+Fix — set the listener hostname and switch the Route to passthrough (see
+"Gateway OOMKill Prevention" / Step 9b in SKILL.md):
+
+```bash
+oc patch gateway maas-default-gateway -n openshift-ingress --type json -p '[
+  {"op":"add","path":"/spec/listeners/1/hostname","value":"maas.apps.<cluster-domain>"},
+  {"op":"replace","path":"/spec/listeners/1/tls/certificateRefs","value":[{"group":"","kind":"Secret","name":"cert-manager-ingress-cert"}]}
+]'
+# Route: termination: passthrough, targetPort: 443 (NOT reencrypt + service-ca-certificate)
+```
+
+Verify:
+```bash
+TOKEN=$(oc whoami -t)
+curl -sk -H "Authorization: Bearer ${TOKEN}" -X POST -H "Content-Type: application/json" -d '{}' \
+  "https://maas.apps.$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')/maas-api/v1/api-keys/search"
+# Expected: {"object":"list","data":null,"has_more":false}  (HTTP 200)
+```
+
+If you instead see `filter_chain_not_found` in
+`deploy/maas-default-gateway-data-science-gateway-class` logs and the health
+endpoint returns the "Application is not available" page, the Route is still
+using reencrypt + service-ca (SNI mismatch). Switch to passthrough.
+
 ## Dashboard Inaccessible After RHOAI Upgrade (OOMKilled Gateway)
 
 Symptom: the OpenShift AI dashboard route (`rh-ai.apps.<domain>`) returns 503 or

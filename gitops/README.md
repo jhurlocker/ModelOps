@@ -498,23 +498,31 @@ deploys the Gateway that routes API traffic:
 
 ```
 Dashboard (rhods-dashboard)
-  └─ maas-ui sidecar (:8243)
+  └─ maas-ui (standalone deployment, :8243)
      └─ https://maas.apps.<cluster>/maas-api/v1/*
-        └─ OpenShift Router (re-encrypt Route)
+        └─ OpenShift Router (passthrough Route)
            └─ maas-default-gateway (HTTPS :443, TLS terminate)
               └─ HTTPRoute (hostname: maas.apps.<cluster>)
                  └─ maas-api Service (:8443)
 ```
 
 The Gateway requires:
-1. An HTTPS listener with TLS termination using a service-ca certificate
-   (`maas-gw-service-tls`, auto-provisioned by the `maas-gw-options` ConfigMap)
-2. An OpenShift re-encrypt Route for `maas.apps.<cluster-domain>` pointing
-   to the Gateway's Service
+1. An HTTPS listener with a **`hostname`** set to `maas.apps.<cluster-domain>`
+   and TLS termination using the OpenShift **wildcard ingress certificate**
+   (`cert-manager-ingress-cert`, covers `*.apps.<domain>`). RHOAI 3.5's maas-api
+   reads `spec.listeners[].hostname` to build the external API URL; without it,
+   `GET /v1/tenants` returns 500 and the dashboard shows "maas-api is not
+   available".
+2. An OpenShift **passthrough** Route for `maas.apps.<cluster-domain>` pointing
+   to the Gateway's Service. Do NOT use `reencrypt` with the
+   `service-ca-certificate` annotation here — that makes the Router present SNI
+   = the internal service name, which conflicts with the hostname-filtered
+   HTTPS listener (`filter_chain_not_found`).
 3. The `redhat-ods-applications` namespace labeled for Gateway access (Step 2d)
 
-The Gateway's hostname is hardcoded in `gitops/components/maas/gateway-route.yaml`.
-For other clusters, update the `spec.host` field to match `maas.apps.<cluster-domain>`.
+The Gateway hostname is hardcoded in `gitops/components/maas/gateway.yaml`
+(and the Route host in `gateway-route.yaml`). For other clusters, update the
+`maas.apps.<cluster-domain>` values.
 
 ### Step 2f: Gateway memory (RHOAI 3.5+ AI Gateway)
 
