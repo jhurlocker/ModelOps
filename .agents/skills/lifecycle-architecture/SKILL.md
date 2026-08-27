@@ -107,6 +107,37 @@ The Gateway requires:
 Route hostnames are cluster-specific (pattern: `maas.apps.<cluster-domain>`).
 For new clusters, update `gitops/components/maas/gateway-route.yaml`.
 
+### AI Gateway (RHOAI 3.5+) resource limits
+
+Starting in RHOAI 3.5.0, the dashboard is served by a Sail/Istio gateway
+(`data-science-gateway`) in `openshift-ingress`, alongside the MaaS gateway
+(`maas-default-gateway`). Both are `istio-proxy`-based deployments with a
+default **1Gi** memory limit that is too small once the Kuadrant WASM filters
+and Authorino auth load — the pods OOMKill (exit 137) and the dashboard route
+(`rh-ai.apps.<domain>`) goes down.
+
+The Sail gateway controller renders each gateway's Deployment from the ConfigMap
+referenced by the Gateway's `spec.infrastructure.parametersRef`. Adding a
+`deployment` key to that ConfigMap overrides the `istio-proxy` container
+resources (bump memory to 2Gi):
+
+```text
+Gateway (spec.infrastructure.parametersRef → ConfigMap)
+  → ConfigMap data.deployment (istio-proxy resources)
+    → Sail gateway controller renders Deployment
+```
+
+- `data-science-gateway` → `data-science-gateway-config` (operator-owned, but the
+  RHOAI operator preserves extra `data` keys, so the `deployment` key is safe to
+  merge — persisted in `gitops/components/maas/patch-data-science-gateway-config.yaml`)
+- `maas-default-gateway` → `maas-gw-options` (GitOps-managed via
+  `gateway-config.yaml`)
+
+The `rhods-operator` Subscription is typically `Automatic` on `stable-3.x`, so
+RHOAI can auto-upgrade and introduce this architecture on a running cluster.
+After any RHOAI minor upgrade, verify gateway memory limits and the dashboard
+route.
+
 ## Lifecycle scope
 
 Design for eventual support of Model Intake, Catalog, Application Development, Evaluation, Promotion, Production Operations, Optimization, Fine-Tuning, Governance, Lineage, AI BOM, and Retirement.

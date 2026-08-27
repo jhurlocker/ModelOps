@@ -5,6 +5,7 @@ resources:
   - gateway-config.yaml
   - gateway-route.yaml
   - gateway.yaml
+  - patch-data-science-gateway-config.yaml
   - namespace-maas-infra.yaml
   - maas-postgres.yaml
   - maas-db-secret.yaml

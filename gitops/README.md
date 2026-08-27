@@ -516,6 +516,37 @@ The Gateway requires:
 The Gateway's hostname is hardcoded in `gitops/components/maas/gateway-route.yaml`.
 For other clusters, update the `spec.host` field to match `maas.apps.<cluster-domain>`.
 
+### Step 2f: Gateway memory (RHOAI 3.5+ AI Gateway)
+
+RHOAI 3.5.0 introduced an "AI Gateway" that serves the dashboard through a
+Sail/Istio gateway (`data-science-gateway` in `openshift-ingress`) alongside the
+MaaS gateway. Both gateways are `istio-proxy` deployments with a default **1Gi**
+memory limit that is too small once the Kuadrant WASM filters and Authorino auth
+load — the pods OOMKill (exit 137) and `rh-ai.apps.<cluster-domain>` goes down.
+
+The **maas** Application already patches gateway memory to 2Gi via:
+- `gitops/components/maas/gateway-config.yaml` (`maas-gw-options` → MaaS gateway)
+- `gitops/components/maas/patch-data-science-gateway-config.yaml` (`data-science-gateway-config` → dashboard gateway)
+
+The `data-science-gateway-config` ConfigMap is operator-owned, but the RHOAI
+operator preserves extra `data` keys, so the GitOps `deployment` key merges
+safely without a reconciliation fight.
+
+Verify after sync:
+
+```bash
+oc get deploy -n openshift-ingress data-science-gateway-data-science-gateway-class \
+  -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}{"\n"}'   # 2Gi
+oc get deploy -n openshift-ingress maas-default-gateway-data-science-gateway-class \
+  -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}{"\n"}'   # 2Gi
+curl -sk -o /dev/null -w "%{http_code}\n" https://rh-ai.apps.<cluster-domain>/    # 302 (login redirect), not 503
+```
+
+> **Auto-upgrade gotcha**: the `rhods-operator` Subscription is `Automatic` on
+> the `stable-3.x` channel, so RHOAI can upgrade (e.g. 3.4.3 → 3.5.0) on a running
+> cluster and introduce the AI Gateway silently. Re-check gateway memory and the
+> dashboard route after any RHOAI minor upgrade.
+
 ### Step 3: Platform configuration (automatic)
 
 No manual step is needed. The **Runtime Config** Application (application #13 above)

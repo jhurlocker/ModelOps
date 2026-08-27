@@ -378,13 +378,55 @@ See [auth-proxy.md](references/auth-proxy.md) for detailed architecture, tear-do
 
 ## Gateway OOMKill Prevention
 
-LLMInferenceService deployment triggers Kuadrant Wasm extensions that can push the Istio gateway past the default 1Gi memory limit:
+RHOAI 3.5.0 introduced an "AI Gateway" architecture that serves the dashboard
+and MaaS through Sail/Istio gateways (`istio-proxy` based). These gateways have
+a default **1Gi** memory limit that is too small once Kuadrant WASM filters and
+Authorino auth load — the pods get OOMKilled (exit 137) and restart in a loop,
+taking down the dashboard (`rh-ai.apps.<domain>`) and MaaS.
+
+There are **two** gateways in `openshift-ingress`, and both must be bumped:
+
+| Gateway (`gateway.networking.k8s.io`) | params ConfigMap | Purpose |
+|---|---|---|
+| `data-science-gateway` | `data-science-gateway-config` | Dashboard + AI Gateway (operator-owned) |
+| `maas-default-gateway` | `maas-gw-options` | MaaS API |
+
+The Sail gateway controller renders the deployment from the Gateway's
+`spec.infrastructure.parametersRef` ConfigMap. A `deployment` key in that
+ConfigMap overrides the pod template (including `istio-proxy` resources):
 
 ```bash
-oc patch configmap -n openshift-ingress gateway-resources \
-  --type merge -p '{"data":{"memory-limits":"2Gi"}}' || true
-oc delete pods -n openshift-ingress -l app=istio-ingressgateway
+# Dashboard gateway (operator-owned ConfigMap, but the operator preserves
+# extra data keys — safe to merge into)
+oc patch configmap data-science-gateway-config -n openshift-ingress --type merge -p '{"data":{"deployment":"spec:\n  template:\n    spec:\n      containers:\n      - name: istio-proxy\n        resources:\n          requests:\n            cpu: 100m\n            memory: 256Mi\n          limits:\n            cpu: \"2\"\n            memory: 2Gi\n"}}'
+
+# MaaS gateway (GitOps-managed via gitops/components/maas/gateway-config.yaml)
+oc patch configmap maas-gw-options -n openshift-ingress --type merge -p '{"data":{"deployment":"spec:\n  template:\n    spec:\n      containers:\n      - name: istio-proxy\n        resources:\n          requests:\n            cpu: 100m\n            memory: 256Mi\n          limits:\n            cpu: \"2\"\n            memory: 2Gi\n"}}'
 ```
+
+The deployment resources are picked up automatically when the Sail gateway
+controller reconciles; verify with:
+
+```bash
+oc get deploy -n openshift-ingress data-science-gateway-data-science-gateway-class \
+  -o jsonpath='{.spec.template.spec.containers[0].resources.limits.memory}{"\n"}'
+# Expected: 2Gi
+```
+
+**Diagnosing an OOMKilled gateway:**
+```bash
+oc get pods -n openshift-ingress | grep gateway
+# CrashLoopBackOff with RESTARTS climbing = OOMKilled
+oc get pod <pod> -n openshift-ingress -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'
+# Expected: OOMKilled (exit code 137)
+```
+
+### RHOAI operator auto-upgrade gotcha
+
+The `rhods-operator` Subscription is usually `installPlanApproval: Automatic` on
+the `stable-3.x` channel, so RHOAI can auto-upgrade (e.g. 3.4.3 → 3.5.0) and
+silently introduce the AI Gateway on a running cluster. After any RHOAI minor
+upgrade, re-check the gateway memory limits and dashboard route (`rh-ai.apps.<domain>`).
 
 ## Gotchas
 

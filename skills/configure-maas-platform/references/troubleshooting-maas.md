@@ -25,6 +25,35 @@ Common causes:
   ```
 - **Gateway OOMKill**: Wasm extensions push Istio gateway past 1Gi. See SKILL.md Gateway OOMKill Prevention section.
 
+## Dashboard Inaccessible After RHOAI Upgrade (OOMKilled Gateway)
+
+Symptom: the OpenShift AI dashboard route (`rh-ai.apps.<domain>`) returns 503 or
+the "Application is not available" page, right after a RHOAI operator upgrade.
+
+Root cause: RHOAI 3.5.0 introduced the "AI Gateway" architecture. The dashboard
+is now served by a Sail/Istio gateway deployment
+(`data-science-gateway-data-science-gateway-class` in `openshift-ingress`) whose
+default 1Gi memory limit is exceeded once the auth/WASM filters load. Both this
+gateway and the MaaS gateway (`maas-default-gateway-data-science-gateway-class`)
+crash-loop with OOMKilled (exit 137).
+
+```bash
+# Confirm
+oc get pods -n openshift-ingress | grep -E "gateway"
+oc get pod <gateway-pod> -n openshift-ingress \
+  -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}{"\n"}'
+# OOMKilled
+
+# Check the active route for the dashboard
+oc get route -n openshift-ingress | grep -E "rh-ai|data-science-gateway"
+```
+
+Fix: bump the `istio-proxy` memory to 2Gi via the gateway's
+`parametersRef` ConfigMap (see "Gateway OOMKill Prevention" in SKILL.md). The
+`data-science-gateway-config` ConfigMap is operator-owned, but the RHOAI
+operator preserves extra `data` keys, so the `deployment` key is safe to merge.
+After patching, the Sail gateway controller rolls a new pod automatically.
+
 ## MaaS API Returns 401/403/429
 
 | Code | Meaning | Fix |
