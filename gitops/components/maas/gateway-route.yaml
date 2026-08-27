@@ -5,7 +5,6 @@ metadata:
   name: maas-gateway
   namespace: openshift-ingress
   annotations:
-    router.openshift.io/service-ca-certificate: "true"
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   # Cluster-specific: the hostname follows the pattern maas.apps.<cluster-domain>.
@@ -16,7 +15,6 @@ spec:
     name: maas-default-gateway-data-science-gateway-class
     weight: 100
   port:
-    targetPort: https
+    targetPort: 443
   tls:
-    termination: reencrypt
-    insecureEdgeTerminationPolicy: Redirect
+    termination: passthrough
