@@ -18,6 +18,7 @@ spec:
       name: maas-gw-options
   listeners:
     - name: http
+      hostname: maas.apps.ocp.75pq4.sandbox1202.opentlc.com
       port: 80
       protocol: HTTP
       allowedRoutes:
@@ -27,6 +28,7 @@ spec:
             matchLabels:
               maas.opendatahub.io/gateway-access: "true"
     - name: https
+      hostname: maas.apps.ocp.75pq4.sandbox1202.opentlc.com
       port: 443
       protocol: HTTPS
       allowedRoutes:
