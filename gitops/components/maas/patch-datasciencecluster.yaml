@@ -9,3 +9,5 @@ spec:
       managementState: Managed
       modelsAsAService:
         managementState: Managed
+    mlflowoperator:
+      managementState: Managed
