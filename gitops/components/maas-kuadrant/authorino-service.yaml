@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: authorino-authorino-authorization
+  namespace: kuadrant-system
+  annotations:
+    # Generate the Authorino TLS cert via the OpenShift service-ca-operator.
+    # The Authorino CR (authorino.yaml) enables listener.tls with
+    # certSecretRef: authorino-server-cert, but the operator cannot create the
+    # authorino Deployment until that Secret exists — and the Secret is only
+    # produced after this Service is annotated. Declaring the annotation here
+    # (rather than `oc annotate` on the operator-created Service) makes cert
+    # generation durable and breaks that circular dependency on cold bootstrap.
+    service.beta.openshift.io/serving-cert-secret-name: authorino-server-cert
+    # The authorino-operator adopts this Service (adds an ownerReference) and
+    # the service-ca-operator adds `serving-cert-signed-by` annotations. Tell
+    # ArgoCD to ignore those live-only fields instead of fighting them.
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+    argocd.argoproj.io/sync-options: ServerSideApply=true
+spec:
+  ports:
+    - name: grpc
+      port: 50051
+      protocol: TCP
+      targetPort: 50051
+    - name: http
+      port: 5001
+      protocol: TCP
+      targetPort: 5001
+  selector:
+    authorino-resource: authorino
+    control-plane: controller-manager
+  type: ClusterIP

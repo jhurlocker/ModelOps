@@ -4,3 +4,4 @@ kind: Kustomization
 resources:
   - kuadrant.yaml
   - authorino.yaml
+  - authorino-service.yaml
