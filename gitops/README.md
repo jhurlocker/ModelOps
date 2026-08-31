@@ -502,20 +502,23 @@ curl -sk -X POST "https://maas.${CLUSTER_DOMAIN}/maas-api/v1/api-keys/search" -H
 ### Step 2d: Gateway namespace label (manual, one-time)
 
 The `maas-default-gateway` restricts HTTPRoutes to namespaces labeled with
-`maas.opendatahub.io/gateway-access=true`. The `redhat-ods-applications`
-namespace (where the MaaS API HTTPRoute is created by RHOAI) needs this label:
+`maas.opendatahub.io/gateway-access=true`. On RHOAI 3.5 the MaaS API HTTPRoute
+lives in the `redhat-ai-gateway-infra` namespace (the maas-api deployment also
+moved there from `redhat-ods-applications`); RHOAI auto-labels that namespace,
+so no manual label is needed for the base MaaS API route.
+
+Any additional namespaces serving models through the MaaS Gateway must be
+labeled manually (`maas.opendatahub.io/gateway-access=true`):
 
 ```bash
-oc label namespace redhat-ods-applications \
+oc label namespace <serving-namespace> \
   maas.opendatahub.io/gateway-access=true --overwrite
 ```
 
-> RHOAI manages the `redhat-ods-applications` namespace, so this label
-> cannot be added via GitOps (ArgoCD would fight with the RHOAI operator).
-> It is a one-time manual step per cluster.
-
-Any additional namespaces serving models through the MaaS Gateway must also
-be labeled (`maas.opendatahub.io/gateway-access=true`).
+> RHOAI manages these namespaces, so this label cannot be added via GitOps
+> (ArgoCD would fight with the RHOAI operator). It is a one-time manual step
+> per cluster. The promotion stage's `namespaceSetup.labels` already sets
+> `maas.opendatahub.io/gateway-access=true` for operator-provisioned namespaces.
 
 ### Step 2e: MaaS Gateway architecture
 
@@ -545,7 +548,9 @@ The Gateway requires:
    `service-ca-certificate` annotation here — that makes the Router present SNI
    = the internal service name, which conflicts with the hostname-filtered
    HTTPS listener (`filter_chain_not_found`).
-3. The `redhat-ods-applications` namespace labeled for Gateway access (Step 2d)
+3. The serving namespaces labeled for Gateway access (Step 2d); on RHOAI 3.5
+   the MaaS API HTTPRoute and `maas-api` deployment live in
+   `redhat-ai-gateway-infra` (auto-labeled by RHOAI)
 
 The Gateway hostname is hardcoded in `gitops/components/maas/gateway.yaml`
 (and the Route host in `gateway-route.yaml`). For other clusters, update the

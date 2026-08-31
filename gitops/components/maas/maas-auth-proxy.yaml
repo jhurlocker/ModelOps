@@ -10,7 +10,7 @@ data:
     from urllib.error import HTTPError, URLError
     import ssl, json, sys
 
-    MAAS_API = "https://maas-api.redhat-ods-applications.svc.cluster.local:8443"
+    MAAS_API = "https://maas-api.redhat-ai-gateway-infra.svc.cluster.local:8443"
     K8S_API = "https://kubernetes.default.svc/apis/user.openshift.io/v1/users/~"
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
