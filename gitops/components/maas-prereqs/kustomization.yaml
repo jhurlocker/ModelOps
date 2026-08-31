@@ -3,6 +3,8 @@ kind: Kustomization
 
 resources:
   - namespaces.yaml
+  - cert-manager-operatorgroup.yaml
+  - cert-manager-subscription.yaml
   - lws-operatorgroup.yaml
   - lws-subscription.yaml
   - rhcl-subscription.yaml

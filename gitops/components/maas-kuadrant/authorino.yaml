@@ -1,0 +1,36 @@
+apiVersion: operator.authorino.kuadrant.io/v1beta1
+kind: Authorino
+metadata:
+  name: authorino
+  namespace: kuadrant-system
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+# RHOAI MaaS-specific shape: TLS listener ENABLED. This is NOT the generic
+# quick-start Authorino (which ships with listener.tls.enabled: false and
+# oidcServer.tls.enabled: false). MaaS API-key operations require the TLS
+# listener, so KServe/maas-api can reach Authorino over gRPC-TLS using the
+# OpenShift service signing CA (the Envoy proxy trusts that CA via the
+# service-ca bundle, hence the SSL_CERT_FILE/REQUESTS_CA_BUNDLE env vars on
+# the authorino deployment in the README Step 2a).
+#
+# The Kuadrant operator auto-creates a base `authorino` Authorino (TLS off)
+# when it reconciles the Kuadrant CR. Applying this CR updates that instance
+# to the MaaS shape. NOTE: the certSecretRef below points at
+# `authorino-server-cert`, which the OpenShift service-ca-operator only
+# generates once the operator-owned Service `authorino-authorino-authorization`
+# is annotated with
+#   service.beta.openshift.io/serving-cert-secret-name=authorino-server-cert
+# (one-time manual step, see README Step 2a-2). Until that secret exists the
+# TLS listener is enabled but will not hand out a cert — the remaining manual
+# step is cert generation, not CR shape.
+spec:
+  replicas: 1
+  clusterWide: true
+  listener:
+    tls:
+      enabled: true
+      certSecretRef:
+        name: authorino-server-cert
+  oidcServer:
+    tls:
+      enabled: false

@@ -9,7 +9,7 @@ metadata:
 spec:
   # Cluster-specific: the hostname follows the pattern maas.apps.<cluster-domain>.
   # Find your cluster domain: oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'
-  host: maas.apps.ocp.75pq4.sandbox1202.opentlc.com
+  host: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com
   to:
     kind: Service
     name: maas-default-gateway-data-science-gateway-class
