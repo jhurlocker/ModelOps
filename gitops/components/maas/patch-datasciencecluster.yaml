@@ -5,6 +5,7 @@ metadata:
   name: default-dsc
 spec:
   components:
-    kserve:
-      modelsAsService:
+    aigateway:
+      managementState: Managed
+      modelsAsAService:
         managementState: Managed

@@ -226,11 +226,21 @@ fail validation. Once the CRD is registered, they sync automatically.
 
 #### maas / maas-subscriptions dependency chain
 
-The **maas** Application patches the `DataScienceCluster` to enable KServe
-Models-as-a-Service (`kserve.modelsAsService.managementState: Managed`).
+The **maas** Application patches the `DataScienceCluster` to enable the AI
+Gateway module and Models-as-a-Service
+(`components.aigateway.managementState: Managed` together with
+`components.aigateway.modelsAsAService.managementState: Managed`).
 When RHOAI's operator asynchronously reconciles this change, it registers
 the `MaaSSubscription` and `Tenant` CRDs. The **maas-subscriptions** Application
 then creates `MaaSSubscription` resources that depend on those CRDs being available.
+
+> **RHOAI 3.5 field rename**: the legacy `components.kserve.modelsAsService`
+> path is deprecated and one-directional — it can go `Managed` → `Removed`
+> (cleanup) but NOT `Removed` → `Managed`, so a fresh 3.5 cluster rejects the
+> old field with "cannot re-enable once Removed". MaaS must be enabled via
+> `components.aigateway.modelsAsAService` (note `AsAService`, three capitals,
+> matching the ai-gateway-operator CRD field) alongside enabling the
+> `aigateway` module itself.
 
 The DataScienceCluster patch must be a Kustomize **resource** (not a `patches`
 entry) because it targets a `DataScienceCluster` not owned by the maas
@@ -260,7 +270,7 @@ resources (not instances of CRDs registered by an external operator), so they
 do not have a similar async timing dependency. The Gateway (`data-science-gateway-class`)
 and Tenant resources within maas also depend on RHOAI being installed, but
 their CRDs are registered during RHOAI installation — not gated behind
-`modelsAsService: Managed` — and are therefore unaffected by this race
+`modelsAsAService: Managed` — and are therefore unaffected by this race
 condition. The maas Application's retry policy covers any transient failures
 on those resources as well.
 
@@ -299,7 +309,7 @@ oc annotate tenant default-tenant -n models-as-a-service \
 # ---- maas / maas-subscriptions ----
 
 # Check that the DataScienceCluster patch was applied
-oc get dsc default-dsc -o jsonpath='{.spec.components.kserve.modelsAsService.managementState}'
+oc get dsc default-dsc -o jsonpath='{.spec.components.aigateway.modelsAsAService.managementState}'
 # Expected: Managed
 
 # Confirm the MaaS CRDs are registered
