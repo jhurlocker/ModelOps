@@ -190,9 +190,12 @@ spec:
           -f Containerfile .
         popd >/dev/null
 
-        # Push to Zot.
+        # Push to Zot. The SOURCE is the locally-built, already-tagged image
+        # (no transport prefix); the DESTINATION carries the docker:// transport
+        # and is HTTP (--tls-verify=false).
         buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
           push --tls-verify=false \
+          "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" \
           "docker://${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
 
         # Emit the full reference for downstream tasks / Phase C.
