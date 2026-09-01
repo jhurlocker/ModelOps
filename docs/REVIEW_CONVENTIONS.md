@@ -29,6 +29,10 @@ This project has hit two separate, concrete bugs that only existed at the bounda
 - Python dependencies via `pypi.org` generally *are* fetchable — the shim catalog's test suites were actually installed and run for real (`pip install`, `pytest`), which is meaningfully stronger verification than static reading. Prefer actually running Python-side work when possible, since the tooling allows it.
 - `gofmt` drift has been a low-priority, recurring, occasionally-forgotten item across several phases — worth a periodic `gofmt -w .` sweep rather than letting it accumulate.
 
+## On committing and pushing completed work
+
+Committing and pushing completed, reviewed work is a standard, expected part of finishing a phase in this project — not something that needs separate authorization each time. It has been treated that way for every prior phase (Webhook, checkTypes, Zot, the build-modelcar task, the TLS phase, etc.), and re-confirming it on each new phase is friction, not caution. Stage only the intended files, write a message in the repo's existing style, and push when the work and its verification are done — the same way a phase is closed anywhere else in this project.
+
 ## On session continuity itself
 
 This project has deliberately pushed every durable decision into files in `docs/` rather than relying on conversation memory, specifically so a dropped connection or a fresh session doesn't lose anything that matters. That discipline held up under a real test: a connection was cut mid-phase, a new session picked the work back up, and because the guiding principles and phase history lived in committed files rather than chat history, nothing substantive was lost — though it did surface that a design decision not yet written to a durable file (a specific syntax convention, in that case) can silently regress across a session boundary even when the underlying capability doesn't. Keep committing decisions to `docs/` as they're made, not just at the end of a phase.

@@ -9,6 +9,7 @@ gitops/
 ├── root-app.yaml              # Root Application (App of Apps pattern)
 ├── appproject.yaml            # ArgoCD AppProject for the platform
 ├── applications/              # Child Application manifests
+│   ├── argocd-config.yaml
 │   ├── evalhub.yaml
 │   ├── maas-kuadrant.yaml
 │   ├── maas-prereqs.yaml
@@ -26,6 +27,7 @@ gitops/
 │   ├── runtime-config.yaml
 │   └── zot.yaml
 ├── components/                # Kustomize-based resource definitions
+│   ├── argocd-config/         # Patches the operator-owned ArgoCD CR (UI RBAC + controller memory)
 │   ├── evalhub/               # EvalHub (TrustyAI) evaluation
 │   ├── maas-kuadrant/         # Kuadrant CR (auth + rate-limiting infrastructure)
 │   ├── maas-prereqs/          # cert-manager, RHCL, and LeaderWorkerSet operator subscriptions
@@ -94,39 +96,36 @@ oc adm policy add-cluster-role-to-user cluster-admin \
 For production, scope this to the specific API groups and resources the
 platform actually needs instead of using cluster-admin.
 
-#### Step 1b: Configure ArgoCD UI RBAC
+#### Step 1b: Configure the operator-owned ArgoCD instance (automatic)
 
-By default the ArgoCD UI is only visible to OpenShift users in the
-`cluster-admins` group. Update the `ArgoCD` CR's `spec.rbac` so every
-authenticated user can at least view applications (sandbox-default
-`role:readonly`), and the local `admin` account works:
+The `openshift-gitops` `ArgoCD` CR — created and owned by the OpenShift GitOps
+operator, not by this repo — is patched automatically by the `argocd-config`
+Application (sync-wave -1, synced ahead of everything else). It sets:
+
+- **`spec.rbac`** so every authenticated user can at least view applications
+  (sandbox-default `role:readonly`), the OpenShift cluster-admin groups
+  (`system:cluster-admins` / `cluster-admins`) get `role:admin`, and the local
+  `admin` account works.
+- **`spec.controller.resources`** so the application controller's default 2Gi
+  memory limit does not OOMKill it during a cold bootstrap of all Applications
+  with retry policies enabled.
+
+No manual action is needed. See `gitops/components/argocd-config/patch-argocd.yaml`.
 
 > **Important:** The OpenShift GitOps operator owns the `argocd-rbac-cm`
-> ConfigMap and will revert any direct edits to it. Configure RBAC through
-> the `ArgoCD` custom resource instead.
+> ConfigMap and will revert any direct edits to it. Configure RBAC through the
+> `ArgoCD` custom resource instead — which is exactly what the committed
+> `argocd-config` component does.
 
-```bash
-oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
-{
-  "spec": {
-    "rbac": {
-      "defaultPolicy": "role:readonly",
-      "policy": "g, system:cluster-admins, role:admin\ng, cluster-admins, role:admin\ng, admin, role:admin\n",
-      "scopes": "[groups]"
-    }
-  }
-}'
-```
-
-#### Step 1c: Increase ArgoCD controller memory (recommended)
-
-The default 2Gi memory limit can cause OOMKills during a cold bootstrap of
-all 16 Applications with retry policies enabled:
-
-```bash
-oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
-{"spec":{"controller":{"resources":{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}}}}'
-```
+> **Why this used to be manual (and caused a real problem):** Steps 1b and 1c
+> were previously `oc patch` commands that had to be remembered and re-run by
+> hand on every new cluster. Skipping them was invisible on an existing lab
+> cluster (already patched), but failed on a fresh cluster: a cluster-admin who
+> logged into the ArgoCD UI saw an **empty** Application list — and the
+> controller was at risk of OOMKilling during the cold bootstrap — despite every
+> Application otherwise being Synced. They are now committed GitOps that apply
+> on every new cluster automatically, closing the same hand-run-post-install gap
+> that the Authorino TLS and gateway-memory entries below already document.
 
 ### Step 2: Deploy the platform
 
@@ -138,23 +137,24 @@ oc apply -f gitops/appproject.yaml
 oc apply -f gitops/root-app.yaml
 ```
 
-ArgoCD will automatically sync all 16 child applications:
-1. MaaS Prereqs — cert-manager + RHCL + LeaderWorkerSet operator subscriptions
-2. MaaS Kuadrant — Kuadrant CR (triggers Authorino + Limitador creation) + Authorino CR (TLS listener enabled)
-3. EvalHub — TrustyAI evaluation platform
-4. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
-5. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
-6. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
-7. Zot — OCI container image registry (in-cluster, built-in UI)
-8. MLflow — experiment tracking via MlflowOperator
-9. Model Inference — example inference route (Granite 2B) deployed to staging
-10. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
-11. Model Registry — MySQL-backed Model Registry instance for registered model metadata
-12. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
-13. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
-14. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
-15. Results UI — frontend UI for viewing scan and benchmark results
-16. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
+ArgoCD will automatically sync all 17 child applications:
+1. ArgoCD Config — patches the operator-owned `openshift-gitops` ArgoCD CR (UI RBAC + controller memory), so cluster-admins can view Applications in the UI and the controller does not OOMKill during bootstrap
+2. MaaS Prereqs — cert-manager + RHCL + LeaderWorkerSet operator subscriptions
+3. MaaS Kuadrant — Kuadrant CR (triggers Authorino + Limitador creation) + Authorino CR (TLS listener enabled)
+4. EvalHub — TrustyAI evaluation platform
+5. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
+6. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
+7. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
+8. Zot — OCI container image registry (in-cluster, built-in UI)
+9. MLflow — experiment tracking via MlflowOperator
+10. Model Inference — example inference route (Granite 2B) deployed to staging
+11. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
+12. Model Registry — MySQL-backed Model Registry instance for registered model metadata
+13. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
+14. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
+15. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
+16. Results UI — frontend UI for viewing scan and benchmark results
+17. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
 ### Application dependency chain and sync ordering
 
@@ -167,7 +167,7 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 
 | Wave | Applications | What it does / depends on |
 |------|--------------|---------------------------|
-| -1 | maas-prereqs | Installs RHCL + LWS operators (Subscriptions) |
+| -1 | argocd-config, maas-prereqs | argocd-config patches the operator-owned ArgoCD CR (RBAC + controller memory); maas-prereqs installs RHCL + LWS operators (Subscriptions) |
 | 0 | maas-kuadrant | Creates Kuadrant CR — depends on RHCL operator CRDs from wave -1 |
 | 1 | maas | Patches DataScienceCluster → triggers async RHOAI reconciliation for MaaS CRDs |
 | 2 | maas-subscriptions | Creates MaaSSubscription CRs — depends on CRDs registered by wave 1 |
@@ -177,6 +177,21 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 All other Applications (evalhub, minio, zot, mlflow, model-intake-ui, model-registry,
 modelops-operator) have no sync-wave and run in the default wave (0), starting
 alongside maas-kuadrant.
+
+#### argocd-config sequencing (no chicken-and-egg)
+
+`argocd-config` patches the `openshift-gitops` ArgoCD CR. That CR is created by
+the OpenShift GitOps operator itself in Step 1 — it must already exist for
+`root-app.yaml` to be applicable at all, because ArgoCD's own CRDs and the
+running ArgoCD instance are a hard prerequisite for the App-of-Apps pattern.
+By the time any child Application (including `argocd-config`) syncs, the ArgoCD
+CR is guaranteed to be present, so there is no sequencing conflict: this patch
+targets a CR that necessarily predates the first sync.
+
+It is placed at sync-wave -1 (alongside `maas-prereqs`, ahead of the wave-0
+Applications) so the controller memory bump lands *before* the bulk of the 17
+Applications begin their cold bootstrap, and before anyone relies on the UI
+showing them.
 
 #### Retry policies
 
@@ -361,14 +376,10 @@ done
 
 #### ArgoCD controller memory
 
-During a cold bootstrap of all 16 Applications with retry policies, the
-ArgoCD application controller may exhaust its default 2Gi memory limit
-and be OOMKilled (exit 137). Increase the memory limit before deploying:
-
-```bash
-oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
-{"spec":{"controller":{"resources":{"limits":{"memory":"4Gi"},"requests":{"memory":"2Gi"}}}}}'
-```
+Handled automatically by the `argocd-config` Application (wave -1), which
+patches `spec.controller.resources` (4Gi limit / 2Gi request) on the
+operator-owned `openshift-gitops` ArgoCD CR. See Step 1b — no manual action
+is needed.
 
 ### Step 2a: Configure Authorino TLS (manual, one-time)
 
@@ -675,7 +686,7 @@ The operator will ensure each promotion namespace has:
 ## New Cluster Bootstrap Checklist
 
 When deploying to a fresh cluster, follow this order after prerequisites
-(Step 1-1c in Quick Start) are satisfied:
+(Step 1 and 1a in Quick Start; Steps 1b/1c are now automatic) are satisfied:
 
 1. **Export your cluster domain**:
    ```bash
@@ -690,25 +701,26 @@ When deploying to a fresh cluster, follow this order after prerequisites
    # Update spec.host in gitops/components/maas/gateway-route.yaml
    ```
 
-3. **Grant ArgoCD access** — The default RBAC policy checks OpenShift **groups**, not
-   usernames. Update the ArgoCD CR to include your user's groups:
-   ```bash
-   # Find your OpenShift groups
-   oc whoami && oc get groups -o name
-   # Add them to the ArgoCD RBAC policy (example adds rhods-admins + catch-all)
-   oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '{
-     "spec": {
-       "rbac": {
-         "defaultPolicy": "",
-         "policy": "g, system:cluster-admins, role:admin\ng, cluster-admins, role:admin\ng, <YOUR_GROUP>, role:admin\ng, system:authenticated, role:admin\n",
-         "scopes": "[groups]"
-       }
-     }
-   }'
+3. **ArgoCD UI RBAC is already handled** — the `argocd-config` Application (wave -1)
+   commits `spec.rbac` to the operator-owned `openshift-gitops` ArgoCD CR,
+   mapping cluster-admin groups to `role:admin` (and everyone else to
+   `role:readonly`). A cluster-admin who logs into the UI already sees every
+   Application. To grant a *non*‑cluster-admin group access, do **not** `oc patch`
+   the ArgoCD CR — GitOps self-heals it back — instead append the group line to
+   the committed policy in `gitops/components/argocd-config/patch-argocd.yaml`:
+
+   ```yaml
+   spec:
+     rbac:
+       policy: |
+         g, system:cluster-admins, role:admin
+         g, cluster-admins, role:admin
+         g, admin, role:admin
+         g, <YOUR_GROUP>, role:admin
    ```
+
    > **Why**: ArgoCD `scopes: [groups]` only checks OpenShift group membership.
    > If your group is not in the policy, you'll see an empty application list.
-   > The `system:authenticated` line grants access to all logged-in users on sandbox clusters.
 
 4. **Deploy root app** — ArgoCD syncs all apps in wave order:
    ```bash

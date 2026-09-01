@@ -1,0 +1,47 @@
+---
+# Configures the ArgoCD instance that is NOT created or owned by this repo.
+#
+# The OpenShift GitOps operator (Quick Start, Step 1) creates the `ArgoCD` CR
+# named `openshift-gitops` in the `openshift-gitops` namespace and reconciles it
+# into the running ArgoCD server/repo-server/application-controller. This file
+# patches that operator-owned CR as a GitOps-managed strategic merge (a bare
+# `resources` entry, so Kustomize keeps it in the build output and ArgoCD merges
+# it into the live object on sync).
+#
+# Why patch the CR and not the ConfigMap: the operator owns `argocd-rbac-cm` and
+# reverts any direct edits to it. RBAC must therefore be set through the ArgoCD
+# CR (here), never by editing the ConfigMap or `oc patch`ing it by hand. This is
+# the same reason the patch is a Kustomize *resource* and not a `patches:` target
+# with a selector: a `patches` entry with no matching resource in this
+# kustomization's `resources` list would be silently dropped.
+#
+# Why this is committed at all: Steps 1b (UI RBAC) and 1c (controller memory)
+# used to be manual `oc patch` commands that had to be re-run on every new
+# cluster. On a fresh cluster a cluster-admin who logged into the ArgoCD UI saw
+# an empty Application list (and the controller's default 2Gi limit OOMKilled it
+# during cold bootstrap) precisely because those steps had been skipped. Here
+# they apply automatically on every cluster as part of the bootstrap.
+apiVersion: argoproj.io/v1beta1
+kind: ArgoCD
+metadata:
+  name: openshift-gitops
+  namespace: openshift-gitops
+spec:
+  rbac:
+    # Every authenticated user can at least read Applications (sandbox default);
+    # the OpenShift cluster-admin groups and ArgoCD's local `admin` account get
+    # full admin. Authorization is resolved against OpenShift *groups* via scopes.
+    defaultPolicy: role:readonly
+    scopes: '[groups]'
+    policy: |
+      g, system:cluster-admins, role:admin
+      g, cluster-admins, role:admin
+      g, admin, role:admin
+  controller:
+    # The default 2Gi memory limit OOMKills the application controller during a
+    # cold bootstrap of all Applications with retry policies enabled.
+    resources:
+      limits:
+        memory: 4Gi
+      requests:
+        memory: 2Gi

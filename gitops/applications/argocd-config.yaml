@@ -1,0 +1,34 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd-config
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: modelops
+  annotations:
+    # Sync before every other Application so the operator-owned ArgoCD CR's
+    # controller memory limit is raised *before* the bulk of apps (wave 0+)
+    # start a cold bootstrap, and before the UI is expected to show them.
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: modelops
+  source:
+    repoURL: https://github.com/jhurlocker/ModelOps.git
+    targetRevision: feat/model-request-controller
+    path: gitops/components/argocd-config
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      # prune is deliberately disabled: the `openshift-gitops` ArgoCD CR is
+      # created and owned by the OpenShift GitOps operator. It must never be
+      # deleted by this Application (pruning a self-managed ArgoCD instance
+      # would tear down the very controller performing the sync).
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: "10s"
+        factor: 2
+        maxDuration: "5m"
