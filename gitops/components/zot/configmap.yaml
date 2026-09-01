@@ -31,6 +31,10 @@ data:
         "port": "5000",
         "realm": "zot",
         "compat": ["docker2s2"],
+        "tls": {
+          "cert": "/etc/zot/certs/tls.crt",
+          "key": "/etc/zot/certs/tls.key"
+        },
         "auth": {
           "htpasswd": {
             "path": "/etc/zot/htpasswd"

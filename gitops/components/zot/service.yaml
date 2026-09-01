@@ -3,6 +3,14 @@ kind: Service
 metadata:
   name: zot
   namespace: modelops-zot
+  annotations:
+    # Request an OpenShift service-serving certificate for Zot. The Service CA
+    # operator mints a kubernetes.io/tls Secret (zot-serving-cert) signed by
+    # the openshift-service-serving-signer CA; the Zot pod mounts it and serves
+    # TLS on port 5000 (see deployment.yaml + configmap.yaml). In-cluster
+    # clients (buildah, skopeo) then verify that cert against the service CA
+    # instead of disabling TLS verification with --tls-verify=false.
+    service.beta.openshift.io/serving-cert-secret-name: zot-serving-cert
 spec:
   # In-cluster consumers (Tekton pipeline tasks, future controllers) push/pull
   # through this internal DNS name (zot.modelops-zot.svc.cluster.local:5000),

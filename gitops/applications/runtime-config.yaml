@@ -25,3 +25,17 @@ spec:
         duration: "10s"
         factor: 2
         maxDuration: "5m"
+  ignoreDifferences:
+    # The Service CA operator asynchronously writes the injected `service-ca.crt`
+    # into this ConfigMap's data on the live cluster, after ArgoCD has synced
+    # the (annotation-only) Git state. Without this, ArgoCD's self-heal would
+    # see the injected data as drift and strip it, racing the operator and
+    # intermittently leaving the mounted CA bundle empty. Ignore data so the
+    # operator-owned field survives. See gitops/components/runtime-config/
+    # zot-service-ca.yaml.
+    - group: ""
+      kind: ConfigMap
+      name: zot-service-ca
+      namespace: sandbox
+      jqPathExpressions:
+        - .data

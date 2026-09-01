@@ -8,3 +8,4 @@ resources:
   - lifecycleprofile.yaml
   - intakeproviderconfig.yaml
   - secrets.yaml
+  - zot-service-ca.yaml

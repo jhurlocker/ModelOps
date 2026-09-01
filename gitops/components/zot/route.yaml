@@ -14,4 +14,9 @@ spec:
     kind: Service
     name: zot
   tls:
-    termination: edge
+    # passthrough: Zot now serves TLS directly (service-CA-signed serving cert,
+    # see service.yaml/configmap.yaml), so the router must not terminate TLS.
+    # The browser sees Zot's own service-CA-signed cert (a UI-side cert warning
+    # for this sandbox registry, acceptable for its demo use). In-cluster
+    # push/pull does not go through this Route at all.
+    termination: passthrough

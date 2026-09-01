@@ -39,15 +39,21 @@ spec:
             - name: htpasswd
               mountPath: /etc/zot/htpasswd
               subPath: htpasswd
+            - name: certs
+              mountPath: /etc/zot/certs
+              readOnly: true
+          # Zot serves TLS on 5000 now (config.json's http.tls). A tcpSocket
+          # probe checks only that the port is accepting connections, so it
+          # works regardless of TLS and avoids forcing kubelet to verify the
+          # service-CA-signed cert (node-level trust that lives behind the
+          # deferred additionalTrustedCA decision, not this change).
           readinessProbe:
-            httpGet:
-              path: /readyz
+            tcpSocket:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /livez
+            tcpSocket:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
@@ -71,3 +77,6 @@ spec:
         - name: htpasswd
           secret:
             secretName: zot-htpasswd
+        - name: certs
+          secret:
+            secretName: zot-serving-cert

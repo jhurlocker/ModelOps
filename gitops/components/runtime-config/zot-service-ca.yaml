@@ -1,0 +1,22 @@
+# OpenShift service-serving CA bundle, injected by the Service CA operator
+# (service.beta.openshift.io/inject-cabundle) into the `service-ca.crt` key.
+# This is the CA that signs Zot's serving certificate (the
+# service.beta.openshift.io/serving-cert-secret-name annotation on Zot's
+# Service), so mounting it lets the pipeline tasks verify Zot over HTTPS.
+#
+# This is the DEFENSIVE fallback trust source. The primary source is the CA
+# bundle the Service CA operator injects into every pod's own serviceaccount
+# dir (/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt); the task
+# steps prefer that path and only fall back to this ConfigMap (mounted at
+# /etc/zot-ca) if the SA path isn't populated — because docs/PHASE_LOG.md's
+# EvalHub CA fix showed that SA path is not guaranteed on every cluster.
+# See docs/PHASE_LOG.md (EvalHub CA fix) and the Zot TLS phase entry.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-service-ca
+  namespace: sandbox
+  labels:
+    app.kubernetes.io/part-of: modelops
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
