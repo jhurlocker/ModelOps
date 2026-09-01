@@ -83,6 +83,15 @@ spec:
   steps:
     - name: build-and-push
       image: $(params.buildah-image)
+      # SETFCAP is required for buildah to create its (rootless-style) user
+      # namespace on OpenShift 4.11+/kernel 5.12+; without it, buildah's
+      # reexec fails with "writing ... to /proc/<pid>/uid_map: operation not
+      # permitted" (Red Hat KB solution #6993746). The pipelines-scc already
+      # allows SETFCAP, so this is admitted, not dropped.
+      securityContext:
+        capabilities:
+          add:
+            - SETFCAP
       env:
         - name: MODEL_ID
           value: $(params.model-id)

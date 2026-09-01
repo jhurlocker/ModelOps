@@ -131,6 +131,8 @@ func TestPipelineYAML_BuildModelcarTask_PinnedBuildahImage_NeverLatest(t *testin
 		"build-modelcar must not use the floating 'latest' buildah tag")
 	require.Contains(t, text, "--storage-driver vfs",
 		"build-modelcar must use the vfs storage driver (rootless-safe on OpenShift)")
+	require.Contains(t, text, "SETFCAP",
+		"build-modelcar's buildah step must request the SETFCAP capability (required for userns creation on OCP 4.11+/kernel 5.12+; Red Hat KB #6993746)")
 }
 
 func TestPipelineYAML_BuildModelcar_RegistryUrlIsInternalServiceDNS(t *testing.T) {
