@@ -4779,3 +4779,158 @@ gitops files changed.
   pick up the built image from the same `Containerfile`.
 
 ---
+
+---
+
+## Phase B (model-intake vertical slice) — build-modelcar Task
+
+**Commits:** `0bf0013` ("feat(gitops): add build-modelcar task to build
+ModelCar images into Zot"), `0ef7cdd` ("fix(gitops): request SETFCAP
+capability for buildah step"), `84c5614` ("fix(gitops): buildah push
+needs a local source image, docker:// only on dest") on
+`feat/model-request-controller`.
+
+This is the **model-intake / Zot workstream**, a *separate* phase
+sequence from the operator refactor whose "Phase A/B/C" entries appear
+above: Phase A (Zot deployed, see the Zot gitops + README work), this
+Phase B (build a ModelCar from Hugging Face into Zot), and Phase C
+(consume the result downstream) — do not confuse with the earlier
+WebhookProviderConfig/CheckTypes/DetailsURL "Phase A/B/C". The build
+Task was design-reviewed first and approved with explicit decisions
+(result name `image-ref`, fail-safe `when: in ["huggingface"]`, Zot PVC
+bump 20Gi→50Gi, and a rotation-coupling comment on the push-credential
+Secret).
+
+### What changed
+
+- **`build-modelcar-task.yaml`** (new): Task #1 in the sandbox pipeline.
+  Downloads a model from Hugging Face, packages it as a ModelCar OCI
+  image (two-stage build per Red Hat's "Build and deploy a ModelCar
+  container" article: `ubi9/python-311` + `huggingface_hub` -> `/models`,
+  then copy `/models` into `ubi9/ubi-micro`, `USER 1001`), and pushes it
+  to Zot's internal Service DNS. Emits the result below.
+- **sandbox-pipeline.yaml**: `build-modelcar` inserted as the FIRST task
+  (before `compliance-artifact-scan`, which now runs `runAfter:
+  [build-modelcar]`), guarded by `when: input: $(params.model-source-type),
+  operator: in, values: ["huggingface"]` — oci/s3 (and any future source
+  type) skip the build; fail-safe-by-default. Added pipeline params
+  `registry-auth-secret-name` (default `zot-push-credentials`) and
+  `registry-url` (default `zot.modelops-zot.svc.cluster.local:5000`).
+- **Credentials, secretKeyRef only (Phase 8 pattern)**: HF token via
+  `huggingface-secret-name` (`key: token`, `optional: true` — ungated
+  models work with a nonexistent Secret); Zot push via
+  `registry-auth-secret-name` (`key: username`/`password`, required). The
+  HF token is injected into the build with `buildah --secret
+  id=HF_TOKEN,env=HF_TOKEN` so it never persists in an image layer.
+- **`zot-push-credentials` Secret** (`gitops/components/runtime-config/secrets.yaml`,
+  `sandbox` ns): plaintext `zotadmin`/`zotadmin` (base64), with the
+  required comment documenting it is the SAME zotadmin identity whose
+  bcrypt hash is in `zot-htpasswd` — rotating one without the other
+  breaks push auth silently (401 while Zot stays "Healthy").
+- **`gitops/components/zot/pvc.yaml`**: `zot-data` 20Gi → 50Gi, done
+  ahead of verification (not deferred).
+- **`operator/internal/stages/tekton/pipeline_yaml_build_test.go`** (new):
+  6 static YAML safety-net tests pinning: build-modelcar is Task #1 and
+  `compliance-artifact-scan` runs `runAfter` it; the `when` guard is
+  exactly `in ["huggingface"]` (not `notin`); `image-ref` result is
+  declared and written via `$(results.image-ref.path)`; both credentials
+  consumed via `secretKeyRef` with no literal value or `default:
+  "zotadmin"`/`value: zotadmin` leaking in; the builder image is pinned
+  (no `:latest`) and uses `--storage-driver vfs` + `SETFCAP`; `registry-url`
+  is the internal Service DNS.
+
+### Builder execution (SCC verification, performed live)
+
+`quay.io/buildah/stable:v1.43.2` (pinned), run rootless with the `vfs`
+storage driver (`--root <scratch> --storage-driver vfs`). Two real
+findings needed to make it work on this cluster, both caught only by
+live verification (envtest/static tests structurally can't):
+
+1. **`SETFCAP` capability required.** buildah's reexec fails with
+   `writing "0 0 4294967295\n" to /proc/<pid>/uid_map: operation not
+   permitted` on OCP 4.11+/kernel 5.12+ without CAP_SETFCAP (Red Hat KB
+   solution #6993746). The step sets
+   `securityContext.capabilities.add: ["SETFCAP"]`; the cluster's
+   `pipelines-scc` already lists SETFCAP in `allowedCapabilities`
+   (`runAsUser: RunAsAny`, `allowPrivilegedContainer: false`), so it is
+   admitted without any privileged/anyuid SCC change.
+2. **`buildah push` source must be the local image, not a `docker://`
+   transport.** First draft prefixed both args with `docker://`, failing
+   with `unsupported transport "docker" for looking up local images`.
+   Corrected: `buildah push --tls-verify=false <local-tagged-image>
+   docker://<registry>/<image>:<tag>`. `--tls-verify=false` because the
+   in-cluster Zot Service is plain HTTP (TLS terminated at the Route).
+
+### The image-ref result (Phase C handoff — finalized shape)
+
+Task result name: **`image-ref`**. Value is the full OCI reference, in
+the internal Service DNS form an in-cluster consumer can pull:
+
+```
+zot.modelops-zot.svc.cluster.local:5000/<model-name>:<model-version>
+```
+
+e.g. `zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct:v1`.
+`<model-name>` is `spec.model.name` (Kubernetes-safe, lower-case);
+`<model-version>` is `spec.model.version` (default `v1`). Deliberately
+NOT the external `zot-ui` Route (per the gitops/README rule that
+in-cluster consumers use internal DNS). Written per-step to
+`$(results.image-ref.path)`; confirmed live on a real TaskRun
+(`phaseb-build-verify-sandbox-build-modelcar`) that
+`status.results[?(@.name=="image-ref")].value` equals exactly that
+string. Phase C consumes this without re-deriving it.
+
+### Verification (sandbox cluster, real HF model)
+
+- **Positive, build+push**: a real `ModelRequest`
+  (`sourceType: huggingface`, `uri: HuggingFaceTB/SmolLM2-135M-Instruct`,
+  `name: smollm2-135m-instruct`) drove `build-modelcar` (Task #1) to
+  `Succeeded`; two-stage build downloaded 14 model files to `/models`,
+  committed and pushed
+  `zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct:v1` to
+  the real Zot. Also confirmed via a bare `TaskRun` (`smollm2-direct-test`).
+  The HF download ran unauthenticated (ungated model) — confirming the
+  `optional: true` token path works.
+- **Pullability (decisive, not just exit 0)**:
+  `skopeo inspect` (anonymous, internal DNS) resolved the pushed image
+  (digest `sha256:...`, 2 layers), and `skopeo copy` (anonymous) pulled
+  the full image to an OCI dir — the image is genuinely pullable by any
+  in-cluster consumer with no credentials.
+- **Negative control (htpasswd still enforced)**: anonymous `skopeo
+  copy` push to Zot internal DNS failed with `authentication required`,
+  while the same push with `--dest-creds zotadmin:zotadmin` succeeded —
+  proving the build's push used real credentials and anonymous push is
+  still blocked.
+- **Placement**: the pipeline advanced to
+  `compliance-artifact-scan` (`runAfter` build-modelcar), confirming
+  Task-#1 ordering. As expected for Phase B, the pipeline then halts at
+  compliance's gate, because `compliance-artifact-scan` still resolves
+  the modelcar from `quay.io/redhat-ai-services/modelcar-catalog` rather
+  than consuming `$(tasks.build-modelcar.results.image-ref)` — that
+  downstream wiring is the whole point of Phase C (see below).
+
+### Known follow-up NOT done in this phase
+
+- **Phase C — consume image-ref**: at minimum, forward
+  `$(tasks.build-modelcar.results.image-ref)` into
+  `compliance-artifact-scan` and `deploy-model` via the existing
+  `modelcar-image` param (currently hardcoded `""` in
+  `stagecommon.BuildCommonModelParams`), so both stop deriving tags from
+  the quay catalog and instead inspect/deploy the just-built Zot image.
+  Until then the sandbox pipeline gates fail at compliance, by design.
+- **Builder ephemeral storage**: the build uses the step pod's ephemeral
+  disk (`mktemp -d` + vfs). Fine for small models (SmolLM2 135M ≈ 300MB);
+  a 5GB/15GB Granite would need a larger `emptyDir` limit or a PVC-backed
+  buildah `--root`, and possibly a storage plan — flagged, not remedied.
+- The Zot PVC was bumped to 50Gi, but the sandbox registry now holds a
+  few disposable test images (`smollm2-direct-test`,
+  `smollm2-135m-instruct`, plus a hello-world tag from the negative
+  control); harmless sandbox artifacts, left in place.
+- No `oci`/`s3` build path exists: those source types skip
+  `build-modelcar` via the `when` guard (intended); a real S3-download
+  build and an OCI re-tag/inspect path remain unimplemented.
+- `internal/stages/*` cross-package boundary is unchanged: this phase
+  added only a `_test.go` file to `internal/stages/tekton` (same package)
+  and zero production Go. Confirmed via `go list -deps` that no
+  `internal/stages/*` package imports another; `go build ./...` and
+  `go vet ./...` are clean.
