@@ -240,8 +240,14 @@ spec:
           value: $(params.model-version)
         - name: modelcar-repo
           value: $(params.modelcar-repo)
+        # Phase C: consume the Zot-built image produced by build-modelcar,
+        # rather than re-deriving a tag from quay.io/redhat-ai-services/
+        # modelcar-catalog. For oci/s3 sources build-modelcar is skipped
+        # (its `when: in [huggingface]` guard), so image-ref resolves empty
+        # and compliance falls back to its model-id -> modelcar-repo
+        # derivation exactly as before.
         - name: modelcar-image
-          value: $(params.modelcar-image)
+          value: $(tasks.build-modelcar.results.image-ref)
         - name: artifact-scan-image
           value: $(params.artifact-scan-image)
         - name: artifact-cve-threshold
@@ -338,8 +344,12 @@ spec:
           value: $(params.chart-version)
         - name: model-id
           value: $(params.model-id)
+        # Phase C: deploy the Zot-built ModelCar image produced by
+        # build-modelcar, not a quay.io catalog tag. Same oci/s3 fallback
+        # as compliance-artifact-scan above (empty image-ref -> deploy-model
+        # derives the artifact from model-id/modelcar-repo as before).
         - name: modelcar-image
-          value: $(params.modelcar-image)
+          value: $(tasks.build-modelcar.results.image-ref)
         - name: huggingface-secret-name
           value: $(params.huggingface-secret-name)
         - name: valuesContent
