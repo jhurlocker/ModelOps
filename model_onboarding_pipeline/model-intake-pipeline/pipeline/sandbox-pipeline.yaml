@@ -193,9 +193,44 @@ spec:
         Name of a Secret (in this PipelineRun's namespace) with a
         "token" key -- consumed via secretKeyRef (optional: true).
         Never a token value.
+    - name: registry-auth-secret-name
+      type: string
+      default: "zot-push-credentials"
+      description: >-
+        Name of a Secret (in this PipelineRun's namespace) with
+        username/password keys for Zot push auth, consumed via
+        secretKeyRef by build-modelcar. Never a credential value.
+    - name: registry-url
+      type: string
+      default: "zot.modelops-zot.svc.cluster.local:5000"
+      description: "Zot registry host:port (internal Service DNS; plain HTTP)."
 
   tasks:
+    - name: build-modelcar
+      params:
+        - name: model-id
+          value: $(params.model-id)
+        - name: model-name
+          value: $(params.model-name)
+        - name: model-version
+          value: $(params.model-version)
+        - name: huggingface-secret-name
+          value: $(params.huggingface-secret-name)
+        - name: registry-auth-secret-name
+          value: $(params.registry-auth-secret-name)
+        - name: registry-url
+          value: $(params.registry-url)
+      when:
+        - input: $(params.model-source-type)
+          operator: in
+          values: ["huggingface"]
+      taskRef:
+        kind: Task
+        name: build-modelcar
+
     - name: compliance-artifact-scan
+      runAfter:
+        - build-modelcar
       params:
         - name: model-id
           value: $(params.model-id)

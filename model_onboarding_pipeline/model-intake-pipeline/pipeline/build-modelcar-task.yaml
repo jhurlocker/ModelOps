@@ -1,0 +1,191 @@
+# FILE: build-modelcar-task.yaml
+# Phase B (model-intake vertical slice): build a ModelCar OCI image from a
+# Hugging Face model and push it to the in-cluster Zot registry, so the rest
+# of the pipeline consumes a self-hosted artifact instead of a prebuilt
+# catalog tag from quay.io.
+#
+# Two-stage build (per Red Hat's "Build and deploy a ModelCar container"
+# article, developers.redhat.com): stage 1 downloads the model from Hugging
+# Face into /models using huggingface_hub; stage 2 copies /models into a
+# minimal ubi-micro image. ModelCar contract: model files must live in
+# /models of the final image and nothing else is required.
+#
+# Security:
+#   - The Hugging Face token (gated models only) is injected into the build
+#     via `buildah --secret id=HF_TOKEN,env=HF_TOKEN`, which exposes the
+#     step's HF_TOKEN env var to the build's RUN steps WITHOUT persisting it
+#     in an image layer. HF_TOKEN itself is sourced via secretKeyRef
+#     (optional: true) from the huggingface-secret-name Secret.
+#   - Zot push credentials (username/password) are sourced via secretKeyRef
+#     from the registry-auth-secret-name Secret, then passed to
+#     `buildah login` from environment variables. The plaintext credential
+#     is the SAME zotadmin identity whose bcrypt hash sits in Zot's
+#     htpasswd file -- see gitops/components/runtime-config/secrets.yaml for
+#     the rotation-coupling caveat (rotate both together or push auth
+#     breaks silently).
+#   - The push target is Zot's internal Service DNS (plain HTTP on :5000),
+#     per the gitops/README.md rule that in-cluster consumers use internal
+#     DNS, never the external Route.
+#
+# Builder execution: buildah runs rootless with the vfs storage driver,
+# which avoids needing overlayfs or privileged access on OpenShift. The
+# Zot push and login use --tls-verify=false because the in-cluster Service
+# is plain HTTP (TLS is terminated at the Route edge, not the Service).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-modelcar
+spec:
+  description: |
+    Builds a ModelCar OCI image from a Hugging Face model and pushes it to
+    the in-cluster Zot registry. Emits the resulting full image reference
+    as the "image-ref" result, consumed by downstream tasks (and Phase C).
+
+    image-ref value shape: <registry-url>/<model-name>:<model-version>,
+    e.g. zot.modelops-zot.svc.cluster.local:5000/granite-2b:v1 -- the
+    in-cluster Service DNS (pullable by any in-cluster consumer), NOT the
+    external zot-ui Route.
+  params:
+    - name: model-id
+      type: string
+      description: "Hugging Face model ID (org/name) to download."
+    - name: model-name
+      type: string
+      description: "OCI repository name in Zot (must be lower-case, DNS-label-safe)."
+    - name: model-version
+      type: string
+      default: "v1"
+      description: "OCI image tag in Zot."
+    - name: huggingface-secret-name
+      type: string
+      default: "huggingface-credentials"
+      description: >-
+        Name of a Secret (in this Task's namespace) with a "token" key --
+        consumed via secretKeyRef (optional: true). Never a token value.
+    - name: registry-auth-secret-name
+      type: string
+      default: "zot-push-credentials"
+      description: >-
+        Name of a Secret (in this Task's namespace) with username/password
+        keys for Zot push auth -- consumed via secretKeyRef. Never a
+        credential value.
+    - name: registry-url
+      type: string
+      default: "zot.modelops-zot.svc.cluster.local:5000"
+      description: "Zot registry host:port (internal Service DNS; plain HTTP, no TLS)."
+    - name: buildah-image
+      type: string
+      default: "quay.io/buildah/stable:v1.43.2"
+      description: "Pinned buildah image used for the build and push."
+  results:
+    - name: image-ref
+      description: "Full OCI reference of the pushed ModelCar image: <registry-url>/<model-name>:<model-version>."
+  steps:
+    - name: build-and-push
+      image: $(params.buildah-image)
+      env:
+        - name: MODEL_ID
+          value: $(params.model-id)
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_VERSION
+          value: $(params.model-version)
+        - name: REGISTRY_URL
+          value: $(params.registry-url)
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.huggingface-secret-name)
+              key: token
+              optional: true
+        - name: REGISTRY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.registry-auth-secret-name)
+              key: username
+        - name: REGISTRY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.registry-auth-secret-name)
+              key: password
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Normalise the registry host:port (strip any scheme) and derive the
+        # full destination reference. MODEL_NAME must already be lower-case.
+        REGISTRY_HOST="$(printf '%s' "${REGISTRY_URL}" | sed -E 's#^(https?|docker|oci)://##')"
+        REF="${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
+
+        echo "=== build-modelcar: ${MODEL_ID} -> ${REF} ==="
+
+        # Rootless buildah with the vfs storage driver. Keep all state under
+        # a scratch dir so we never depend on a writable $HOME or a specific
+        # storage.conf in the pinned builder image.
+        export HOME=/tmp
+        WORK="$(mktemp -d)"
+        STORAGE_ROOT="${WORK}/storage"
+
+        # --- Two-stage ModelCar Containerfile (see file header) ---
+        cat > "${WORK}/Containerfile" <<'EOF'
+        FROM registry.access.redhat.com/ubi9/python-311:latest AS base
+        USER root
+        RUN pip install --no-cache-dir "huggingface_hub"
+        COPY download_model.py /download_model.py
+        ARG MODEL_ID
+        ENV MODEL_ID="${MODEL_ID}"
+        RUN python /download_model.py
+
+        FROM registry.access.redhat.com/ubi9/ubi-micro:9.4
+        COPY --from=base /models /models
+        USER 1001
+        EOF
+
+        # --- Hugging Face download script (runs in stage 1) ---
+        cat > "${WORK}/download_model.py" <<'EOF'
+        import os
+        import sys
+
+        from huggingface_hub import snapshot_download
+
+        model_id = os.environ.get("MODEL_ID", "").strip()
+        token = os.environ.get("HF_TOKEN", "").strip() or None
+
+        if not model_id:
+            print("FATAL: MODEL_ID is empty", file=sys.stderr)
+            sys.exit(1)
+
+        snapshot_download(
+            repo_id=model_id,
+            token=token,
+            local_dir="/models",
+            allow_patterns=["*.safetensors", "*.bin", "*.json", "*.txt", "*.md", "*.model", "*.py"],
+        )
+        print("Downloaded model files to /models")
+        EOF
+
+        # Authenticate to Zot (HTTP; no TLS on the in-cluster Service).
+        buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
+          login --tls-verify=false \
+          --username "${REGISTRY_USER}" --password "${REGISTRY_PASSWORD}" \
+          "${REGISTRY_HOST}"
+
+        # Build. HF_TOKEN is injected into the build via --secret (env mode),
+        # so it reaches the download step but is never persisted in a layer.
+        pushd "${WORK}" >/dev/null
+        buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
+          bud --format oci \
+          --build-arg MODEL_ID="${MODEL_ID}" \
+          --secret id=HF_TOKEN,env=HF_TOKEN \
+          -t "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" \
+          -f Containerfile .
+        popd >/dev/null
+
+        # Push to Zot.
+        buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
+          push --tls-verify=false \
+          "docker://${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
+
+        # Emit the full reference for downstream tasks / Phase C.
+        printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
+        echo "Built and pushed: ${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"

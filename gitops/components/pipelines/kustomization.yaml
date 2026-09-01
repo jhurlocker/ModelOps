@@ -5,6 +5,7 @@ resources:
   - namespace.yaml
   - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/sandbox-pipeline.yaml
   - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/promotion-pipeline.yaml
+  - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/build-modelcar-task.yaml
   - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-model-task.yaml
   - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/deploy-maas-task.yaml
   - ../../../model_onboarding_pipeline/model-intake-pipeline/pipeline/security-scan-task.yaml
