@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zot
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: modelops
+spec:
+  project: modelops
+  source:
+    repoURL: https://github.com/jhurlocker/ModelOps.git
+    targetRevision: feat/model-request-controller
+    path: gitops/components/zot
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 20
+      backoff:
+        duration: "10s"
+        factor: 2
+        maxDuration: "5m"

@@ -23,7 +23,8 @@ gitops/
 │   ├── pipelines.yaml
 │   ├── rbac.yaml
 │   ├── results-ui.yaml
-│   └── runtime-config.yaml
+│   ├── runtime-config.yaml
+│   └── zot.yaml
 ├── components/                # Kustomize-based resource definitions
 │   ├── evalhub/               # EvalHub (TrustyAI) evaluation
 │   ├── maas-kuadrant/         # Kuadrant CR (auth + rate-limiting infrastructure)
@@ -39,7 +40,8 @@ gitops/
 │   ├── pipelines/             # Tekton tasks and pipelines
 │   ├── rbac/                  # Cluster roles and bindings
 │   ├── results-ui/            # Results UI for scan/benchmark results
-│   └── runtime-config/        # PlatformConfig, LifecycleProfile, IntakeProviderConfig, sandbox secrets
+│   ├── runtime-config/        # PlatformConfig, LifecycleProfile, IntakeProviderConfig, sandbox secrets
+│   └── zot/                   # Zot OCI container image registry (in-cluster, built-in UI)
 └── README.md
 ```
 
@@ -119,7 +121,7 @@ oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
 #### Step 1c: Increase ArgoCD controller memory (recommended)
 
 The default 2Gi memory limit can cause OOMKills during a cold bootstrap of
-all 13 Applications with retry policies enabled:
+all 16 Applications with retry policies enabled:
 
 ```bash
 oc patch argocd openshift-gitops -n openshift-gitops --type merge -p '
@@ -136,22 +138,23 @@ oc apply -f gitops/appproject.yaml
 oc apply -f gitops/root-app.yaml
 ```
 
-ArgoCD will automatically sync all 15 child applications:
+ArgoCD will automatically sync all 16 child applications:
 1. MaaS Prereqs — cert-manager + RHCL + LeaderWorkerSet operator subscriptions
 2. MaaS Kuadrant — Kuadrant CR (triggers Authorino + Limitador creation) + Authorino CR (TLS listener enabled)
 3. EvalHub — TrustyAI evaluation platform
 4. MaaS — enables KServe Models-as-a-Service in DataScienceCluster
 5. MaaS Subscriptions — KServe MaaS subscription tiers (free and premium) for serving runtimes
 6. MinIO — S3-compatible in-cluster object storage for MLflow and EvalHub
-7. MLflow — experiment tracking via MlflowOperator
-8. Model Inference — example inference route (Granite 2B) deployed to staging
-9. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
-10. Model Registry — MySQL-backed Model Registry instance for registered model metadata
-11. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
-12. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
-13. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
-14. Results UI — frontend UI for viewing scan and benchmark results
-15. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
+7. Zot — OCI container image registry (in-cluster, built-in UI)
+8. MLflow — experiment tracking via MlflowOperator
+9. Model Inference — example inference route (Granite 2B) deployed to staging
+10. Model Intake UI — frontend UI for submitting and tracking model onboarding requests
+11. Model Registry — MySQL-backed Model Registry instance for registered model metadata
+12. Operator — ModelOps controller, CRDs, RBAC, and ServiceAccount
+13. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
+14. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
+15. Results UI — frontend UI for viewing scan and benchmark results
+16. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
 
 ### Application dependency chain and sync ordering
 
@@ -171,7 +174,7 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 | 3 | modelops-pipelines | Creates `sandbox`, `staging`, `vllm`, `vllm-staging` namespaces |
 | 4 | modelops-runtime-config, results-ui, model-inference, modelops-rbac | Deploy into namespaces created by wave 3 |
 
-All other Applications (evalhub, minio, mlflow, model-intake-ui, model-registry,
+All other Applications (evalhub, minio, zot, mlflow, model-intake-ui, model-registry,
 modelops-operator) have no sync-wave and run in the default wave (0), starting
 alongside maas-kuadrant.
 
@@ -181,6 +184,20 @@ All Applications with sync-waves also carry a retry policy
 (limit: 20, exponential backoff 10s → 5m max) so transient failures
 (failure reasons outside this repo's control, such as async operator reconciliation
 or namespace propagation) are handled automatically instead of failing fast.
+
+#### Zot registry access
+
+Zot is an OCI container image registry deployed in the `modelops-zot` namespace
+(PVC-backed storage, Deployment, Service, Route — same shape as MinIO). Its
+built-in UI is enabled via `extensions.ui.enable: true` in the ConfigMap and
+exposed through the `zot-ui` Route for browser access. Zot serves the UI and the
+registry API on the same port, so the API is reachable behind that Route; however,
+in-cluster consumers (Tekton pipeline tasks, future controllers) MUST push/pull
+through the internal Service DNS — `zot.modelops-zot.svc.cluster.local:5000` —
+not an external Route. This mirrors the MinIO rule: nothing outside the cluster
+needs to push to Zot, so no dedicated external registry Route is created. The
+`zot` Application carries the same generous retry policy as `maas-subscriptions`
+since it is operator-adjacent infrastructure.
 
 #### maas-prereqs dependency chain (wave -1)
 
@@ -340,7 +357,7 @@ done
 
 #### ArgoCD controller memory
 
-During a cold bootstrap of all 15 Applications with retry policies, the
+During a cold bootstrap of all 16 Applications with retry policies, the
 ArgoCD application controller may exhaust its default 2Gi memory limit
 and be OOMKilled (exit 137). Increase the memory limit before deploying:
 

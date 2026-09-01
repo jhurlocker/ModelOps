@@ -1,0 +1,17 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: zot-ui
+  namespace: modelops-zot
+spec:
+  # Zot serves the built-in UI and the registry API on the same port (5000).
+  # This Route is for browser access to the UI. The registry API for in-cluster
+  # push/pull is NOT consumed through this Route — pipelines use the internal
+  # Service DNS (zot.modelops-zot.svc.cluster.local:5000).
+  port:
+    targetPort: http
+  to:
+    kind: Service
+    name: zot
+  tls:
+    termination: edge
