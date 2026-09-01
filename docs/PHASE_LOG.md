@@ -5069,25 +5069,50 @@ after copy). Idempotent on a second run.
 import no sibling stage package; `stagewalk`/`stagecommon` still depend only
 on `api/v1alpha1` + stdlib + controller-runtime/apimachinery.
 
-### Cluster verification (NOT yet run -- blocked on commit/push)
+### Cluster verification (partial)
 
-The ArgoCD `Application`s that deploy the operator and pipelines are
-branch-tracked (`feat/model-request-controller`) with auto-sync + self-heal, so
-a clean on-cluster verification requires committing and pushing this change --
-not authorized this session (per "never commit unless asked"). The
-verification plan, to run once committed/pushed, is deliberately captured here
-rather than performed against a hand-patched, self-heal-reverted cluster:
+Committed and pushed (`0a75f1a`); `Application/modelops-operator` and
+`Application/modelops-pipelines` hard-refreshed and confirmed `Synced`/
+`Healthy` at `0a75f1a`. Verified live:
 
-1. Rebuild + push `quay.io/jhurlocker/modelops-operator:latest`, rollout, and
-   confirm the `results` field is `Established` on the live `modelrequests` CRD.
-2. A real HuggingFace-sourced `ModelRequest`: confirm the sandbox pipeline's
-   own `compliance-artifact-scan` and `deploy-model` tasks consume the
-   Zot-built image (TaskRun logs / `modelcar-image` resolution), not the
-   quay.io catalog default.
-3. Confirm the promotion `PipelineRun`'s `modelcar-image` param equals the same
-   `zot.modelops-zot.svc.cluster.local:5000/<name>:<version>` reference.
-4. Confirm an oci/s3 `ModelRequest` still produces byte-identical promotion
-   params (no `modelcar-image`).
+1. **`results` field is `Established`** on the live `modelrequests` CRD (the
+   `stages[].results` array with name/value properties is present on-cluster).
+2. **Sandbox pipeline YAML wiring is live**: the synced `Pipeline`
+   `model-intake-sandbox` binds `modelcar-image` to
+   `$(tasks.build-modelcar.results.image-ref)` in BOTH `compliance-artifact-scan`
+   and `deploy-model` (confirmed in the live object at lines ~240 and ~337).
+
+NOT verified live (blocked, see below): the promotion `PipelineRun`'s
+`modelcar-image` param and the real HuggingFace end-to-end, because deploying
+the rebuilt operator image to this cluster was blocked -- there are no quay.io
+push credentials this session, and the internal image registry
+(`image-registry.openshift-image-registry.svc:5000`, S3-backed) rejected the
+kubelet pull of the operator image with `500`/`unauthorized` (a
+cluster-environment auth issue, not a code issue) despite a clean `podman`-side
+push/pull via the exposed default route. The cluster was reverted to its prior
+state (deployment image restored to `quay.io/...:latest`, ArgoCD auto-sync
+re-enabled, registry `defaultRoute` reverted). The promotion `modelcar-image`
+behavior is nonetheless covered end-to-end by
+`TestModelRequest_ImageRefResult_SetsPromotionModelcarImage_AndPersists` against
+a real `envtest` apiserver.
+
+### TLS investigation (input to the Zot TLS decision, not yet applied)
+
+Empirically confirmed on this cluster (all throwaway, cleaned up afterward):
+
+- `service.beta.openshift.io/serving-cert-secret-name` on a scratch `Service`
+  auto-generated a `kubernetes.io/tls` Secret with a cert issued by
+  `openshift-service-serving-signer` (SAN `probe.default.svc`).
+- The serviceaccount CA bundle present in every pod
+  (`/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt` -- confirmed
+  to EXIST on this cluster, contradicting Phase 9's earlier cluster-specific
+  "never populated" observation) verifies that serving cert
+  (`openssl verify -CAfile ... : OK`).
+- The service CA is NOT in the default trust store of the tools
+  (`buildah`/`skopeo`/`curl`/Python), so it must be explicitly mounted/pointed
+  to -- the exact class of problem the EvalHub CA fix solved at the Task level.
+  This is the evidence base for the pending Zot-TLS design decision (real TLS
+  vs. insecure-registry sprawl); see the follow-up review.
 
 ### Known follow-up NOT done in this phase
 
