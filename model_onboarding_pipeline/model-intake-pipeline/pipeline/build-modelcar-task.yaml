@@ -23,14 +23,14 @@
 #     htpasswd file -- see gitops/components/runtime-config/secrets.yaml for
 #     the rotation-coupling caveat (rotate both together or push auth
 #     breaks silently).
-#   - The push target is Zot's internal Service DNS (plain HTTP on :5000),
+#   - The push target is Zot's internal Service DNS (now HTTPS on :5000),
 #     per the gitops/README.md rule that in-cluster consumers use internal
-#     DNS, never the external Route.
+#     DNS, never the external Route. Zot serves TLS with an OpenShift
+#     service-serving cert; the step installs the service CA into the trust
+#     store and pushes with full TLS verification.
 #
 # Builder execution: buildah runs rootless with the vfs storage driver,
-# which avoids needing overlayfs or privileged access on OpenShift. The
-# Zot push and login use --tls-verify=false because the in-cluster Service
-# is plain HTTP (TLS is terminated at the Route edge, not the Service).
+# which avoids needing overlayfs or privileged access on OpenShift.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -72,7 +72,7 @@ spec:
     - name: registry-url
       type: string
       default: "zot.modelops-zot.svc.cluster.local:5000"
-      description: "Zot registry host:port (internal Service DNS; plain HTTP, no TLS)."
+      description: "Zot registry host:port (internal Service DNS; HTTPS, verified against the installed service CA)."
     - name: buildah-image
       type: string
       default: "quay.io/buildah/stable:v1.43.2"
@@ -92,6 +92,12 @@ spec:
         capabilities:
           add:
             - SETFCAP
+      volumeMounts:
+        # Defensive fallback trust source (see the service-CA install in the
+        # script, which prefers the pod's own serviceaccount service-ca.crt).
+        - name: zot-service-ca
+          mountPath: /etc/zot-ca
+          readOnly: true
       env:
         - name: MODEL_ID
           value: $(params.model-id)
@@ -120,6 +126,23 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+
+        # Trust the OpenShift service-serving CA so buildah verifies Zot's
+        # serving cert (service.beta.openshift.io/serving-cert-secret-name)
+        # over HTTPS, instead of disabling TLS verification.
+        # Primary source: the CA bundle the Service CA operator injects into
+        # every pod's serviceaccount dir. Fallback: the zot-service-ca
+        # inject-cabundle ConfigMap (the EvalHub CA-fix pattern) mounted at
+        # /etc/zot-ca, for clusters where that path isn't populated.
+        if [ -f /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt ]; then
+          cp /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt /etc/pki/ca-trust/source/anchors/zot-service-ca.crt
+        elif [ -f /etc/zot-ca/service-ca.crt ]; then
+          cp /etc/zot-ca/service-ca.crt /etc/pki/ca-trust/source/anchors/zot-service-ca.crt
+        else
+          echo "FATAL: no OpenShift service-serving CA bundle available" >&2
+          exit 1
+        fi
+        update-ca-trust
 
         # Normalise the registry host:port (strip any scheme) and derive the
         # full destination reference. MODEL_NAME must already be lower-case.
@@ -173,9 +196,10 @@ spec:
         print("Downloaded model files to /models")
         EOF
 
-        # Authenticate to Zot (HTTP; no TLS on the in-cluster Service).
+        # Authenticate to Zot over HTTPS (verified against the mounted
+        # service CA above).
         buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
-          login --tls-verify=false \
+          login \
           --username "${REGISTRY_USER}" --password "${REGISTRY_PASSWORD}" \
           "${REGISTRY_HOST}"
 
@@ -190,14 +214,22 @@ spec:
           -f Containerfile .
         popd >/dev/null
 
-        # Push to Zot. The SOURCE is the locally-built, already-tagged image
-        # (no transport prefix); the DESTINATION carries the docker:// transport
-        # and is HTTP (--tls-verify=false).
+        # Push to Zot over HTTPS. The SOURCE is the locally-built, already-tagged
+        # image (no transport prefix); the DESTINATION carries the docker://
+        # transport. Verified against the mounted service CA above.
         buildah --root "${STORAGE_ROOT}" --storage-driver vfs \
-          push --tls-verify=false \
+          push \
           "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" \
           "docker://${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
 
         # Emit the full reference for downstream tasks / Phase C.
         printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
         echo "Built and pushed: ${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
+  volumes:
+    # Mounted into the build-and-push step as the fallback service-CA source.
+    # optional: the primary source is the pod's own serviceaccount CA bundle,
+    # so this ConfigMap being absent must not block the Task from running.
+    - name: zot-service-ca
+      configMap:
+        name: zot-service-ca
+        optional: true

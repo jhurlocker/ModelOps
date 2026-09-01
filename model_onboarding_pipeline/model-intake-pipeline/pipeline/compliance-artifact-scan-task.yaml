@@ -107,6 +107,14 @@ spec:
       description: "true if BOTH compliance and artifact scans passed."
     - name: summary
       description: "One-line human-readable verdict."
+  volumes:
+    # Mounted into the compliance-inspect step as the fallback service-CA
+    # source (primary: the pod's own serviceaccount CA bundle). See the CA
+    # install in that step's script and docs/PHASE_LOG.md (Zot TLS phase).
+    - name: zot-service-ca
+      configMap:
+        name: zot-service-ca
+        optional: true
   workspaces:
     - name: shared-workspace
       description: Shared workspace / sandbox for scan artifacts.
@@ -127,9 +135,29 @@ spec:
           value: $(params.modelcar-repo)
         - name: MODELCAR_IMAGE
           value: $(params.modelcar-image)
+      volumeMounts:
+        # Defensive fallback trust source (see the service-CA install in the
+        # script below, which prefers the pod's own serviceaccount service-ca.crt).
+        - name: zot-service-ca
+          mountPath: /etc/zot-ca
+          readOnly: true
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+
+        # Trust the OpenShift service-serving CA so skopeo verifies Zot's
+        # serving cert over HTTPS. Primary: the pod's own serviceaccount CA
+        # bundle; fallback: the zot-service-ca inject-cabundle ConfigMap.
+        if [ -f /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt ]; then
+          cp /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt /etc/pki/ca-trust/source/anchors/zot-service-ca.crt
+        elif [ -f /etc/zot-ca/service-ca.crt ]; then
+          cp /etc/zot-ca/service-ca.crt /etc/pki/ca-trust/source/anchors/zot-service-ca.crt
+        else
+          echo "FATAL: no OpenShift service-serving CA bundle available" >&2
+          exit 1
+        fi
+        update-ca-trust
+
         SANDBOX="$(pwd)/compliance-artifact-sandbox"
         mkdir -p "$SANDBOX"
         chmod 777 "$(pwd)" 2>/dev/null || true
