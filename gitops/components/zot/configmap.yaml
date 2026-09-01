@@ -8,6 +8,8 @@ data:
   # Config reference: https://zotregistry.dev/v2.1.20/admin-guide/admin-configuration/
   # The UI is Zot's built-in web interface, enabled via the `ui` extension
   # under `extensions` (a full-featured image is required; minimal builds ignore it).
+  # Zot requires the `search` extension to be enabled alongside `ui`; otherwise
+  # it refuses to start ("search extension must be enabled").
   config.json: |
     {
       "distSpecVersion": "1.0.1",
@@ -23,6 +25,9 @@ data:
         "level": "info"
       },
       "extensions": {
+        "search": {
+          "enable": true
+        },
         "ui": {
           "enable": true
         }
