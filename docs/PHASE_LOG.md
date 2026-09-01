@@ -4934,3 +4934,174 @@ string. Phase C consumes this without re-deriving it.
   and zero production Go. Confirmed via `go list -deps` that no
   `internal/stages/*` package imports another; `go build ./...` and
   `go vet ./...` are clean.
+
+---
+
+## Phase C (model-intake vertical slice) — Operator consumes the Zot image-ref result
+
+**Commits:** `d18dc66` ("feat(operator): consume sandbox image-ref result
+into promotion modelcar-image") and `2cf90ab` ("feat(gitops): sandbox
+pipeline consumes build-modelcar image-ref result") on
+`feat/model-request-controller`.
+
+This is the operator-side completion of the model-intake/Zot workstream's
+Phase C (the follow-up item the model-intake Phase B entry explicitly logged:
+"consume image-ref"). It went through a full design review first (see the
+review conversation), with two explicit decisions approved:
+
+1. `Results []StageResult` (slice-of-`{Name,Value}`), not a map.
+2. Persist `Results` to `api/v1alpha1.StageProgress`, following the exact
+   `CheckResults`/`DetailsURL` precedent and `docs/REVIEW_CONVENTIONS.md`'s
+   documented full-path-survival default.
+
+### The load-bearing sequencing fact
+
+The promotion `PipelineRun` is created in the **same `Walk` call that observes
+sandbox `Succeeded`** (capacity Running → sandbox Running → [flip] → sandbox
+Succeeded + promotion Created in one reconcile). `image-ref` is therefore
+available at the moment promotion's params are first built, but only if it
+flows `StageStatus → ... → promotion.Handler.BuildSpec` *within a single Walk*
+-- "persist to Status and read on the next reconcile" alone is insufficient,
+because promotion's `spec.params` are fixed at creation time. This is why the
+walker gained a genuine (small, generic) carry mechanism rather than the
+reconciler re-fetching on a later reconcile.
+
+### Why not the `CapacityPlan` fetcher shape
+
+The `CapacityPlan` precedent (reconciler best-effort-fetches a completed
+upstream object by deterministic name, then threads it into `StageContext`)
+is the right *concept* but only transfers partially: `CapacityPlan` is a core
+`api/v1alpha1` type the reconciler imports and can `Get` directly; the sandbox
+`PipelineRun` is a `tektonv1` type the reconciler (and the pure, I/O-free
+walker) must not import (Phase 4/7 closed that out). The only component that
+already reads `run.Status.Results` is `internal/stages/tekton.StageRunner`
+(for `CheckResultMappings`). So the result is surfaced by the StageRunner on
+its `StageStatus`, then carried generically by the walker -- reusing two
+existing seams rather than inventing a third dataflow.
+
+### What changed
+
+- **`internal/stagecommon/stage.go`**: new `StageResult{Name, Value string}`,
+  `StageStatus.Results []StageResult`, `StageContext.Results []StageResult`
+  (read-only upstream output, the generic analogue of `CapacityPlan`), and the
+  `ResultImageRef = "image-ref"` constant so writer/reader share one token
+  without either importing the other's package.
+- **`internal/stagewalk/walk.go`**: `Progress.Results` added (full-path
+  survival, alongside `CheckResults`/`DetailsURL`); a `carried` accumulator
+  merges each completed stage's `Results` (by name, later wins) and injects
+  them into every downstream `StageContext.Results` before `BuildSpec`.
+  Results flow forward only -- a stage never sees its own or a sibling
+  namespace's results. Zero change to the advance/stop/skip decision table.
+- **`api/v1alpha1/modelrequest_types.go`**: `StageProgress.Results
+  []StageResult` (`json:"results,omitempty"`) and the decoupled `StageResult`
+  type (plain struct, same decoupling as `Phase`/`CheckResult`).
+- **`internal/controller/modelrequest_controller.go`**: `toStageProgressList`
+  maps `stagewalk.Progress.Results` → `api/v1alpha1.StageResult`, and
+  `singleStageProgressEqual` includes `Results` (mirroring `CheckResults`).
+- **`internal/stages/tekton/stagerunner.go`**: new `buildResults` forwards a
+  `PipelineRun`'s string-typed `Status.Results` into `StageStatus.Results`
+  (skips empty/non-string); `mapCondition` attaches them on the `Succeeded`
+  branch. The runner stays generic -- it never knows the string `image-ref`.
+- **`internal/stages/promotion/handler.go`**: after `BuildCommonModelParams`,
+  a single guarded `AddParam` binds `modelcar-image` from
+  `sc.Results[ResultImageRef]` when non-empty; otherwise `modelcar-image`
+  stays omitted exactly as before (so `model-id` remains the sole source).
+
+### Sandbox-YAML companion (immediate follow-on commit, same review cycle)
+
+- **`model_onboarding_pipeline/model-intake-pipeline/pipeline/sandbox-pipeline.yaml`**:
+  `compliance-artifact-scan` and `deploy-model` now bind `modelcar-image` to
+  `$(tasks.build-modelcar.results.image-ref)` instead of `$(params.modelcar-image)`.
+  For oci/s3, `build-modelcar` is skipped (its `when: in ["huggingface"]`
+  guard), so the result reference resolves empty and both tasks fall back to
+  their existing `model-id` → `modelcar-repo` derivation -- byte-identical to
+  today's behavior for that path.
+
+### Backward compatibility
+
+`Results` is `omitempty`; the two new `api/v1alpha1` golden-value tests
+(`TestStageProgress_NoResults_SerializesIdenticallyToPrePhaseC`,
+`TestStageProgress_WithResults_SerializesCorrectly`) pin that an empty/nil
+`results` serializes to no key at all, and that the full
+`Status.Phase`/`Stages[]` structure is otherwise unchanged.
+
+### Test coverage added
+
+- `internal/stages/promotion/handler_test.go` (2): the two required tests --
+  `TestBuildSpec_ImageRefResult_SetsModelcarImage` (image-ref → modelcar-image
+  bound, model-id unchanged) and
+  `TestBuildSpec_NoImageRefResult_ProducesIdenticalParams` (oci/s3 → no
+  modelcar-image key, byte-identical to today).
+- `internal/stages/tekton/stagerunner_test.go` (2): `buildResults` forwards
+  string results and skips empty/nil.
+- `internal/stagewalk/walk_test.go` (2): `TestWalk_CarriesUpstreamResultsIntoDownstreamContext`,
+  `TestWalk_ResultsFlowForwardOnly_NotToSelfOrSiblings`.
+- `internal/controller/results_controller_test.go` (2): full-path tests --
+  `TestModelRequest_ImageRefResult_SetsPromotionModelcarImage_AndPersists`
+  (persists to `Status.Stages[sandbox].Results` AND promotion's recorded
+  `StageSpec.Params["modelcar-image"]` equals the reference) and
+  `TestModelRequest_NoImageRefResult_PromotionParamsUnchanged` (oci path →
+  no modelcar-image in promotion params, sandbox persists no results).
+- `internal/stages/tekton/pipeline_yaml_build_test.go` (1):
+  `TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy` pins exactly
+  two `$(tasks.build-modelcar.results.image-ref)` consumers and that the old
+  `value: $(params.modelcar-image)` forwarding is gone from sandbox-pipeline.yaml.
+- `api/v1alpha1/modellifecycleprofile_types_test.go` (2): wire-format
+  round-trip for the new `results` field.
+- **Total suite: 244 passing test cases, 0 failing** (up from 233 before this
+  phase's 11 new tests).
+
+### Manifest regeneration
+
+`make generate manifests` (controller-gen v0.16.5): `zz_generated.deepcopy.go`
+gained `DeepCopyInto`/`DeepCopy` for `StageResult` and `StageProgress`
+deep-copies the new `Results` slice. The `modelrequests` CRD gained the
+additive `stages[].results` array (name/value, both required); no other CRD and
+no RBAC changed (the tekton runner already holds `pipelineruns get`; the
+promotion handler consumes no new API). `gitops/components/operator/crd-modelrequests.yaml`
+re-synced verbatim from the regenerated base (diff confirmed byte-identical
+after copy). Idempotent on a second run.
+
+### Cross-stage import check
+
+`go list -deps` confirmed all six `internal/stages/*` packages
+(`sandbox`, `promotion`, `capacityplanning`, `tekton`, `noop`, `webhook`)
+import no sibling stage package; `stagewalk`/`stagecommon` still depend only
+on `api/v1alpha1` + stdlib + controller-runtime/apimachinery.
+
+### Cluster verification (NOT yet run -- blocked on commit/push)
+
+The ArgoCD `Application`s that deploy the operator and pipelines are
+branch-tracked (`feat/model-request-controller`) with auto-sync + self-heal, so
+a clean on-cluster verification requires committing and pushing this change --
+not authorized this session (per "never commit unless asked"). The
+verification plan, to run once committed/pushed, is deliberately captured here
+rather than performed against a hand-patched, self-heal-reverted cluster:
+
+1. Rebuild + push `quay.io/jhurlocker/modelops-operator:latest`, rollout, and
+   confirm the `results` field is `Established` on the live `modelrequests` CRD.
+2. A real HuggingFace-sourced `ModelRequest`: confirm the sandbox pipeline's
+   own `compliance-artifact-scan` and `deploy-model` tasks consume the
+   Zot-built image (TaskRun logs / `modelcar-image` resolution), not the
+   quay.io catalog default.
+3. Confirm the promotion `PipelineRun`'s `modelcar-image` param equals the same
+   `zot.modelops-zot.svc.cluster.local:5000/<name>:<version>` reference.
+4. Confirm an oci/s3 `ModelRequest` still produces byte-identical promotion
+   params (no `modelcar-image`).
+
+### Known follow-up NOT done in this phase
+
+- **`compliance-artifact-scan`'s `skopeo inspect` TLS flag**: the Zot internal
+  Service is plain HTTP (`build-modelcar` already pushes/login with
+  `--tls-verify=false`), but `compliance-artifact-scan`'s `compliance-inspect`
+  step runs `skopeo inspect "docker://$CANDIDATE"` with no `--tls-verify=false`,
+  and so will likely fail a TLS handshake when it first tries to inspect the
+  internal Zot reference. This is predicted to surface in the cluster
+  verification above; the fix (add `--tls-verify=false` to that step, scoped to
+  the Zot path rather than weakening the quay HTTPS path, or add an insecure
+  `registries.conf`) and the `deploy-model` container's pull-from-HTTP-Zot
+  behavior are not resolved this session and are a required part of the
+  verification pass. Flagged here rather than silently papered over.
+- No `oci`/`s3` build path exists (unchanged from model-intake Phase B): those
+  source types skip the build and keep the catalog-derivation fallback, which
+  is exactly the negative-control behavior this phase pins.
