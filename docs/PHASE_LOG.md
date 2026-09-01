@@ -5096,7 +5096,12 @@ behavior is nonetheless covered end-to-end by
 `TestModelRequest_ImageRefResult_SetsPromotionModelcarImage_AndPersists` against
 a real `envtest` apiserver.
 
-### TLS investigation (input to the Zot TLS decision, not yet applied)
+### TLS investigation (input to the Zot TLS decision)
+
+**Update:** this decision has since been implemented — see the "Zot TLS" phase
+entry at the end of this log. At the time of writing this entry it was an
+investigation only; the investigation below is retained as the evidence base
+that informed it.
 
 Empirically confirmed on this cluster (all throwaway, cleaned up afterward):
 
@@ -5116,17 +5121,128 @@ Empirically confirmed on this cluster (all throwaway, cleaned up afterward):
 
 ### Known follow-up NOT done in this phase
 
-- **`compliance-artifact-scan`'s `skopeo inspect` TLS flag**: the Zot internal
-  Service is plain HTTP (`build-modelcar` already pushes/login with
-  `--tls-verify=false`), but `compliance-artifact-scan`'s `compliance-inspect`
-  step runs `skopeo inspect "docker://$CANDIDATE"` with no `--tls-verify=false`,
-  and so will likely fail a TLS handshake when it first tries to inspect the
-  internal Zot reference. This is predicted to surface in the cluster
-  verification above; the fix (add `--tls-verify=false` to that step, scoped to
-  the Zot path rather than weakening the quay HTTPS path, or add an insecure
-  `registries.conf`) and the `deploy-model` container's pull-from-HTTP-Zot
-  behavior are not resolved this session and are a required part of the
-  verification pass. Flagged here rather than silently papered over.
+- **`compliance-artifact-scan`'s skopeo inspect + `deploy-model`'s image pull**
+  (RESOLVED at the Task level, then re-scoped): the Zot TLS phase (next entry)
+  moved Zot onto a service-serving cert and wired the service CA into both
+  tasks' trust stores, removing `--tls-verify=false` entirely, so the skopeo
+  inspect now verifies over HTTPS. **What remains blocked is the `deploy-model`
+  pull at the kubelet/node level** — the serving pods pull the modelcar through
+  kubelet, which does not trust the service CA; that needs
+  `image.config.openshift.io/cluster` → `spec.additionalTrustedCA` (cluster-wide,
+  node-rollout/restart implications), tracked as `docs/REFACTOR_PLAN.md` backlog
+  item 16. **Full end-to-end (a real HuggingFace `ModelRequest` completing
+  through a successful `deploy-model`) is therefore not yet achievable and is a
+  known, tracked limitation, not "done".**
 - No `oci`/`s3` build path exists (unchanged from model-intake Phase B): those
   source types skip the build and keep the catalog-derivation fallback, which
   is exactly the negative-control behavior this phase pins.
+
+---
+
+## Zot TLS — serve the registry over a trusted, verified HTTPS connection
+
+**Commits:** `086bc17` ("feat(gitops): serve Zot over trusted TLS with a
+service-serving cert") and `1914ebc` ("feat(gitops): trust Zot's serving cert
+in build-modelcar + compliance") on `feat/model-request-controller`.
+
+This is the `additionalTrustedCA`-deferred, Task-level half of making Zot a
+first-class internal registry: move the build-modelcar push and the
+compliance-artifact-scan inspect OFF insecure `--tls-verify=false` and onto
+verified HTTPS against a real OpenShift-signed certificate. It went through a
+design review first (see the review conversation) with the explicit decision to
+NOT implement the node-level (kubelet) trust this phase — that is `docs/
+REFACTOR_PLAN.md` backlog item 16, its own dedicated phase.
+
+### Is the pod `service-ca.crt` versioned, or cluster-specific?
+
+Determined before writing the fix. The OpenShift Service CA operator (`service-ca`,
+a ClusterOperator) has run three controllers since OCP 4.x: the serving-cert
+signer (`service.beta.openshift.io/serving-cert-secret-name`), the ConfigMap CA
+bundle injector (`service.beta.openshift.io/inject-cabundle`), and the generic
+CA bundle injector — documented since OCP 4.1, with automated CA rotation since
+4.3.5. The CA bundle the operator injects into every pod's serviceaccount dir
+(`/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt`) is part of the
+same mechanism. So the feature is **versioned (standard 4.x)**, but it is NOT
+safe to assume the pod-level path is universally populated — `docs/PHASE_LOG.md`'s
+Phase 9 (EvalHub CA fix) already hit one cluster where that exact path was
+"never populated by anything". This cluster has it (verified by exec), but the
+fix does not rely on it alone.
+
+### What changed
+
+- **Zot (`gitops/components/zot/`)**: the Service requests a serving cert
+  (`serving-cert-secret-name: zot-serving-cert`); the config enables `http.tls`
+  from the mounted cert/key; the deployment mounts the `zot-serving-cert`
+  Secret and switches liveness/readiness probes to `tcpSocket` (TLS-agnostic,
+  so kubelet never has to verify the service-CA-signed cert); the Route moves
+  `edge` → `passthrough` (Zot now terminates TLS itself).
+- **Trust bootstrap (`gitops/components/runtime-config/zot-service-ca.yaml`)**: a
+  dedicated `service.beta.openshift.io/inject-cabundle: "true"` ConfigMap (the
+  EvalHub pattern) as the **fallback** trust source, mounted at `/etc/zot-ca`.
+  The runtime-config ArgoCD `Application` gained an `ignoreDifferences` on that
+  ConfigMap's `.data` so self-heal does not strip the operator-injected
+  `service-ca.crt` (the classic inject-cabundle × ArgoCD fight).
+- **Task trust wiring (`build-modelcar-task.yaml`, `compliance-artifact-scan-task.yaml`)**:
+  each relevant step installs the service CA into `/etc/pki/ca-trust/source/
+  anchors` + `update-ca-trust`, **preferring the pod's own serviceaccount
+  `service-ca.crt`** and falling back to the mounted `/etc/zot-ca/service-ca.crt`.
+  Both images run as root with `update-ca-trust` present (verified by
+  `podman run` inspection before wiring). `--tls-verify=false` is removed from
+  build-modelcar's `login` and `push` **entirely**; there are now zero
+  insecure-registry exceptions in the build path.
+
+### Test coverage added
+
+`operator/internal/stages/tekton/pipeline_yaml_tls_test.go` (6 static tests,
+reading the committed YAML): build-modelcar has zero `--tls-verify=false`
+occurrences; build-modelcar and compliance-artifact-scan both install the
+service CA (primary SA path + `/etc/zot-ca` fallback); the Zot Service requests a
+serving cert; the Zot config serves TLS; the Zot deployment mounts the cert and
+uses `tcpSocket` probes (not `httpGet`). Full `go build`/`go vet`/`go test ./...`
+clean (244 prior + these; see run below).
+
+### Sandbox cluster verification
+
+- ArgoCD `zot`/`modelops-runtime-config`/`modelops-pipelines` refreshed to
+  `1914ebc`; all `Synced`/`Healthy`. The live Zot `Service` carries
+  `serving-cert-signed-by: openshift-service-serving-signer@...`, the
+  `zot-serving-cert` Secret exists (`kubernetes.io/tls`), and the cert's SANs are
+  `zot.modelops-zot.svc` + `zot.modelops-zot.svc.cluster.local` — exactly the
+  internal name the pipeline uses. The Zot pod restarted cleanly onto TLS with
+  the `tcpSocket` probes (`1/1 Running`, 0 restarts).
+- **build-modelcar push with zero insecure flags — CONFIRMED.** A real
+  `ModelRequest` (`zottls-verify`, `HuggingFaceTB/SmolLM2-135M-Instruct`) ran
+  `build-modelcar` to `Succeeded`; the step logs show
+  `COMMIT zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct-zottls:v1`
+  and `Built and pushed: ...` with no `--tls-verify=false` — the login/push
+  verified Zot's serving cert over HTTPS.
+- **compliance-artifact-scan skopeo inspect against the trusted cert — CONFIRMED.**
+  `compliance-inspect` logged `Resolved modelcar artifact:
+  zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct-zottls:v1` and
+  returned the real OCI digest (not the "could not inspect" failure path),
+  i.e. `skopeo inspect docker://zot...:5000/...` succeeded with full TLS
+  verification.
+- **Pipeline reached as far as it currently can.** After build-modelcar and
+  compliance both `Succeeded`, the pipeline advanced through `gpu-advisor` and
+  `apply-gpu-sharing` to `deploy-model`. There it stalled: the created
+  `InferenceService` predictor pod is `Pending`. Note, honestly: the immediate
+  stall cause in this run was **GPU scheduling** (`0/1 nodes available: 1
+  Insufficient nvidia.com/gpu`), a pre-existing cluster constraint, so the
+  **kubelet-level Zot TLS-trust failure was not reached/observed this run** — it
+  is the next expected blocker once a GPU is available, and is precisely the
+  deferred `additionalTrustedCA` work (backlog item 16). All disposable objects
+  (`ModelRequest`, `InferenceService`) deleted afterward; Zot remains
+  `Synced`/`Healthy`.
+
+### Known follow-up NOT done in this phase
+
+- **Node-level (kubelet/CRI-O) trust for the Zot modelcar pull** — `deploy-model`'s
+  serving pods pull the modelcar through kubelet, which does not trust the
+  OpenShift service-serving-signer CA. This needs `image.config.openshift.io/
+  cluster` → `spec.additionalTrustedCA` (cluster-wide, node-rollout/restart
+  implications) and is deliberately NOT folded in here — see `docs/REFACTOR_PLAN.md`
+  backlog item 16 for the standalone decision point. **Full end-to-end (a real
+  HuggingFace `ModelRequest` completing through a successful `deploy-model`) is
+  therefore not yet achievable and is a known, tracked limitation, not "done".**
+- The Zot UI Route is now `passthrough`, so a browser sees Zot's own
+  service-CA-signed cert (a UI-side warning, acceptable for the sandbox UI).
