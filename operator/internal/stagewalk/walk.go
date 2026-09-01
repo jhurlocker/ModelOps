@@ -65,6 +65,7 @@ type Progress struct {
 	Message      string
 	DetailsURL   string
 	CheckResults []stagecommon.CheckResult
+	Results      []stagecommon.StageResult
 }
 
 // Result summarizes one Walk call.
@@ -97,6 +98,14 @@ type Result struct {
 // that's registry dispatch, not a switch statement.
 func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Result, error) {
 	var progress []Progress
+	// carried accumulates the named string results of every stage that
+	// has fully completed so far in this Walk, so a later stage's handler
+	// can read an upstream stage's result (e.g. ResultImageRef produced
+	// by the sandbox stage, consumed by promotion) without the walker
+	// knowing what any given result name means. Results only flow
+	// forward: a stage sees prior stages' results, never its own or a
+	// sibling namespace's.
+	var carried []stagecommon.StageResult
 
 	for _, stage := range in.Stages {
 		handler, ok := in.Handlers[stage.Name]
@@ -116,6 +125,7 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 			namespaces = []string{""}
 		}
 
+		var stageResults []stagecommon.StageResult
 		anyRunning := false
 		runningMessage := ""
 		for i, ns := range namespaces {
@@ -129,6 +139,10 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 			if err != nil {
 				return Result{}, fmt.Errorf("stage %q: building stage context: %w", stage.Name, err)
 			}
+			// Surface upstream stages' results as read-only input before
+			// the handler builds its spec, so a handler can consume a
+			// prior stage's output within this same Walk call.
+			sc.Results = carried
 			spec, err := handler.BuildSpec(sc)
 			if err != nil {
 				return Result{}, fmt.Errorf("stage %q: building stage spec: %w", stage.Name, err)
@@ -147,7 +161,12 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 				Message:      status.Message,
 				DetailsURL:   status.DetailsURL,
 				CheckResults: status.CheckResults,
+				Results:      status.Results,
 			})
+
+			if len(status.Results) > 0 {
+				stageResults = mergeResults(stageResults, status.Results)
+			}
 
 			switch status.Phase {
 			case stagecommon.StageFailed:
@@ -172,6 +191,13 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 			}
 		}
 
+		// Merge this stage's results into the carried set for the stages
+		// that follow. (On an early Running/Failed return above this
+		// never executes, but that's fine -- the walk is stopping anyway.)
+		if len(stageResults) > 0 {
+			carried = mergeResults(carried, stageResults)
+		}
+
 		if anyRunning {
 			if runningMessage == "" {
 				runningMessage = fmt.Sprintf("%s stage running", stage.Name)
@@ -186,4 +212,27 @@ func Walk(ctx context.Context, mr *modelopsv1alpha1.ModelRequest, in Input) (Res
 	}
 
 	return Result{Outcome: OutcomeSucceeded, Progress: progress}, nil
+}
+
+// mergeResults returns a new slice containing base with every entry in
+// add folded in by name, where a duplicate name's value is replaced by
+// the later entry. Result sets are tiny (a handful of entries at most),
+// so a linear scan is fine.
+func mergeResults(base, add []stagecommon.StageResult) []stagecommon.StageResult {
+	out := make([]stagecommon.StageResult, 0, len(base)+len(add))
+	out = append(out, base...)
+	for _, r := range add {
+		replaced := false
+		for i := range out {
+			if out[i].Name == r.Name {
+				out[i] = r
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			out = append(out, r)
+		}
+	}
+	return out
 }

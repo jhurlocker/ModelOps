@@ -349,6 +349,31 @@ spec:
                       type: string
                     phase:
                       type: string
+                    results:
+                      description: |-
+                        Results is optional named string output produced by a completed
+                        stage run (e.g. the sandbox stage's Zot-built image reference,
+                        surfaced under the "image-ref" name). This is lineage/evidence
+                        data -- the artifact reference the platform actually produced --
+                        not transient plumbing, so it is persisted here following the
+                        same CheckResults/DetailsURL threading.
+                      items:
+                        description: |-
+                          StageResult is one named string output a completed stage run surfaces
+                          (e.g. a Tekton PipelineRun result). Deliberately a plain decoupled
+                          struct in api/v1alpha1 rather than imported from internal/stagecommon
+                          -- same decoupling principle as StageProgress.Phase (a plain string,
+                          not stagecommon.StagePhase) and CheckResult.
+                        properties:
+                          name:
+                            type: string
+                          value:
+                            type: string
+                        required:
+                        - name
+                        - value
+                        type: object
+                      type: array
                     runRef:
                       type: string
                   required:

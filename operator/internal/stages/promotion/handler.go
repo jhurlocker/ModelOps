@@ -41,6 +41,22 @@ func (Handler) BuildSpec(sc stagecommon.StageContext) (stagecommon.StageSpec, er
 
 	p := stagecommon.BuildCommonModelParams(mr.Spec, reqs, cfg, sc.Secrets)
 
+	// modelcar-image is where the promotion stage learns the specific
+	// ModelCar OCI image built during the sandbox stage (the
+	// build-modelcar Task's "image-ref" result, forwarded generically by
+	// the walker via StageContext.Results). When the sandbox produced
+	// one, prefer it; when it didn't (oci/s3 source -> build-modelcar
+	// skipped -> no image-ref result), leave modelcar-image unset
+	// exactly as BuildCommonModelParams did, so model-id remains the
+	// sole source and the pre-existing derivation is unchanged. See
+	// stagecommon.ResultImageRef and docs/PHASE_LOG.md Phase C.
+	for _, r := range sc.Results {
+		if r.Name == stagecommon.ResultImageRef && r.Value != "" {
+			stagecommon.AddParam(p, "modelcar-image", r.Value)
+			break
+		}
+	}
+
 	stagecommon.AddParam(p, "target-namespace", sc.Namespace)
 	stagecommon.AddParam(p, "plan-id", fmt.Sprintf("%s-promotion", mr.Name))
 

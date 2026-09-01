@@ -323,6 +323,36 @@ func TestBuildCheckResults_MapsPipelineRunResultsToCheckTypes(t *testing.T) {
 	require.False(t, cr[2].Passed, "benchmark value 'false' vs passedValue 'true' -> not passed")
 }
 
+// --- buildResults: forward PipelineRun string results into StageStatus.
+// Written alongside the implementation (Phase C): this is the writer side
+// of the image-ref contract consumed by promotion.Handler. The runner
+// forwards every string result generically and skips non-string results.
+
+func TestBuildResults_ForwardsStringResults(t *testing.T) {
+	results := []tektonv1.PipelineRunResult{
+		{Name: "image-ref", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "zot.modelops-zot.svc.cluster.local:5000/smollm2:v1"}},
+		{Name: "summary", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "ok"}},
+	}
+
+	got := buildResults(results)
+	require.Len(t, got, 2)
+	require.Equal(t, stagecommon.StageResult{Name: "image-ref", Value: "zot.modelops-zot.svc.cluster.local:5000/smollm2:v1"}, got[0])
+	require.Equal(t, stagecommon.StageResult{Name: "summary", Value: "ok"}, got[1])
+}
+
+func TestBuildResults_SkipsNonStringEmptyAndNil(t *testing.T) {
+	results := []tektonv1.PipelineRunResult{
+		{Name: "empty", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: ""}},
+		{Name: "image-ref", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "zot.modelops-zot.svc.cluster.local:5000/x:v1"}},
+	}
+	got := buildResults(results)
+	require.Len(t, got, 1, "empty string-valued results must be skipped")
+	require.Equal(t, "image-ref", got[0].Name)
+
+	require.Nil(t, buildResults(nil), "nil results must yield nil")
+	require.Empty(t, buildResults([]tektonv1.PipelineRunResult{}), "empty results must yield empty")
+}
+
 func TestBuildCheckResults_MissingResultInMapping_OmitsEntry(t *testing.T) {
 	results := []tektonv1.PipelineRunResult{
 		{Name: "security-passed", Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: "true"}},

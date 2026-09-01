@@ -25,6 +25,7 @@ package tekton
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -38,7 +39,7 @@ const buildModelcarTaskFile = "build-modelcar-task.yaml"
 type pipelineTaskDoc struct {
 	Spec struct {
 		Tasks []struct {
-			Name     string `json:"name"`
+			Name     string   `json:"name"`
 			RunAfter []string `json:"runAfter"`
 		} `json:"tasks"`
 	} `json:"spec"`
@@ -139,4 +140,24 @@ func TestPipelineYAML_BuildModelcar_RegistryUrlIsInternalServiceDNS(t *testing.T
 	text := readPipelineYAMLFile(t, buildModelcarTaskFile)
 	require.Contains(t, text, "zot.modelops-zot.svc.cluster.local:5000",
 		"build-modelcar must push to Zot's internal Service DNS (HTTP), never the external Route")
+}
+
+// TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy pins the
+// Phase C sandbox-pipeline companion wiring: the sandbox pipeline's own
+// compliance-artifact-scan and deploy-model tasks must consume the
+// build-modelcar result (the Zot-built image) instead of re-deriving a
+// tag from quay.io/redhat-ai-services/modelcar-catalog. Reads the
+// committed YAML, not a copy.
+func TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy(t *testing.T) {
+	text := readPipelineYAMLFile(t, "sandbox-pipeline.yaml")
+
+	const resultRef = "value: $(tasks.build-modelcar.results.image-ref)"
+	require.Equal(t, 2, strings.Count(text, resultRef),
+		"exactly two sandbox tasks must consume the image-ref result: compliance-artifact-scan and deploy-model")
+
+	// The old param-forwarding must be gone from the sandbox pipeline --
+	// modelcar-image now comes from the build result, never from a
+	// (always-empty) modelcar-image param.
+	require.NotContains(t, text, "value: $(params.modelcar-image)",
+		"sandbox-pipeline.yaml must no longer forward $(params.modelcar-image) to its tasks")
 }

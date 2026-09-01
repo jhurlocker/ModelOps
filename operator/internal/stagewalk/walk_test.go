@@ -319,6 +319,84 @@ func TestWalk_HandlerBuildSpecError_StopsWalk_RunnerNeverCalled(t *testing.T) {
 	require.Empty(t, runner.Calls, "the runner must never be invoked if BuildSpec fails")
 }
 
+// --- 10a. Upstream stage results are carried forward to downstream stages ---
+
+func TestWalk_CarriesUpstreamResultsIntoDownstreamContext(t *testing.T) {
+	runner := stagecommon.NewFakeStageRunner()
+	runner.ScriptStage("s1", stagecommon.StageStatus{
+		Phase:   stagecommon.StageSucceeded,
+		Results: []stagecommon.StageResult{{Name: stagecommon.ResultImageRef, Value: "zot.example.com/m:v1"}},
+	})
+	runner.ScriptStage("s2", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
+
+	var seenByName string
+	// s2's handler records the Results the walker handed it, proving the
+	// carry is generic and walker-owned (no "sandbox" knowledge in Walk).
+	s2Handler := fakeHandler{build: func(sc stagecommon.StageContext) (stagecommon.StageSpec, error) {
+		for _, r := range sc.Results {
+			if r.Name == stagecommon.ResultImageRef {
+				seenByName = r.Value
+			}
+		}
+		return stagecommon.StageSpec{Name: sc.Stage.Name, RunName: sc.Stage.Name}, nil
+	}}
+
+	in := Input{
+		Stages: []modelopsv1alpha1.ProfileStageSpec{
+			{Name: "s1", Kind: "fake"},
+			{Name: "s2", Kind: "fake"},
+		},
+		Handlers:     map[string]stagecommon.StageHandler{"s1": nameEchoHandler(), "s2": s2Handler},
+		Runners:      map[string]stagecommon.StageRunner{"fake": runner},
+		BuildContext: basicContextFunc(),
+	}
+
+	result, err := Walk(context.Background(), testModelRequest(), in)
+	require.NoError(t, err)
+	require.Equal(t, OutcomeSucceeded, result.Outcome)
+	require.Equal(t, "zot.example.com/m:v1", seenByName,
+		"s2 must see s1's image-ref result via StageContext.Results")
+
+	require.Len(t, result.Progress, 2)
+	require.Len(t, result.Progress[0].Results, 1)
+	require.Equal(t, stagecommon.StageResult{Name: stagecommon.ResultImageRef, Value: "zot.example.com/m:v1"}, result.Progress[0].Results[0])
+	require.Empty(t, result.Progress[1].Results, "s2 produced no results of its own")
+}
+
+func TestWalk_ResultsFlowForwardOnly_NotToSelfOrSiblings(t *testing.T) {
+	runner := stagecommon.NewFakeStageRunner()
+	runner.ScriptStage("s1", stagecommon.StageStatus{
+		Phase:   stagecommon.StageSucceeded,
+		Results: []stagecommon.StageResult{{Name: stagecommon.ResultImageRef, Value: "zot.example.com/m:v1"}},
+	})
+	runner.ScriptStage("s2", stagecommon.StageStatus{Phase: stagecommon.StageSucceeded})
+
+	var s1SawResults, s2SawResults bool
+	s1Handler := fakeHandler{build: func(sc stagecommon.StageContext) (stagecommon.StageSpec, error) {
+		s1SawResults = len(sc.Results) > 0
+		return stagecommon.StageSpec{Name: sc.Stage.Name, RunName: sc.Stage.Name}, nil
+	}}
+	s2Handler := fakeHandler{build: func(sc stagecommon.StageContext) (stagecommon.StageSpec, error) {
+		s2SawResults = len(sc.Results) > 0
+		return stagecommon.StageSpec{Name: sc.Stage.Name, RunName: sc.Stage.Name}, nil
+	}}
+
+	in := Input{
+		Stages: []modelopsv1alpha1.ProfileStageSpec{
+			{Name: "s1", Kind: "fake"},
+			{Name: "s2", Kind: "fake"},
+		},
+		Handlers:     map[string]stagecommon.StageHandler{"s1": s1Handler, "s2": s2Handler},
+		Runners:      map[string]stagecommon.StageRunner{"fake": runner},
+		BuildContext: basicContextFunc(),
+	}
+
+	_, err := Walk(context.Background(), testModelRequest(), in)
+	require.NoError(t, err)
+	require.False(t, s1SawResults, "a stage must never see its own results (only prior stages')")
+	require.True(t, s2SawResults, "a later stage must see a prior stage's results")
+}
+
 // --- 10. BuildContext error stops the walk; handler/runner never called ---
 
 func TestWalk_BuildContextError_StopsWalk_HandlerAndRunnerNeverCalled(t *testing.T) {

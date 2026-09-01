@@ -179,6 +179,14 @@ type StageProgress struct {
 	// derive check outcomes from Phase.
 	// +optional
 	CheckResults []CheckResult `json:"checkResults,omitempty"`
+	// Results is optional named string output produced by a completed
+	// stage run (e.g. the sandbox stage's Zot-built image reference,
+	// surfaced under the "image-ref" name). This is lineage/evidence
+	// data -- the artifact reference the platform actually produced --
+	// not transient plumbing, so it is persisted here following the
+	// same CheckResults/DetailsURL threading.
+	// +optional
+	Results []StageResult `json:"results,omitempty"`
 }
 
 // CheckResult is optional per-check granular governance evidence a
@@ -193,6 +201,16 @@ type CheckResult struct {
 	Passed  bool      `json:"passed"`
 	Reason  string    `json:"reason,omitempty"`
 	Message string    `json:"message,omitempty"`
+}
+
+// StageResult is one named string output a completed stage run surfaces
+// (e.g. a Tekton PipelineRun result). Deliberately a plain decoupled
+// struct in api/v1alpha1 rather than imported from internal/stagecommon
+// -- same decoupling principle as StageProgress.Phase (a plain string,
+// not stagecommon.StagePhase) and CheckResult.
+type StageResult struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // +kubebuilder:object:root=true

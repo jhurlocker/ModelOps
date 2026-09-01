@@ -40,6 +40,26 @@ type CheckResult struct {
 	Message string
 }
 
+// StageResult is one named string output a StageRunner surfaces from a
+// completed stage run, e.g. a Tekton PipelineRun result. Grouped under
+// StageStatus.Results below; the set of names is a cross-stage data
+// contract (see ResultImageRef) rather than a StageRunner-internal
+// concern.
+type StageResult struct {
+	Name  string
+	Value string
+}
+
+// ResultImageRef is the canonical name of the "container image reference
+// produced by an upstream stage" data contract (the Zot-built ModelCar
+// reference the sandbox pipeline's build-modelcar Task emits). It lives
+// here, not in internal/stages/tekton or internal/stages/promotion, so
+// the writer side (tekton.StageRunner forwards whatever results the
+// PipelineRun reports) and the reader side (promotion.Handler consumes
+// this specific one) share a single token without either importing the
+// other's package.
+const ResultImageRef = "image-ref"
+
 // StageStatus is the generic status contract a StageRunner reports back
 // to the reconciler for a single stage run. Modeled after Kubernetes'
 // own metav1.Condition pattern (Reason/Message), reduced to exactly the
@@ -69,6 +89,15 @@ type StageStatus struct {
 	// and the provider can produce structured per-check output.
 	// +optional
 	CheckResults []CheckResult
+	// Results is optional named string output produced by a completed
+	// stage run, forwarded generically by a StageRunner (e.g.
+	// tekton.StageRunner copying a PipelineRun's own string results).
+	// Carried forward by the walker into subsequent stages' StageContext
+	// and, alongside CheckResults/DetailsURL, persisted to the
+	// ModelRequest's Status.Stages[]. See ResultImageRef for the one
+	// concrete contract consumed today.
+	// +optional
+	Results []StageResult
 }
 
 // StageKind classifies which named "slot" of a shared provider config a
@@ -189,6 +218,17 @@ type StageContext struct {
 	// ModelRequest, if one exists yet (nil otherwise). Best-effort,
 	// read-only input -- a stage handler must tolerate it being nil.
 	CapacityPlan *modelopsv1alpha1.CapacityPlan
+	// Results carries named string output produced by upstream stages
+	// that have already completed in this Walk, accumulated by the
+	// walker (see internal/stagewalk.Walk) and injected here as
+	// read-only input. A stage handler consuming another stage's result
+	// looks it up by name (e.g. stagecommon.ResultImageRef); it must
+	// tolerate the entry being absent (nil/empty). This is the
+	// provider-agnostic analogue of CapacityPlan above: for a
+	// provider-specific upstream object (a Tekton PipelineRun's results)
+	// the reconciler cannot fetch it itself, so the walker surfaces it
+	// here instead.
+	Results []StageResult
 	// Secrets holds resolved credentials/endpoints (Phase 3), reused
 	// as-is here.
 	Secrets Secrets

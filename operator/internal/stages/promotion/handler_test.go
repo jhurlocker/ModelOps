@@ -221,6 +221,66 @@ func TestBuildSpec_FirstAndLastNamespace_FullFixture_CharacterizesCurrentOutput(
 	}
 }
 
+// TestBuildSpec_ImageRefResult_SetsModelcarImage covers the happy path:
+// when an upstream stage (sandbox) produced the Zot-built image reference
+// ("image-ref"), the promotion stage must bind modelcar-image to it, so
+// promotion deploys the just-built artifact rather than re-deriving from
+// the quay catalog. See docs/PHASE_LOG.md Phase C and the approved design.
+func TestBuildSpec_ImageRefResult_SetsModelcarImage(t *testing.T) {
+	mr, cfg, plan, secrets := fullCharacterizationFixture()
+
+	sc := stagecommon.StageContext{
+		ModelRequest:   mr,
+		PlatformConfig: cfg,
+		CapacityPlan:   plan,
+		Secrets:        secrets,
+		Stage:          modelopsv1alpha1.ProfileStageSpec{Name: "promotion", PerNamespace: true},
+		Namespace:      "prod-ns",
+		NamespaceIndex: 0,
+		NamespaceCount: 1,
+		Results: []stagecommon.StageResult{
+			{Name: stagecommon.ResultImageRef, Value: "zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct:v1"},
+		},
+	}
+
+	spec, err := Handler{}.BuildSpec(sc)
+	require.NoError(t, err)
+
+	require.Equal(t, "zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct:v1",
+		spec.Params["modelcar-image"],
+		"modelcar-image must be bound to the sandbox-produced image-ref")
+	require.Equal(t, "quay.io/models/foo:v1", spec.Params["model-id"],
+		"model-id must be unchanged by the presence of image-ref")
+}
+
+// TestBuildSpec_NoImageRefResult_ProducesIdenticalParams covers the oci/s3
+// negative control: build-modelcar is skipped (its `when: in [huggingface]`
+// guard), so no image-ref result exists, and the promotion stage must
+// produce params byte-identical to today -- no modelcar-image key at all,
+// model-id still the source of truth.
+func TestBuildSpec_NoImageRefResult_ProducesIdenticalParams(t *testing.T) {
+	mr, cfg, plan, secrets := fullCharacterizationFixture()
+
+	sc := stagecommon.StageContext{
+		ModelRequest:   mr,
+		PlatformConfig: cfg,
+		CapacityPlan:   plan,
+		Secrets:        secrets,
+		Stage:          modelopsv1alpha1.ProfileStageSpec{Name: "promotion", PerNamespace: true},
+		Namespace:      "prod-ns",
+		NamespaceIndex: 0,
+		NamespaceCount: 1,
+	}
+
+	spec, err := Handler{}.BuildSpec(sc)
+	require.NoError(t, err)
+
+	_, hasModelcarImage := spec.Params["modelcar-image"]
+	require.False(t, hasModelcarImage,
+		"with no image-ref result, modelcar-image must be omitted exactly as before (empty-value guard)")
+	require.Equal(t, "quay.io/models/foo:v1", spec.Params["model-id"])
+}
+
 func TestBuildSpec_MiddleNamespace_OmitsApprovalURL_AndRunRegisterFalse(t *testing.T) {
 	// index 1 of 3: neither first nor last.
 	mr, cfg, plan, secrets := fullCharacterizationFixture()

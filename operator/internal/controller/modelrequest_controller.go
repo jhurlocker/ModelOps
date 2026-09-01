@@ -483,6 +483,14 @@ func singleStageProgressEqual(a, b modelopsv1alpha1.StageProgress) bool {
 			return false
 		}
 	}
+	if len(a.Results) != len(b.Results) {
+		return false
+	}
+	for i := range a.Results {
+		if a.Results[i] != b.Results[i] {
+			return false
+		}
+	}
 	return true
 }
 
@@ -498,6 +506,13 @@ func toStageProgressList(progress []stagewalk.Progress) []modelopsv1alpha1.Stage
 				Message: r.Message,
 			}
 		}
+		rs := make([]modelopsv1alpha1.StageResult, len(p.Results))
+		for i, r := range p.Results {
+			rs[i] = modelopsv1alpha1.StageResult{
+				Name:  r.Name,
+				Value: r.Value,
+			}
+		}
 		out = append(out, modelopsv1alpha1.StageProgress{
 			Name:         p.Name,
 			Namespace:    p.Namespace,
@@ -506,6 +521,7 @@ func toStageProgressList(progress []stagewalk.Progress) []modelopsv1alpha1.Stage
 			Message:      p.Message,
 			DetailsURL:   p.DetailsURL,
 			CheckResults: cr,
+			Results:      rs,
 		})
 	}
 	return out

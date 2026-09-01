@@ -113,11 +113,28 @@ func mapCondition(stage stagecommon.StageSpec, run *tektonv1.PipelineRun, mappin
 	if cond.Status == corev1.ConditionFalse {
 		return stagecommon.StageStatus{Phase: stagecommon.StageFailed, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName}
 	}
-	status := stagecommon.StageStatus{Phase: stagecommon.StageSucceeded, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName}
+	status := stagecommon.StageStatus{Phase: stagecommon.StageSucceeded, Reason: cond.Reason, Message: cond.Message, RunRef: stage.RunName, Results: buildResults(run.Status.Results)}
 	if len(mappings) > 0 {
 		status.CheckResults = buildCheckResults(run.Status.Results, mappings)
 	}
 	return status
+}
+
+// buildResults forwards a PipelineRun's own string-typed results as
+// stagecommon.StageResult values (e.g. the build-modelcar Task's
+// "image-ref" result). Non-string results (array/object) are skipped.
+// The runner forwards every string result generically -- it does not
+// know which result names a downstream stage's handler will consume
+// (see stagecommon.ResultImageRef, read by promotion.Handler).
+func buildResults(results []tektonv1.PipelineRunResult) []stagecommon.StageResult {
+	var out []stagecommon.StageResult
+	for _, r := range results {
+		if r.Value.StringVal == "" {
+			continue
+		}
+		out = append(out, stagecommon.StageResult{Name: r.Name, Value: r.Value.StringVal})
+	}
+	return out
 }
 
 func buildCheckResults(results []tektonv1.PipelineRunResult, mappings []modelopsv1alpha1.CheckResultMapping) []stagecommon.CheckResult {
