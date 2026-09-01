@@ -29,6 +29,9 @@ spec:
             - name: config
               mountPath: /etc/zot/config.json
               subPath: config.json
+            - name: htpasswd
+              mountPath: /etc/zot/htpasswd
+              subPath: htpasswd
           readinessProbe:
             httpGet:
               path: /readyz
@@ -58,3 +61,6 @@ spec:
             items:
               - key: config.json
                 path: config.json
+        - name: htpasswd
+          secret:
+            secretName: zot-htpasswd

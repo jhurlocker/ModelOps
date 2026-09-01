@@ -191,13 +191,17 @@ Zot is an OCI container image registry deployed in the `modelops-zot` namespace
 (PVC-backed storage, Deployment, Service, Route — same shape as MinIO). Its
 built-in UI is enabled via `extensions.ui.enable: true` in the ConfigMap and
 exposed through the `zot-ui` Route for browser access. Zot serves the UI and the
-registry API on the same port, so the API is reachable behind that Route; however,
-in-cluster consumers (Tekton pipeline tasks, future controllers) MUST push/pull
-through the internal Service DNS — `zot.modelops-zot.svc.cluster.local:5000` —
-not an external Route. This mirrors the MinIO rule: nothing outside the cluster
-needs to push to Zot, so no dedicated external registry Route is created. The
-`zot` Application carries the same generous retry policy as `maas-subscriptions`
-since it is operator-adjacent infrastructure.
+registry API on the same port, so the API is reachable behind that Route. To
+close the resulting external push path, Zot has htpasswd basic auth enabled (the
+credential path is referenced in the ConfigMap; the credential itself lives in
+the `zot-htpasswd` Secret). Access control is scoped so anonymous callers may
+only `read` (pull), while `create`/`update`/`delete` (push) requires htpasswd
+credentials — so in-cluster, credential-less pulls keep working while external
+unauthenticated pushes are rejected. In-cluster consumers (Tekton pipeline
+tasks, future controllers) still target the internal Service DNS —
+`zot.modelops-zot.svc.cluster.local:5000` — not the Route. The `zot` Application
+carries the same generous retry policy as `maas-subscriptions` since it is
+operator-adjacent infrastructure.
 
 #### maas-prereqs dependency chain (wave -1)
 

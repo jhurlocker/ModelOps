@@ -10,6 +10,16 @@ data:
   # under `extensions` (a full-featured image is required; minimal builds ignore it).
   # Zot requires the `search` extension to be enabled alongside `ui`; otherwise
   # it refuses to start ("search extension must be enabled").
+  #
+  # Auth: the registry is exposed through the zot-ui Route, which (because Zot
+  # serves the UI and registry API on the same port) also exposes the push/pull
+  # API externally. Basic auth is enabled via an htpasswd file whose PATH is
+  # referenced here — the credentials themselves live in the zot-htpasswd
+  # Secret (see deployment.yaml / kustomization.yaml), never in this ConfigMap.
+  # Access control is scoped so anonymous (unauthenticated) callers may only
+  # "read" (pull); push ("create"/"update"/"delete") requires htpasswd auth.
+  # This keeps in-cluster pipeline pulls open by default while closing the
+  # external, unauthenticated push path.
   config.json: |
     {
       "distSpecVersion": "1.0.1",
@@ -19,7 +29,21 @@ data:
       "http": {
         "address": "0.0.0.0",
         "port": "5000",
-        "compat": ["docker2s2"]
+        "realm": "zot",
+        "compat": ["docker2s2"],
+        "auth": {
+          "htpasswd": {
+            "path": "/etc/zot/htpasswd"
+          }
+        },
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "anonymousPolicy": ["read"],
+              "defaultPolicy": ["read", "create", "update", "delete"]
+            }
+          }
+        }
       },
       "log": {
         "level": "info"

@@ -9,3 +9,13 @@ resources:
   - deployment.yaml
   - service.yaml
   - route.yaml
+
+# htpasswd file for Zot's basic auth (bcrypt hash). Sourced as a Secret and
+# mounted at /etc/zot/htpasswd — never inlined in the ConfigMap config.json.
+# WARNING: this commits a sandbox-only credential (zotadmin / zotadmin) as a
+# bcrypt hash, acceptable only because this is a disposable sandbox cluster.
+# Replace with a sealed-secret / external secret provider before non-sandbox use.
+secretGenerator:
+  - name: zot-htpasswd
+    literals:
+      - htpasswd=zotadmin:$2y$10$RMfZKwQojSQell2X85aICuYXDfUa9ZfT9/9j3tOk7i.vQqdqdFHAe
