@@ -7,6 +7,13 @@ metadata:
     app: zot
 spec:
   replicas: 1
+  # Recreate, not RollingUpdate: the registry stores a boltdb cache.db on the
+  # RWO zot-data PVC, and two pods cannot open the same boltdb file
+  # ("boltdb file is already in use"). Recreate terminates the old pod before
+  # the new one starts, which is the correct strategy for this single-replica,
+  # PVC-backed registry.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: zot
