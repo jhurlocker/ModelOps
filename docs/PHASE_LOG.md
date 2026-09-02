@@ -5342,8 +5342,8 @@ and therefore a derived value, not a removable one.
 
 ## Sealed Secrets — replace every committed plaintext credential
 
-**Commit:** (pending review, left uncommitted per the "stop for review"
-instruction) on `feat/model-request-controller`.
+**Commit:** `ea10988` on `feat/model-request-controller` — "feat(gitops):
+replace plaintext credentials with Sealed Secrets".
 
 This closes `docs/REFACTOR_PLAN.md` backlog item 15 ("Real secrets management
 before leaving sandbox use"). It went through an explicit design review first
@@ -5475,8 +5475,44 @@ lockstep — the sealing script encodes this so it cannot be done wrong by hand:
   (`probe-plaintext-creds` with `minioadmin` values) under `gitops/` makes
   `TestPlaintextSecrets_NoCommittedPlainSecretOutsideAllowlist` fail with the
   expected message; removing the probe restores green.
-- (See the review summary for the remaining live-cluster functional checks —
-  Zot push and MinIO reachability — and their ArgoCD self-heal caveat.)
+- **Controller install on-cluster**: `sealed-secrets-controller` rolled out to
+  `1/1 Running` in `kube-system`; `sealedsecrets.bitnami.com` CRD registered;
+  the `sealed-secrets` Application reached `Synced`/`Healthy` after the
+  app-of-apps reconciled the new Application manifest.
+- **Decryption**: all ten SealedSecrets reported `Synced: true` and the controller
+  synthesized their target Secrets (each with an ownerReference to its
+  SealedSecret). One in-place migration wrinkle: because the pre-existing
+  plaintext `Secret`s had the same names, the controller initially refused to
+  overwrite them (`already exists and is not managed by SealedSecret`, correct
+  behavior); deleting those stale Secrets let the controller create its owned
+  replacements. This also left the controller's status stuck at `False` for a
+  short window (spec unchanged → "update suppressed"), resolved by deleting and
+  letting ArgoCD self-heal recreate the SealedSecrets.
+- **Identity-group coupling verified** (rather than just assumed): every
+  decrypted value was compared against the freshly generated random values —
+  MinIO `root-user`/`root-password` equals the `scan-s3`/`result-s3`
+  `accessKeyId`/`secretAccessKey` and the results-ui `S3_ACCESS_KEY` and the
+  intake-UI prefill default; `zot-htpasswd`'s bcrypt verifies the
+  `zot-push-credentials` password; `maas-db-config`'s connection URL embeds the
+  `maas-postgres-credentials` password. All matched.
+- **MinIO reachability**: a throwaway in-cluster pod with `boto3` listed buckets
+  against the internal Service using the *new* credentials (`SUCCESS`,
+  `compliance-artifact-results`) while the old `minioadmin`/`minioadmin` was
+  rejected (`ClientError`). MinIO re-keyed from the rotated `MINIO_ROOT_*` env
+  without wiping data — so the pipeline's scan/result credentials reach MinIO.
+- **Zot push auth**: a throwaway pod authenticated to Zot over TLS with the new
+  `zotadmin`/password (`/v2/` → `200` on the correct password, `401` on a wrong
+  one), and `buildah login` against `zot.modelops-zot.svc.cluster.local:5000`
+  using the sealed `zot-push-credentials` returned `Login Succeeded!` — the exact
+  build-modelcar auth path. (A subsequent `buildah commit` in that ad-hoc probe
+  hit a `fuse-overlayfs`/`/dev/fuse` storage-driver issue unrelated to
+  credentials; the pipeline's real build-modelcar step uses a storage driver
+  that avoids fuse.)
+- **Routes removed**: confirmed `no minio routes` and `no zot routes`.
+
+All verifications were done against the live sandbox after ArgoCD synced
+`ea10988`; every `Application` except the self-referential `modelops-root`
+(perpetually `OutOfSync` by design, see Phase 0) is `Synced`/`Healthy`.
 
 ### Known limitations / follow-up
 
