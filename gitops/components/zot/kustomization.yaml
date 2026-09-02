@@ -12,10 +12,12 @@ resources:
 
 # htpasswd file for Zot's basic auth (bcrypt hash). Sourced as a Secret and
 # mounted at /etc/zot/htpasswd — never inlined in the ConfigMap config.json.
-# WARNING: this commits a sandbox-only credential (zotadmin / zotadmin) as a
-# bcrypt hash, acceptable only because this is a disposable sandbox cluster.
+# WARNING: this commits a sandbox-only credential (a bcrypt hash of the
+# zotadmin identity's password) — acceptable only because this is a disposable
+# sandbox cluster. The plaintext password is only ever carried in the
+# zot-push-credentials Secret (runtime-config); rotate the two together.
 # Replace with a sealed-secret / external secret provider before non-sandbox use.
 secretGenerator:
   - name: zot-htpasswd
     literals:
-      - htpasswd=zotadmin:$2y$10$RMfZKwQojSQell2X85aICuYXDfUa9ZfT9/9j3tOk7i.vQqdqdFHAe
+      - htpasswd=zotadmin:$2y$10$ri1AfLtv5tIBfwXdi0.Em.RFnuHPW06FnoJzlsfdznoDr3rrkbuDe
