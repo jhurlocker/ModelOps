@@ -25,7 +25,12 @@ spec:
   chartVersion: "0.7.1"
   hardwareProfileName: gpu-profile
   hardwareProfileNamespace: redhat-ods-applications
-  evalhubUrl: default-evalhub-redhat-ods-applications.apps.ocp.tkjpd.sandbox1883.opentlc.com
+  # Internal Service DNS, cluster-portable. Do NOT use a Route hostname
+  # (e.g. default-evalhub-redhat-ods-applications.apps.<cluster-domain>) --
+  # that hardcodes a cluster-specific value and the TLS is edge-terminated
+  # at the Route only. Matches the deployed PlatformConfig in
+  # gitops/components/runtime-config/platformconfig.yaml.
+  evalhubUrl: https://default-evalhub.redhat-ods-applications.svc.cluster.local:8443
   approvalPollIntervalSeconds: 15
   approvalTimeoutSeconds: 3600
   benchmarkProfile: constant

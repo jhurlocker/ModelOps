@@ -1,0 +1,24 @@
+# The ONE sanctioned home for cluster-specific external hostnames.
+#
+# Plain `kustomize build` runs against the Git checkout with no access to
+# live cluster state, so ArgoCD cannot read `ingresses.config.openshift.io/
+# cluster`.spec.domain during a sync. Instead, this ConfigMap is the single,
+# central source that the kustomize replacements in kustomization.yaml inject
+# into the Gateway listeners and the Route host.
+#
+# Every other manifest in gitops/ must NOT hardcode a cluster-specific hostname
+# (enforced by operator/internal/stages/tekton/cluster_domain_test.go) -- if you
+# need an external hostname, put it here and add a replacement, do not copy a
+# literal hostname into a new component.
+#
+# Set once per cluster (bootstrap):
+#   CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
+#   # value must be: maas.${CLUSTER_DOMAIN}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: modelops-cluster-config
+  namespace: openshift-ingress
+data:
+  # External hostname the MaaS Gateway terminates and the Route serves.
+  maas-hostname: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com

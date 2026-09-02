@@ -7,9 +7,13 @@ metadata:
   annotations:
     argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
-  # Cluster-specific: the hostname follows the pattern maas.apps.<cluster-domain>.
-  # Find your cluster domain: oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}'
-  host: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com
+  # Cluster-specific: rendered at build time from cluster-config.yaml by
+  # the kustomize replacement in kustomization.yaml (must match the
+  # Gateway's HTTPS listener hostname so passthrough SNI/name filtering
+  # works). Do NOT hardcode a cluster domain here. The empty value below
+  # is only ever applied if this Route is consumed without the kustomize
+  # replacement, in which case OpenShift would auto-generate a host.
+  host: ""
   to:
     kind: Service
     name: maas-default-gateway-data-science-gateway-class

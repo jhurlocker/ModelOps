@@ -18,7 +18,10 @@ spec:
       name: maas-gw-options
   listeners:
     - name: http
-      hostname: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com
+      # Cluster-specific: rendered at build time from
+      # cluster-config.yaml by the kustomize replacement in
+      # kustomization.yaml. Do NOT hardcode a cluster domain here.
+      hostname: ""
       port: 80
       protocol: HTTP
       allowedRoutes:
@@ -28,7 +31,7 @@ spec:
             matchLabels:
               maas.opendatahub.io/gateway-access: "true"
     - name: https
-      hostname: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com
+      hostname: ""
       port: 443
       protocol: HTTPS
       allowedRoutes:

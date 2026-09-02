@@ -2,6 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
+  - cluster-config.yaml
   - gateway-config.yaml
   - gateway-route.yaml
   - gateway.yaml
@@ -13,3 +14,26 @@ resources:
   - maas-auth-proxy.yaml
   - tenant.yaml
   - patch-datasciencecluster.yaml
+
+# Inject the single cluster-specific MaaS hostname (from
+# cluster-config.yaml) into the Gateway listeners and the Route host, so
+# no committed manifest carries a hand-typed cluster domain. The value is
+# sourced from a ConfigMap committed in this same kustomization; on a new
+# cluster only that one file needs to change (see cluster-config.yaml).
+replacements:
+  - source:
+      kind: ConfigMap
+      name: modelops-cluster-config
+      fieldPath: data.maas-hostname
+    targets:
+      - select:
+          kind: Gateway
+          name: maas-default-gateway
+        fieldPaths:
+          - spec.listeners.0.hostname
+          - spec.listeners.1.hostname
+      - select:
+          kind: Route
+          name: maas-gateway
+        fieldPaths:
+          - spec.host

@@ -584,9 +584,12 @@ The Gateway requires:
    the MaaS API HTTPRoute and `maas-api` deployment live in
    `redhat-ai-gateway-infra` (auto-labeled by RHOAI)
 
-The Gateway hostname is hardcoded in `gitops/components/maas/gateway.yaml`
-(and the Route host in `gateway-route.yaml`). For other clusters, update the
-`maas.apps.<cluster-domain>` values.
+The Gateway/Router hostname is cluster-specific, so it is not hand-typed in
+`gateway.yaml` or `gateway-route.yaml`. It is derived at build time from the
+single sourced value in `gitops/components/maas/cluster-config.yaml` via the
+kustomize `replacements` in `gitops/components/maas/kustomization.yaml`. For a
+new cluster, update that one ConfigMap (see the bootstrap checklist), never the
+Gateway/Route manifests directly.
 
 ### Step 2f: Gateway memory (RHOAI 3.5+ AI Gateway)
 
@@ -694,11 +697,15 @@ When deploying to a fresh cluster, follow this order after prerequisites
    echo "Cluster domain: ${CLUSTER_DOMAIN}"
    ```
 
-2. **Set the Route hostname** — Edit `gitops/components/maas/gateway-route.yaml`:
+2. **Set the cluster MaaS hostname** — Edit the single source in
+   `gitops/components/maas/cluster-config.yaml`:
    ```bash
    CLUSTER_DOMAIN=$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}')
-   echo "Route host should be: maas.${CLUSTER_DOMAIN}"
-   # Update spec.host in gitops/components/maas/gateway-route.yaml
+   echo "maas hostname should be: maas.${CLUSTER_DOMAIN}"
+   # Update data.maas-hostname in gitops/components/maas/cluster-config.yaml
+   # to maas.${CLUSTER_DOMAIN}, then commit and push. The kustomize
+   # replacement in kustomization.yaml injects it into the Gateway
+   # listeners and the passthrough Route.
    ```
 
 3. **ArgoCD UI RBAC is already handled** — the `argocd-config` Application (wave -1)
