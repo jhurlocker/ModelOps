@@ -1,13 +1,8 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: maas-postgres-credentials
-  namespace: maas-infra
-type: Opaque
-stringData:
-  database-user: maas
-  database-password: maas-sandbox-password
-  database-name: maas
+# The `maas-postgres-credentials` Secret (database password) is a SealedSecret
+# (see maas-postgres-credentials-sealedsecret.yaml) — committed encrypted, not
+# plaintext. The Deployment below references it via secretKeyRef, unchanged.
+# Its password MUST match the one embedded in maas-db-config-sealedsecret.yaml
+# (the MaaS API's DB connection URL); rotate them together.
 ---
 apiVersion: apps/v1
 kind: Deployment

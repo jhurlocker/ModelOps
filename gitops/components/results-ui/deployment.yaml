@@ -1,26 +1,10 @@
 ---
 # ===================================================================
-#  1. THE SECRET
-#  This holds your AWS credentials. The Deployment will mount these
-#  as environment variables.
-#
-#  Fill in your base64-encoded values OR use 'stringData'
-#  with plain text and OpenShift will encode it for you.
-# ===================================================================
-apiVersion: v1
-kind: Secret
-metadata:
-  name: s3-creds
-type: Opaque
-stringData: # Use stringData for plain text. OpenShift will auto-encode.
-  S3_BUCKET_NAME: "benchmark-results"
-  S3_ACCESS_KEY: "minioadmin"
-  S3_SECRET_KEY: "minioadmin"
-  S3_ENDPOINT_URL: "http://minio.modelops-storage.svc.cluster.local:9000"
-
----
-# ===================================================================
-#  2. THE DEPLOYMENT
+#  THE DEPLOYMENT
+#  S3 credentials are NOT committed here: the `s3-creds` Secret is a
+#  SealedSecret (see s3-creds-sealedsecret.yaml), referenced via envFrom
+#  below. The sealed value is the same MinIO root identity used by the
+#  scan/result S3 credentials; rotate them together.
 #  This describes the desired state of your application:
 #  - Use the image from the internal build (ImageStream)
 #  - Inject the 's3-creds' Secret as environment variables

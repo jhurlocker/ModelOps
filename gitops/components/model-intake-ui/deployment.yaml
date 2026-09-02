@@ -41,24 +41,7 @@ data:
 
 ---
 # ===================================================================
-#  3. SECRET
-#  Default S3 credentials used to prefill the intake form. These are
-#  the SAME MinIO credentials used elsewhere in this repo - replace
-#  with real values / a proper secret manager in production.
-# ===================================================================
-apiVersion: v1
-kind: Secret
-metadata:
-  name: model-intake-secrets
-  namespace: sandbox
-type: Opaque
-stringData:
-  DEFAULT_S3_ACCESS_KEY: "minioadmin"
-  DEFAULT_S3_SECRET_KEY: "minioadmin"
-
----
-# ===================================================================
-#  4. RBAC
+#  3. RBAC
 #  The app needs to create/list/get PipelineRuns (and read Pipelines)
 #  in its namespace so the intake form can trigger runs and the runs
 #  list/detail pages can show live status.
@@ -145,7 +128,7 @@ subjects:
 
 ---
 # ===================================================================
-#  5. DEPLOYMENT
+#  4. DEPLOYMENT
 # ===================================================================
 apiVersion: apps/v1
 kind: Deployment
@@ -178,6 +161,8 @@ spec:
             - configMapRef:
                 name: model-intake-config
             - secretRef:
+                # SealedSecret (model-intake-secrets-sealedsecret.yaml) — the
+                # same MinIO root identity as the scan/result S3 credentials.
                 name: model-intake-secrets
           volumeMounts:
             - name: data
@@ -209,7 +194,7 @@ spec:
 
 ---
 # ===================================================================
-#  6. SERVICE
+#  5. SERVICE
 #  Internal DNS name used by the wait-for-approval Task (approval-api-url
 #  param defaults to http://model-intake.sandbox.svc.cluster.local:8080).
 # ===================================================================
@@ -231,7 +216,7 @@ spec:
 
 ---
 # ===================================================================
-#  7. ROUTE
+#  6. ROUTE
 #  Public URL for humans to submit models and approve/reject plans.
 # ===================================================================
 apiVersion: route.openshift.io/v1

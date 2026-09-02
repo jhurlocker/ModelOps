@@ -25,6 +25,7 @@ gitops/
 │   ├── rbac.yaml
 │   ├── results-ui.yaml
 │   ├── runtime-config.yaml
+│   ├── sealed-secrets.yaml
 │   └── zot.yaml
 ├── components/                # Kustomize-based resource definitions
 │   ├── argocd-config/         # Patches the operator-owned ArgoCD CR (UI RBAC + controller memory)
@@ -42,8 +43,11 @@ gitops/
 │   ├── pipelines/             # Tekton tasks and pipelines
 │   ├── rbac/                  # Cluster roles and bindings
 │   ├── results-ui/            # Results UI for scan/benchmark results
-│   ├── runtime-config/        # PlatformConfig, LifecycleProfile, IntakeProviderConfig, sandbox secrets
-│   └── zot/                   # Zot OCI container image registry (in-cluster, built-in UI)
+│   ├── runtime-config/        # PlatformConfig, LifecycleProfile, IntakeProviderConfig, SealedSecrets + EvalHub endpoint
+│   ├── sealed-secrets/        # Sealed Secrets controller (vendored, pinned v0.39.1)
+│   └── zot/                   # Zot OCI container image registry (in-cluster, no external UI)
+├── scripts/
+│   └── seal-secrets.py        # Per-cluster credential generation + kubeseal script
 └── README.md
 ```
 
@@ -137,7 +141,7 @@ oc apply -f gitops/appproject.yaml
 oc apply -f gitops/root-app.yaml
 ```
 
-ArgoCD will automatically sync all 17 child applications:
+ArgoCD will automatically sync all 18 child applications:
 1. ArgoCD Config — patches the operator-owned `openshift-gitops` ArgoCD CR (UI RBAC + controller memory), so cluster-admins can view Applications in the UI and the controller does not OOMKill during bootstrap
 2. MaaS Prereqs — cert-manager + RHCL + LeaderWorkerSet operator subscriptions
 3. MaaS Kuadrant — Kuadrant CR (triggers Authorino + Limitador creation) + Authorino CR (TLS listener enabled)
@@ -154,7 +158,8 @@ ArgoCD will automatically sync all 17 child applications:
 14. Pipelines — Tekton tasks and pipelines (sandbox and promotion)
 15. RBAC — cluster roles and bindings for pipeline SA and namespace provisioner
 16. Results UI — frontend UI for viewing scan and benchmark results
-17. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, and sandbox secrets
+17. Runtime Config — PlatformConfig, ModelLifecycleProfile, IntakeProviderConfig, SealedSecrets, and EvalHub endpoint Secret
+18. Sealed Secrets — the Sealed Secrets controller (wave -1), which decrypts every committed SealedSecret into its target Secret
 
 ### Application dependency chain and sync ordering
 
@@ -167,7 +172,7 @@ no wave-N Application syncs until all wave-(N-1) Applications are Synced.
 
 | Wave | Applications | What it does / depends on |
 |------|--------------|---------------------------|
-| -1 | argocd-config, maas-prereqs | argocd-config patches the operator-owned ArgoCD CR (RBAC + controller memory); maas-prereqs installs RHCL + LWS operators (Subscriptions) |
+| -1 | argocd-config, maas-prereqs, sealed-secrets | argocd-config patches the operator-owned ArgoCD CR (RBAC + controller memory); maas-prereqs installs RHCL + LWS operators (Subscriptions); sealed-secrets installs the controller that decrypts every committed SealedSecret, so it MUST be up before any wave-0+ app syncs |
 | 0 | maas-kuadrant | Creates Kuadrant CR — depends on RHCL operator CRDs from wave -1 |
 | 1 | maas | Patches DataScienceCluster → triggers async RHOAI reconciliation for MaaS CRDs |
 | 2 | maas-subscriptions | Creates MaaSSubscription CRs — depends on CRDs registered by wave 1 |
@@ -203,20 +208,17 @@ or namespace propagation) are handled automatically instead of failing fast.
 #### Zot registry access
 
 Zot is an OCI container image registry deployed in the `modelops-zot` namespace
-(PVC-backed storage, Deployment, Service, Route — same shape as MinIO). Its
-built-in UI is enabled via `extensions.ui.enable: true` in the ConfigMap and
-exposed through the `zot-ui` Route for browser access. Zot serves the UI and the
-registry API on the same port, so the API is reachable behind that Route. To
-close the resulting external push path, Zot has htpasswd basic auth enabled (the
-credential path is referenced in the ConfigMap; the credential itself lives in
-the `zot-htpasswd` Secret). Access control is scoped so anonymous callers may
-only `read` (pull), while `create`/`update`/`delete` (push) requires htpasswd
-credentials — so in-cluster, credential-less pulls keep working while external
-unauthenticated pushes are rejected. In-cluster consumers (Tekton pipeline
-tasks, future controllers) still target the internal Service DNS —
-`zot.modelops-zot.svc.cluster.local:5000` — not the Route. The `zot` Application
-carries the same generous retry policy as `maas-subscriptions` since it is
-operator-adjacent infrastructure.
+(PVC-backed storage, Deployment, Service). Its built-in UI is enabled via
+`extensions.ui.enable: true` in the ConfigMap, but there is **no external Route**
+to it: Zot serves the UI and the registry API on the same port (5000), so a Route
+would expose the push/pull API externally too — and nothing needs Zot reachable
+from outside the cluster. Zot still enforces htpasswd basic auth (the credential
+path is referenced in the ConfigMap; the credential itself is the `zot-htpasswd`
+SealedSecret, mounted as `/etc/zot/htpasswd`) because anonymous pull is left open
+by design. In-cluster consumers (Tekton pipeline tasks, future controllers)
+target the internal Service DNS — `zot.modelops-zot.svc.cluster.local:5000` — never
+a Route. The `zot` Application carries the same generous retry policy as
+`maas-subscriptions` since it is operator-adjacent infrastructure.
 
 #### maas-prereqs dependency chain (wave -1)
 
@@ -622,22 +624,73 @@ curl -sk -o /dev/null -w "%{http_code}\n" https://rh-ai.apps.<cluster-domain>/  
 > cluster and introduce the AI Gateway silently. Re-check gateway memory and the
 > dashboard route after any RHOAI minor upgrade.
 
-### Step 3: Platform configuration (automatic)
+### Step 3: Seal platform credentials (Sealed Secrets) — required per cluster
 
-No manual step is needed. The **Runtime Config** Application (application #13 above)
+All platform credentials are committed as **SealedSecrets**, encrypted with the
+*target cluster's* controller public key. The committed SealedSecrets therefore
+decrypt only on the specific cluster they were sealed for; a **new cluster must
+generate fresh random values and re-seal them against its own controller** before
+the components that consume them (MinIO, Zot, the runtime-config S3 credentials,
+the UI prefill defaults, MySQL, MaaS) can sync successfully. This is a real,
+required first-class bootstrap step — not an afterthought.
+
+The Sealed Secrets controller is installed automatically by the `sealed-secrets`
+Application (sync-wave -1, ahead of everything else). Verify it is up, install
+the pinned `kubeseal` client, run the repository's sealing script, commit, and
+then apply the root app:
+
+```bash
+# 1. Controller up (installed at wave -1 by the root app)
+oc wait --for=condition=Available deployment/sealed-secrets-controller -n kube-system --timeout=300s
+
+# 2. kubeseal client, pinned 0.39.1
+KUBESEAL_VERSION=0.39.1
+curl -OL "https://github.com/bitnami-labs/sealed-secrets/releases/download/v${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz"
+tar xzf "kubeseal-${KUBESEAL_VERSION}-linux-amd64.tar.gz" kubeseal
+sudo install -m 755 kubeseal /usr/local/bin/kubeseal
+
+# 3. Generate genuinely random values and re-seal everything for THIS cluster.
+#    Requires htpasswd (apache2-utils) and openssl. Writes the SealedSecrets
+#    back into gitops/components/ (no credential value is ever written to disk).
+python3 gitops/scripts/seal-secrets.py
+
+# 4. Commit the regenerated SealedSecrets and push, then apply the root app.
+oc apply -f gitops/appproject.yaml
+oc apply -f gitops/root-app.yaml
+```
+
+> **Why per cluster, and why scripted:** a SealedSecret is one-way encrypted
+> with a single cluster's private key; it cannot be decrypted by another cluster
+> (or even the same cluster recreated from scratch, which generates a new key).
+> `seal-secrets.py` is the single place that knows the identity-group coupling
+> that MUST be preserved when rotating (MinIO root user/password is one value
+> shared by `minio-credentials` + the scan/result S3 + results-ui + intake-UI
+> credentials; the `zotadmin` password is bcrypt-hashed in `zot-htpasswd` and
+> carried plaintext in `zot-push-credentials`; the MaaS DB password appears in
+> both `maas-postgres-credentials` and `maas-db-config`). Rotate each group
+> together, never one half of it.
+
+> **These committed SealedSecrets are the sandbox cluster's.** They are safe to
+> commit (encrypted, unrecoverable without the sandbox controller's private key),
+> but they are NOT portable to another cluster — run step 3 for every new
+> deployment.
+
+### Step 4: Platform configuration (automatic)
+
+No manual step is needed. The **Runtime Config** Application (application #17 above)
 is already synced automatically by the root Application and deploys the actual live
 platform configuration from `gitops/components/runtime-config/`:
 
 - `PlatformConfig` (model registry, S3 buckets, GPU advisor, EvalHub, benchmark defaults)
 - `ModelLifecycleProfile` (declared stage sequence: capacity → sandbox → promotion)
 - `IntakeProviderConfig` (Tekton pipeline names, timeout/workspace defaults)
-- Sandbox secrets (scan/result S3 credentials, EvalHub endpoint)
+- SealedSecrets (scan/result S3 credentials, Zot push credential) and the EvalHub endpoint Secret
 
 The sample files under `operator/config/samples/` are for **local development and
 reference only** — they are not the deployed configuration and must not be applied
 directly to any cluster managed by GitOps.
 
-### Step 4: Check status
+### Step 5: Check status
 
 ```bash
 # ArgoCD UI
@@ -735,37 +788,50 @@ When deploying to a fresh cluster, follow this order after prerequisites
    oc apply -f gitops/root-app.yaml
    ```
 
-5. **Wait for wave -1** and **wave 0** to complete:
+5. **Wait for wave -1** (sealed-secrets controller up), then **seal credentials**
+   — the committed SealedSecrets decrypt only on the sandbox cluster they were
+   generated for. On a fresh cluster you MUST regenerate random values and
+   re-seal against *this* cluster's controller before any consuming app syncs:
+   ```bash
+   oc wait --for=jsonpath='{.status.sync.status}'=Synced application/sealed-secrets -n openshift-gitops --timeout=600s
+   oc wait --for=condition=Available deployment/sealed-secrets-controller -n kube-system --timeout=300s
+   # Requires kubeseal 0.39.x + htpasswd + openssl; see "Step 3: Seal platform
+   # credentials" for the full procedure. Rewrites gitops/components/*-sealedsecret.yaml.
+   python3 gitops/scripts/seal-secrets.py
+   # commit + push the regenerated SealedSecrets, then let the wave-0+ apps sync.
+   ```
+
+6. **Wait for wave 0** to complete:
    ```bash
    oc wait --for=jsonpath='{.status.sync.status}'=Synced application/maas-prereqs -n openshift-gitops --timeout=600s
    oc wait --for=jsonpath='{.status.sync.status}'=Synced application/maas-kuadrant -n openshift-gitops --timeout=600s
    oc wait --for=condition=Ready kuadrant/kuadrant -n kuadrant-system --timeout=300s
    ```
 
-6. **Manual: Authorino TLS** (Step 2a) — service annotation, CR patch, env vars,
+7. **Manual: Authorino TLS** (Step 2a) — service annotation, CR patch, env vars,
    Gateway TLS bootstrap annotation. See Step 2a in Quick Start for commands.
 
-7. **Manual: Gateway namespace label** (Step 2d):
+8. **Manual: Gateway namespace label** (Step 2d):
    ```bash
    oc label namespace redhat-ods-applications maas.opendatahub.io/gateway-access=true --overwrite
    ```
 
-8. **Manual: Restart model controllers** (Step 2b):
+9. **Manual: Restart model controllers** (Step 2b):
    ```bash
    oc delete pod -n redhat-ods-applications -l app=odh-model-controller
    oc delete pod -n redhat-ods-applications -l control-plane=kserve-controller-manager
    ```
 
-9. **Verify** (Step 2c):
-   ```bash
-   # Tenant Degraded condition should have cleared "no Authorino instances found"
-   oc get tenant default-tenant -n models-as-a-service -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}'
-   # Gateway health
-   curl -sk "https://maas.${CLUSTER_DOMAIN}/maas-api/health"
-   # Expected: {"status":"healthy"}
-   ```
+10. **Verify** (Step 2c):
+    ```bash
+    # Tenant Degraded condition should have cleared "no Authorino instances found"
+    oc get tenant default-tenant -n models-as-a-service -o jsonpath='{.status.conditions[?(@.type=="Degraded")].message}'
+    # Gateway health
+    curl -sk "https://maas.${CLUSTER_DOMAIN}/maas-api/health"
+    # Expected: {"status":"healthy"}
+    ```
 
-10. **Verify all apps synced**:
+11. **Verify all apps synced**:
     ```bash
     oc get applications -n openshift-gitops
     ```
@@ -774,4 +840,11 @@ When deploying to a fresh cluster, follow this order after prerequisites
 
 Edit files in `gitops/components/` and push to the repo. ArgoCD automatically detects changes and syncs (when `automated.selfHeal` is enabled).
 
-To customize MinIO credentials, edit `gitops/components/minio/kustomization.yaml` (the `secretGenerator` section). **For production, use a sealed-secret or external secret provider.** This recommendation exists *because* `gitops/components/runtime-config/secrets.yaml` currently commits MinIO's default credentials (`minioadmin`/`minioadmin`) as plaintext Secrets — acceptable only for a disposable sandbox cluster with an in-cluster MinIO instance, not a pattern to follow beyond that. See `docs/REFACTOR_PLAN.md`'s backlog for the tracked item to introduce a real secrets-management pattern before this project leaves sandbox use.
+To rotate MinIO (or any other) credentials, run `gitops/scripts/seal-secrets.py`
+against the target cluster (see Step 3). Do **not** hand-edit a `secretGenerator`
+or commit a plaintext `Secret` — credentials are committed exclusively as
+SealedSecrets, and `operator/internal/stages/tekton/plaintext_secrets_test.go`
+fails the test suite if a plaintext `Secret` or `secretGenerator` literal is ever
+reintroduced. This replaced the earlier pattern where `runtime-config/secrets.yaml`
+(MinIO) and the MinIO/Zot `secretGenerator` blocks committed real credentials in
+the clear — see `docs/PHASE_LOG.md` for the root cause and the migration.

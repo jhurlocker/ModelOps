@@ -8,4 +8,7 @@ resources:
   - lifecycleprofile.yaml
   - intakeproviderconfig.yaml
   - secrets.yaml
+  - scan-s3-credentials-sealedsecret.yaml
+  - result-s3-credentials-sealedsecret.yaml
+  - zot-push-credentials-sealedsecret.yaml
   - zot-service-ca.yaml

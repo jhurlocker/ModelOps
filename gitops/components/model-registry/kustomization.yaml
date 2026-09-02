@@ -3,7 +3,7 @@ kind: Kustomization
 namespace: rhoai-model-registries
 
 resources:
-  - mysql-secret.yaml
+  - mysql-sealedsecret.yaml
   - mysql-pvc.yaml
   - mysql-deployment.yaml
   - mysql-service.yaml

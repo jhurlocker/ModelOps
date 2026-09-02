@@ -7,10 +7,10 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
-  - route.yaml
-
-secretGenerator:
-  - name: minio-credentials
-    literals:
-      - root-user=minioadmin
-      - root-password=minioadmin
+  # MinIO root credentials are a SealedSecret (encrypted per-cluster), never
+  # plaintext. The deployment references them via secretKeyRef, unchanged.
+  # Sealed with `kubeseal` per the gitops/README.md "Secrets setup" bootstrap
+  # step. There is deliberately NO Route here: nothing needs MinIO reachable
+  # from outside the cluster (in-cluster S3 clients use the internal Service
+  # DNS), so neither the S3 API nor the console is exposed externally.
+  - minio-credentials-sealedsecret.yaml

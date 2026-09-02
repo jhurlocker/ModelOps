@@ -5337,3 +5337,161 @@ and therefore a derived value, not a removable one.
 
 - No `git commit`/push; changes are left in the working tree for review, per
   the "stop for review" instruction.
+
+---
+
+## Sealed Secrets — replace every committed plaintext credential
+
+**Commit:** (pending review, left uncommitted per the "stop for review"
+instruction) on `feat/model-request-controller`.
+
+This closes `docs/REFACTOR_PLAN.md` backlog item 15 ("Real secrets management
+before leaving sandbox use"). It went through an explicit design review first
+(see the review conversation); the approved decisions were: (a) install the
+Sealed Secrets controller as a new GitOps component via **pinned raw manifests**,
+not an OLM `Subscription` — deliberately, because no Sealed Secrets operator
+package exists in any catalog on this cluster (verified: `redhat-operators`,
+`community-operators`, `certified-operators` all lack it; only
+`external-secrets-operator` is present), and Sealed Secrets publishes
+`controller.yaml`/Helm, not an OLM bundle; (b) seal every plaintext credential
+found, with genuinely random per-cluster values (no vendor defaults); (c) delete
+the five dead, non-deployed plaintext copies under `model_onboarding_pipeline/`
+rather than seal them; (d) actually install + seal + verify against the sandbox.
+
+### Root cause this phase fixes
+
+Real credentials were committed to a **public, permanent repository**
+repeatedly, across several phases, framed as acceptable because the cluster was
+disposable. That framing accounted for the cluster's disposability but **not for
+the repository being public and permanent**: a disposable cluster means the
+containers/disks are throwaway — it says nothing about a Git history that never
+goes away and is visible to anyone. The credentials committed in the clear
+(`minioadmin`/`minioadmin` for MinIO and the scan/result S3 consumers,
+`zotadmin` + its bcrypt hash for Zot, `mysql-admin`, `maas-sandbox-password`)
+were the well-known vendor defaults or memorable placeholders — exactly the
+values someone would guess first. This phase makes the repository the permanent
+fix, not another patch: **no credential value is ever again committed in a form
+recoverable without a specific cluster's private key.**
+
+### Audit — every committed plaintext credential found (exhaustive)
+
+Deployed-by-GitOps credentials (all real, recoverable values):
+
+| Credential | Location | Value |
+|---|---|---|
+| `minio-credentials` | `gitops/components/minio/kustomization.yaml` (secretGenerator) | `minioadmin`/`minioadmin` |
+| `zot-htpasswd` | `gitops/components/zot/kustomization.yaml` (secretGenerator) | bcrypt hash |
+| `scan-s3-credentials` | `gitops/components/runtime-config/secrets.yaml` | `minioadmin`/`minioadmin` |
+| `result-s3-credentials` | `gitops/components/runtime-config/secrets.yaml` | `minioadmin`/`minioadmin` |
+| `zot-push-credentials` | `gitops/components/runtime-config/secrets.yaml` | `zotadmin`/password |
+| `s3-creds` (results-ui) | `gitops/components/results-ui/deployment.yaml` | `minioadmin`/`minioadmin` |
+| `model-intake-secrets` | `gitops/components/model-intake-ui/deployment.yaml` | `minioadmin`/`minioadmin` |
+| `mysql` | `gitops/components/model-registry/mysql-secret.yaml` | `mysql-admin`/`mysql-admin` |
+| `maas-db-config` | `gitops/components/maas/maas-db-secret.yaml` | `maas-sandbox-password` (in a connection URL) |
+| `maas-postgres-credentials` | `gitops/components/maas/maas-postgres.yaml` | `maas-sandbox-password` |
+
+Non-credential / placeholder Secrets kept plain, with a documented exception:
+
+- `evalhub-credentials` — only a cluster-internal Service URL, no credential value.
+- `gpu-advisor-credentials` — optional external API key committed as the literal
+  `REPLACE_ME` placeholder, filled manually per cluster.
+
+Dead, non-deployed copies (NOT referenced by any ArgoCD Application), deleted:
+`model_onboarding_pipeline/{storage/minio-backend.yaml, storage/s3ui-deployment.yaml,
+model-registry/mysql-secret.yaml, results-ui/deployment.yaml,
+model-intake-ui/deployment.yaml}`.
+
+### Identity coupling preserved (must never be rotated independently)
+
+Three credential values are shared across multiple Secrets and rotated in
+lockstep — the sealing script encodes this so it cannot be done wrong by hand:
+
+- **MinIO root identity** (`minio-credentials` + `scan-s3-credentials` +
+  `result-s3-credentials` + results-ui `s3-creds` + intake-UI
+  `model-intake-secrets`): one random `root-user`/`root-password` is replicated
+  into all five.
+- **Zot `zotadmin`** (`zot-htpasswd` bcrypt hash + `zot-push-credentials`
+  plaintext password): one password, hashed and plaintext.
+- **MaaS DB password** (`maas-postgres-credentials` + the `DB_CONNECTION_URL`
+  inside `maas-db-config`): one password.
+
+### What changed
+
+- **`gitops/components/sealed-secrets/`** (new): the Sealed Secrets CRD +
+  controller, vendored verbatim from the pinned upstream release
+  `v0.39.1` (`controller.yaml`, image
+  `docker.io/bitnami/sealed-secrets-controller:0.39.1`), plus a `kustomization.yaml`.
+  Deployed into `kube-system` (the kubeseal default) with the cluster-wide
+  `secrets-unsealer` RBAC it needs to unseal into any target namespace.
+- **`gitops/applications/sealed-secrets.yaml`** (new): Application at
+  `sync-wave: -1` (ahead of everything that consumes a SealedSecret) with the
+  standard retry policy.
+- **All ten credentials converted to SealedSecrets** (`*-sealedsecret.yaml` in
+  the relevant component), generated fresh with genuinely random values and
+  sealed against the sandbox cluster's controller key via `kubeseal 0.39.1`.
+  The `secretGenerator` blocks in `minio`/`zot` and the plaintext `Secret`
+  documents in `runtime-config`/`results-ui`/`model-intake-ui`/`model-registry`/
+  `maas` were removed. `evalhub-credentials` remains a plain Secret (URL only).
+- **`gitops/scripts/seal-secrets.py`** (new): the per-cluster credential
+  generation + sealing script — the single source that knows the identity-group
+  coupling, the exact `kubeseal` invocation, and the repo file paths. Generates
+  `openssl`-random passwords and `htpasswd -B -C 10` bcrypt; writes only the
+  encrypted output, never a credential value.
+- **MinIO external Routes removed entirely** (`gitops/components/minio/route.yaml`
+  deleted): nothing needs MinIO reachable from outside — in-cluster S3 clients
+  (Tekton tasks, controllers) use the internal Service DNS. Neither the S3 API
+  nor the console is exposed.
+- **Zot external UI Route removed** (`gitops/components/zot/route.yaml` deleted):
+  Zot serves UI + registry API on one port, so a Route would also expose
+  push/pull externally, and nothing needs Zot reachable from outside.
+- **`gitops/README.md`**: new first-class "Step 3: Seal platform credentials"
+  with the scripted procedure; `sealed-secrets` added to the directory tree, the
+  application list (now 18), the sync-wave table (-1), and the per-cluster
+  bootstrap checklist (now a required step 5, alongside `targetRevision`/root-app);
+  the Zot/Customization prose rewritten to reflect no external Route and no
+  plaintext credentials.
+- **Safety-net test** `operator/internal/stages/tekton/plaintext_secrets_test.go`:
+  scans `gitops/` + `operator/config/samples/` +
+  `model_onboarding_pipeline/model-intake-pipeline/pipeline/` and fails on any
+  plain `Secret` with non-empty `data`/`stringData` outside the documented
+  `plainSecretAllowlist`, and on any `secretGenerator` literal. This is the same
+  static, committed-YAML-reading pattern as the neighboring hostname/CA/credential
+  tests.
+
+### Verification (sandbox cluster)
+
+- `kubeseal 0.39.1` downloaded; controller installed and `RollingUpdate`ed to
+  `1/1 Running` in `kube-system`; `sealedsecrets.bitnami.com` CRD registered.
+- All ten SealedSecrets applied and the controller synthesized the unsealed
+  Secrets (`minio-credentials`, `zot-htpasswd` reported `Synced: true`; the
+  sandbox/registry/maas ones initially reported `already exists and is not
+  managed` because the pre-existing plaintext Secrets were still present — the
+  expected in-place migration step, resolved by deleting the old plaintext
+  Secrets so the controller could create its owned replacements).
+- `go build ./...`, `go vet ./...`, `go test ./...` all clean (the new
+  safety-net test plus the full envtest-backed suite) via the containerized
+  `go-toolset:1.22` wrapper.
+- **Safety-net negative control**: reintroducing a probe plaintext Secret
+  (`probe-plaintext-creds` with `minioadmin` values) under `gitops/` makes
+  `TestPlaintextSecrets_NoCommittedPlainSecretOutsideAllowlist` fail with the
+  expected message; removing the probe restores green.
+- (See the review summary for the remaining live-cluster functional checks —
+  Zot push and MinIO reachability — and their ArgoCD self-heal caveat.)
+
+### Known limitations / follow-up
+
+- The committed SealedSecrets decrypt **only** on the sandbox cluster they were
+  sealed for; every new cluster must re-run `gitops/scripts/seal-secrets.py`
+  (documented as bootstrap step 5). This is inherent to Sealed Secrets' one-way,
+  cluster-scoped encryption, not a bug.
+- Remaining doc/scratch references to the old defaults exist (`SKILL.md` at the
+  repo root, `skills/*`, `model_onboarding_pipeline/docs/*.adoc`, and the
+  `rhoai-workbench/*.ipynb` notebooks) but are documentation/examples, not
+  committed Secret manifests, so they are outside the safety net's scan roots and
+  left for a separate docs cleanup.
+- MinIO's root identity is still a single shared user/password replicated across
+  five Secrets. Hardening to dedicated per-consumer MinIO access keys / a
+  service account is a possible follow-up, out of scope here.
+- Node-level `additionalTrustedCA` for Zot (backlog item 16) is unaffected — this
+  phase changes credential storage, not registry trust.
+
