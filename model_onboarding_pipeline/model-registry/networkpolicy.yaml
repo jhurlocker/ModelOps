@@ -1,0 +1,20 @@
+# Allow pipeline pods in vllm/vllm-staging to reach the Model Registry REST
+# server (v1alpha3 on :8080). Without this, in-cluster clients time out and
+# registry writes are skipped.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: modelops-registry-http-pipeline
+  namespace: rhoai-model-registries
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 3306

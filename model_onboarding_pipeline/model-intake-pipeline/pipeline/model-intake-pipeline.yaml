@@ -235,13 +235,17 @@ spec:
       description: Optional manual GPU-count override for deploy-model
       name: gpu-count-override
       type: string
-    - default: "gpu-profile"
+    - default: "gpu"
       description: Name of a pre-registered OpenShift AI HardwareProfile CR providing GPU sizing
       name: hardware-profile-name
       type: string
     - default: "redhat-ods-applications"
       description: Namespace of the HardwareProfile CR named above.
       name: hardware-profile-namespace
+      type: string
+    - default: "registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:ba060ec145e1b7ac3a3b25b89fc75f7d146746156990ff5858235eaa9d158e32"
+      description: Container image for the vLLM ServingRuntime (sandbox + staging deploys)
+      name: serving-runtime-image
       type: string
     # Gate 3 (phase 1) - Security scan (garak via EvalHub)
     - default: "block"
@@ -269,17 +273,29 @@ spec:
       description: GuideLLM benchmark profile (constant, sweep, throughput)
       name: guidellm-profile
       type: string
-    - default: "4.0"
+    - default: "4"
       description: GuideLLM request rate (requests per second)
       name: guidellm-rate
       type: string
-    - default: "15"
+    - default: "60"
       description: GuideLLM max benchmark duration in seconds
       name: guidellm-max-seconds
       type: string
-    - default: "2"
+    - default: "40"
       description: GuideLLM max benchmark requests
       name: guidellm-max-requests
+      type: string
+    - default: "256"
+      description: GuideLLM synthetic prompt size in tokens
+      name: guidellm-prompt-tokens
+      type: string
+    - default: "128"
+      description: GuideLLM synthetic output size in tokens
+      name: guidellm-output-tokens
+      type: string
+    - default: "2700"
+      description: Seconds to wait for the EvalHub GuideLLM job to finish
+      name: guidellm-poll-timeout-seconds
       type: string
     - default: "False"
       description: Use custom benchmark data for GuideLLM
@@ -294,10 +310,12 @@ spec:
       description: S3 endpoint for benchmark/eval result uploads
       name: s3-api-endpoint
       type: string
-    - name: s3-access-key-id
+    - default: "minio"
+      name: s3-access-key-id
       type: string
       description: S3 access key ID (benchmark/eval uploads)
-    - name: s3-secret-access-key
+    - default: "minio123"
+      name: s3-secret-access-key
       type: string
       description: S3 secret access key (benchmark/eval uploads)
     # lm-eval
@@ -324,7 +342,7 @@ spec:
       description: Number of GPUs for the MaaS LLMInferenceService
       name: maas-gpu-count
       type: string
-    - default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+    - default: "registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:ba060ec145e1b7ac3a3b25b89fc75f7d146746156990ff5858235eaa9d158e32"
       description: Runtime container image for the MaaS LLMInferenceService
       name: maas-runtime-image
       type: string
@@ -473,6 +491,8 @@ spec:
           value: $(params.hardware-profile-name)
         - name: hardwareProfileNamespace
           value: $(params.hardware-profile-namespace)
+        - name: servingRuntimeImage
+          value: $(params.serving-runtime-image)
       runAfter:
         - apply-gpu-sharing-sandbox
       taskRef:
@@ -657,6 +677,8 @@ spec:
           value: $(params.hardware-profile-name)
         - name: hardwareProfileNamespace
           value: $(params.hardware-profile-namespace)
+        - name: servingRuntimeImage
+          value: $(params.serving-runtime-image)
       runAfter:
         - apply-gpu-sharing-staging
       taskRef:
@@ -706,6 +728,13 @@ spec:
           value: $(params.guidellm-max-seconds)
         - name: guidellm-max-requests
           value: $(params.guidellm-max-requests)
+        - name: guidellm-prompt-tokens
+          value: $(params.guidellm-prompt-tokens)
+        - name: guidellm-output-tokens
+          value: $(params.guidellm-output-tokens)
+        - name: poll-timeout-seconds
+          value: $(params.guidellm-poll-timeout-seconds)
+      timeout: "1h30m0s"
       runAfter:
         - deploy-model-staging
       taskRef:

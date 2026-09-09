@@ -32,7 +32,7 @@ spec:
       description: Number of NVIDIA GPUs to request.
     - name: runtime-image
       type: string
-      default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0"
+      default: "registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:ba060ec145e1b7ac3a3b25b89fc75f7d146746156990ff5858235eaa9d158e32"
       description: Runtime container image for vLLM inference.
     - name: gpu-memory-utilization
       type: string

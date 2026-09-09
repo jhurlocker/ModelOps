@@ -1,0 +1,119 @@
+# FILE: evalhub-rbac.yaml
+# EvalHub authorizes job submit/poll via SubjectAccessReview on the virtual
+# resource trustyai.opendatahub.io/evaluations. The pipeline SA must be able
+# to create (submit) and get (poll) evaluations in tenant namespaces.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: modelops-evalhub-evaluations
+rules:
+  - apiGroups: ["trustyai.opendatahub.io"]
+    resources: ["evaluations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # EvalHub SAR may omit the API group in the authorization check.
+  - apiGroups: [""]
+    resources: ["evaluations"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: modelops-evalhub-evaluations
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: ClusterRole
+  name: modelops-evalhub-evaluations
+  apiGroup: rbac.authorization.k8s.io
+---
+# Namespaced bindings in case EvalHub scopes the SAR to X-Tenant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-evaluations
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: ClusterRole
+  name: modelops-evalhub-evaluations
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-evaluations
+  namespace: vllm-staging
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: ClusterRole
+  name: modelops-evalhub-evaluations
+  apiGroup: rbac.authorization.k8s.io
+---
+# Two EvalHub instances (redhat-ods-applications + evaldemo) both reconcile
+# tenant namespaces and overwrite operator-managed RoleBindings. Keep
+# ModelOps-owned bindings so the dashboard EvalHub can create Jobs/ConfigMaps
+# in sandbox and staging.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-job-config
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: evalhub-service
+    namespace: redhat-ods-applications
+roleRef:
+  kind: ClusterRole
+  name: trustyai-service-operator-evalhub-job-config
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-jobs-writer
+  namespace: vllm
+subjects:
+  - kind: ServiceAccount
+    name: evalhub-service
+    namespace: redhat-ods-applications
+roleRef:
+  kind: ClusterRole
+  name: trustyai-service-operator-evalhub-jobs-writer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-job-config
+  namespace: vllm-staging
+subjects:
+  - kind: ServiceAccount
+    name: evalhub-service
+    namespace: redhat-ods-applications
+roleRef:
+  kind: ClusterRole
+  name: trustyai-service-operator-evalhub-job-config
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-evalhub-jobs-writer
+  namespace: vllm-staging
+subjects:
+  - kind: ServiceAccount
+    name: evalhub-service
+    namespace: redhat-ods-applications
+roleRef:
+  kind: ClusterRole
+  name: trustyai-service-operator-evalhub-jobs-writer
+  apiGroup: rbac.authorization.k8s.io

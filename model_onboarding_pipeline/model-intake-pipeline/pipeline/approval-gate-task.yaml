@@ -161,7 +161,7 @@ spec:
 
         try:
             resp = requests.post(
-                "{}/api/plans".format(APPROVAL_API_URL),
+                "{}/approvals/api/plans".format(APPROVAL_API_URL),
                 json=submit_payload,
                 timeout=30,
             )
@@ -173,7 +173,7 @@ spec:
             sys.exit(1)
 
         print("Plan submitted. Waiting for a human to approve/reject at:")
-        print("  {}/plans/{}".format(APPROVAL_API_URL, PLAN_ID))
+        print("  {}/approvals/{}".format(APPROVAL_API_URL, PLAN_ID))
         print("Polling every {}s, timeout {}s.".format(POLL_INTERVAL, TIMEOUT_SECONDS))
 
         deadline = time.time() + TIMEOUT_SECONDS
@@ -182,7 +182,7 @@ spec:
         while time.time() < deadline:
             try:
                 r = requests.get(
-                    "{}/api/plans/{}".format(APPROVAL_API_URL, PLAN_ID), timeout=15
+                    "{}/approvals/api/plans/{}".format(APPROVAL_API_URL, PLAN_ID), timeout=15
                 )
                 if r.status_code == 200:
                     data = r.json()

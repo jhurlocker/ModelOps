@@ -14,12 +14,16 @@ A Flask web app backed by SQLite (PVC-persisted) that provides:
 
 ## Deploy
 
-The deployment YAML references `quay.io/jhurlocker/model-intake-ui:latest` — no build step needed.
+Build the UI from this repo (required for GPU inventory / Overview telemetry) and apply the manifests:
 
 ```bash
+./deploy-all.sh --skip-maas   # includes the intake UI build
+# or, intake UI only:
 oc apply -n vllm -f model_onboarding_pipeline/model-intake-ui/deployment.yaml
 oc wait -n vllm --for=condition=Ready pod -l app=model-intake --timeout=120s
 ```
+
+`deployment.yaml` points at the in-cluster ImageStream `vllm/model-intake-ui:latest`. `deploy-all.sh` creates that ImageStream and runs a binary Docker build from `model_onboarding_pipeline/model-intake-ui/`.
 
 ## Access
 

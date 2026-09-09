@@ -261,7 +261,7 @@ spec:
         set -euo pipefail
         chmod 777 "$(pwd)" 2>/dev/null || true
         chmod 777 compliance-artifact-sandbox 2>/dev/null || true
-        pip install -q boto3 model-registry 2>&1 | grep -v "already satisfied" || true
+        pip install -q boto3 2>&1 | grep -v "already satisfied" || true
 
         TIMESTAMP=$(date +%Y%m%d_%H%M%S)
         export TIMESTAMP
@@ -496,6 +496,10 @@ spec:
         # Tekton task that writes to the OpenShift AI Model Registry. Driven entirely
         # by environment variables so the same code works at every onboarding stage.
         #
+        # Uses the in-cluster REST API at /api/model_registry/v1alpha3 via stdlib
+        # urllib. Unpinned `pip install model-registry` clients currently probe
+        # /api/model_registry/v1, which 404s on this RHOAI registry.
+        #
         #   MR_SERVER          registry REST base, e.g.
         #                      http://modelops-registry.rhoai-model-registries.svc.cluster.local
         #   MR_PORT            registry REST port (default 8080)
@@ -513,21 +517,82 @@ spec:
         # scan steps, not here.
         import json
         import os
-        import subprocess
-        import sys
+        import ssl
         import time
+        import urllib.error
+        import urllib.parse
+        import urllib.request
 
 
         def log(msg):
             print("[model-registry] {}".format(msg), flush=True)
 
 
-        def main():
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "model-registry"], check=True)
-            from model_registry import ModelRegistry
+        def wrap_props(d):
+            out = {}
+            for k, v in d.items():
+                if v is None:
+                    continue
+                out[str(k)] = {"metadataType": "MetadataStringValue", "string_value": str(v)}
+            return out
 
+
+        def unwrap_props(d):
+            out = {}
+            for k, v in (d or {}).items():
+                if isinstance(v, dict):
+                    if v.get("string_value") is not None:
+                        out[k] = v["string_value"]
+                    elif v.get("int_value") is not None:
+                        out[k] = str(v["int_value"])
+                    elif v.get("double_value") is not None:
+                        out[k] = str(v["double_value"])
+                    elif v.get("bool_value") is not None:
+                        out[k] = str(v["bool_value"]).lower()
+                    else:
+                        out[k] = ""
+                elif v is None:
+                    out[k] = ""
+                else:
+                    out[k] = str(v)
+            return out
+
+
+        class RestClient:
+            def __init__(self, server, port):
+                self.base = "{}:{}/api/model_registry/v1alpha3".format(server.rstrip("/"), int(port))
+                self.ctx = ssl._create_unverified_context() if self.base.startswith("https://") else None
+
+            def request(self, method, path, body=None, allow_404=False):
+                url = self.base + path
+                data = None
+                headers = {"Accept": "application/json"}
+                if body is not None:
+                    data = json.dumps(body).encode("utf-8")
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request(url, data=data, method=method, headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=30, context=self.ctx) as resp:
+                        raw = resp.read()
+                        return json.loads(raw.decode("utf-8")) if raw else {}
+                except urllib.error.HTTPError as e:
+                    err_body = e.read().decode("utf-8", "replace")
+                    if allow_404 and e.code == 404:
+                        return None
+                    raise RuntimeError("{} {} -> {} {}".format(method, url, e.code, err_body[:400])) from e
+
+            def find_model(self, name):
+                q = urllib.parse.urlencode({"name": name})
+                return self.request("GET", "/registered_model?{}".format(q), allow_404=True)
+
+            def find_version(self, model_id, version):
+                q = urllib.parse.urlencode({"name": version, "parentResourceId": model_id})
+                return self.request("GET", "/model_version?{}".format(q), allow_404=True)
+
+
+        def main():
             server = os.environ["MR_SERVER"].rstrip("/")
-            port = int(os.environ.get("MR_PORT", "8080"))
+            port = os.environ.get("MR_PORT", "8080")
             author = os.environ.get("MR_AUTHOR", "ModelOps Platform")
             name = os.environ["MODEL_NAME"]
             version = os.environ.get("MODEL_VERSION", "v1")
@@ -542,66 +607,89 @@ spec:
                 log("WARNING: MR_PROPS_JSON not valid JSON ({}); ignoring.".format(e))
                 props = {}
 
-            # Registry custom_properties must be scalar; coerce everything to str.
+            # Registry customProperties must be scalar strings.
             merged = {str(k): ("" if v is None else str(v)) for k, v in props.items()}
             if stage:
                 merged["onboarding-stage"] = stage
             merged["last-updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-            is_secure = server.lower().startswith("https")
             try:
-                client = ModelRegistry(server_address=server, port=port, author=author, is_secure=is_secure)
+                client = RestClient(server, port)
+                client.request("GET", "/registered_models?pageSize=1")
             except Exception as e:
                 log("WARNING: could not connect to model registry at {}:{} ({}). "
                     "Skipping registry update.".format(server, port, e))
                 return
 
             try:
-                existing = {m.name for m in client.get_registered_models()}
+                rm = client.find_model(name)
             except Exception as e:
-                log("WARNING: could not list registered models ({}). Skipping.".format(e))
+                log("WARNING: could not look up registered model '{}' ({}). Skipping.".format(name, e))
                 return
 
-            if name in existing:
-                log("Model '{}' already registered - updating version '{}'.".format(name, version))
-                try:
-                    v = client.get_model_version(name, version)
-                except Exception:
-                    v = None
-                if v is None:
-                    # Model exists but this version doesn't yet; create it.
-                    try:
-                        client.register_model(
-                            name=name, uri=uri, version=version,
-                            model_format_name=fmt, model_format_version="1",
-                            description=description or "Registered by ModelOps pipeline",
-                            metadata=merged,
-                        )
-                        log("Created new version '{}' with {} properties.".format(version, len(merged)))
-                        return
-                    except Exception as e:
-                        log("WARNING: could not create version '{}' ({}).".format(version, e))
-                        return
-                current = dict(v.custom_properties) if v.custom_properties else {}
-                current.update(merged)
-                v.custom_properties = current
-                try:
-                    client.update(v)
-                    log("Updated version '{}' - merged {} properties.".format(version, len(merged)))
-                except Exception as e:
-                    log("WARNING: could not update version '{}' ({}).".format(version, e))
-            else:
+            created_model = False
+            if rm is None:
                 log("Model '{}' not found - registering new entry (version '{}').".format(name, version))
                 try:
-                    client.register_model(
-                        name=name, uri=uri, version=version,
-                        model_format_name=fmt, model_format_version="1",
-                        description=description or "Onboarding via ModelOps pipeline",
-                        metadata=merged,
-                    )
-                    log("Registered '{}' with {} properties.".format(name, len(merged)))
+                    rm = client.request("POST", "/registered_models", {
+                        "name": name,
+                        "description": description or "Onboarding via ModelOps pipeline",
+                    })
+                    created_model = True
                 except Exception as e:
                     log("WARNING: could not register model '{}' ({}).".format(name, e))
+                    return
+            else:
+                log("Model '{}' already registered - updating version '{}'.".format(name, version))
+
+            rm_id = (rm or {}).get("id")
+            if not rm_id:
+                log("WARNING: registered model '{}' has no id; skipping.".format(name))
+                return
+
+            try:
+                ver = client.find_version(rm_id, version)
+            except Exception as e:
+                log("WARNING: could not look up version '{}' ({}). Skipping.".format(version, e))
+                return
+
+            if ver is None:
+                try:
+                    ver = client.request("POST", "/model_versions", {
+                        "name": version,
+                        "registeredModelId": rm_id,
+                        "author": author,
+                        "description": description or "Registered by ModelOps pipeline",
+                        "customProperties": wrap_props(merged),
+                    })
+                except Exception as e:
+                    log("WARNING: could not create version '{}' ({}).".format(version, e))
+                    return
+                try:
+                    client.request("POST", "/model_versions/{}/artifacts".format(ver["id"]), {
+                        "name": name,
+                        "uri": uri,
+                        "modelFormatName": fmt,
+                        "modelFormatVersion": "1",
+                        "artifactType": "model-artifact",
+                    })
+                except Exception as e:
+                    log("WARNING: version created but artifact registration failed ({}).".format(e))
+                if created_model:
+                    log("Registered '{}' with {} properties.".format(name, len(merged)))
+                else:
+                    log("Created new version '{}' with {} properties.".format(version, len(merged)))
+                return
+
+            current = unwrap_props(ver.get("customProperties"))
+            current.update(merged)
+            try:
+                client.request("PATCH", "/model_versions/{}".format(ver["id"]), {
+                    "customProperties": wrap_props(current),
+                })
+                log("Updated version '{}' - merged {} properties.".format(version, len(merged)))
+            except Exception as e:
+                log("WARNING: could not update version '{}' ({}).".format(version, e))
 
 
         if __name__ == "__main__":

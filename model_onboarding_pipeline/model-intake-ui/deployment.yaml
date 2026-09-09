@@ -99,6 +99,61 @@ subjects:
     namespace: vllm
 
 ---
+# Cluster-scoped reads used by Overview, GPU Inventory, and Platform Health.
+# Without these the UI falls back to empty GPU/operator data.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: model-intake-cluster-read
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["modelops.example.io"]
+    resources: ["modelrequests", "capacityplans", "modellifecycleprofiles", "platformconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["tekton.dev"]
+    resources: ["pipelineruns", "taskruns", "pipelines"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: model-intake-cluster-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: model-intake-cluster-read
+subjects:
+  - kind: ServiceAccount
+    name: model-intake
+    namespace: vllm
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: model-intake-monitoring-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: model-intake
+    namespace: vllm
+
+---
 # ===================================================================
 #  5. DEPLOYMENT
 # ===================================================================
@@ -124,7 +179,7 @@ spec:
       serviceAccountName: model-intake
       containers:
         - name: app
-          image: quay.io/jhurlocker/model-intake-ui:latest
+          image: image-registry.openshift-image-registry.svc:5000/vllm/model-intake-ui:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8080

@@ -1,0 +1,24 @@
+# The apply-gpu-sharing task patches InferenceServices in co-resident
+# namespaces (e.g. demo) when enabling time-slicing. cluster-reader is
+# not enough — the pipeline SA also needs patch/update.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: modelops-inferenceservice-patch
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: modelops-inferenceservice-patch
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: vllm
+roleRef:
+  kind: ClusterRole
+  name: modelops-inferenceservice-patch
+  apiGroup: rbac.authorization.k8s.io

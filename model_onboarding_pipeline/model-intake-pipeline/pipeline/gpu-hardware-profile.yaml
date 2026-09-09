@@ -1,0 +1,37 @@
+# OpenShift AI HardwareProfile used by deploy-model (vllm-kserve chart 0.7.1).
+# The ODH InferenceService webhook requires this CR to exist; GPU/CPU/memory
+# sizing cannot go through Helm Values.resources (chart nil-pointer bug).
+# Pipeline param hardware-profile-name defaults to this name ("gpu").
+apiVersion: infrastructure.opendatahub.io/v1
+kind: HardwareProfile
+metadata:
+  name: gpu
+  annotations:
+    opendatahub.io/dashboard-feature-visibility: '["model-serving"]'
+    opendatahub.io/disabled: "false"
+    opendatahub.io/display-name: gpu
+spec:
+  identifiers:
+    - defaultCount: 2
+      displayName: CPU
+      identifier: cpu
+      maxCount: 4
+      minCount: 1
+      resourceType: CPU
+    - defaultCount: 4Gi
+      displayName: Memory
+      identifier: memory
+      maxCount: 32Gi
+      minCount: 4Gi
+      resourceType: Memory
+    - defaultCount: 1
+      displayName: gpu
+      identifier: nvidia.com/gpu
+      maxCount: 1
+      minCount: 1
+      resourceType: Accelerator
+  scheduling:
+    type: Node
+    node:
+      nodeSelector: {}
+      tolerations: []

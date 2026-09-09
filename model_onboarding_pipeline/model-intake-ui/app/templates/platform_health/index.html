@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>Platform Health</h1>
+    <p>Monitor operator state, lifecycle resources, and pipeline executions.</p>
+</div>
+
+<div class="tabs">
+    <button type="button" class="tab active" data-tab="operators">Operators</button>
+    <button type="button" class="tab" data-tab="resources">Lifecycle Resources</button>
+    <button type="button" class="tab" data-tab="pipelines">Pipeline Executions</button>
+</div>
+
+<!-- Operators Tab -->
+<div class="tab-content" id="tab-operators" style="display:none">
+    <div class="card">
+        <div class="card-body">
+            {% if operators %}
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Component</th>
+                            <th>Namespace</th>
+                            <th>Available</th>
+                            <th>State</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for op in operators %}
+                        <tr>
+                            <td><strong>{{ op.component }}</strong></td>
+                            <td>{{ op.namespace }}</td>
+                            <td>{{ op.available }}</td>
+                            <td>
+                                <span class="badge {{ 'badge-success' if op.state == 'Healthy' else 'badge-danger' if op.state == 'Degraded' else 'badge-warning' }}">
+                                    {{ op.state }}
+                                </span>
+                            </td>
+                            <td>{{ op.message }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <h3>Unable to fetch operator status</h3>
+                <p>Check that the service account has permission to list deployments.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Lifecycle Resources Tab -->
+<div class="tab-content" id="tab-resources" style="display:none">
+    <div class="card">
+        <div class="card-header">
+            <span>Lifecycle Resources</span>
+            <div class="filter-bar" style="margin:0">
+                <select><option>All Kinds</option><option>ModelRequest</option><option>CapacityPlan</option><option>ModelLifecycleProfile</option><option>PlatformConfig</option></select>
+                <select><option>All Namespaces</option></select>
+                <select><option>All Phases</option></select>
+                <select><option>All Ready</option><option>Ready</option><option>Not Ready</option></select>
+            </div>
+        </div>
+        <div class="card-body">
+            {% if resources %}
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Kind</th>
+                            <th>Name</th>
+                            <th>Namespace</th>
+                            <th>Phase</th>
+                            <th>Ready</th>
+                            <th>Age</th>
+                            <th>Owner</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in resources %}
+                        <tr>
+                            <td><strong>{{ r.kind }}</strong></td>
+                            <td>{{ r.name }}</td>
+                            <td>{{ r.namespace }}</td>
+                            <td>
+                                <span class="badge {{ 'badge-success' if r.phase in ('Completed','Succeeded','Valid','Accepted') else 'badge-danger' if r.phase == 'Failed' else 'badge-warning' }}">
+                                    {{ r.phase }}
+                                </span>
+                            </td>
+                            <td>{{ 'Yes' if r.ready == 'True' else 'No' }}</td>
+                            <td>{{ r.age }}</td>
+                            <td>{{ r.owner or '—' }}</td>
+                            <td>
+                                <span class="expand-toggle" data-target="#resource-detail-{{ loop.index }}">Expand</span>
+                            </td>
+                        </tr>
+                        <tr id="resource-detail-{{ loop.index }}" class="gpu-expand">
+                            <td colspan="8">
+                                <h4 style="font-size:14px;margin-bottom:8px">{{ r.kind }}: {{ r.name }}</h4>
+                                <pre style="font-size:13px;white-space:pre-wrap;background:var(--color-input-bg);padding:12px;border-radius:var(--radius)">
+Kind: {{ r.kind }}
+Name: {{ r.name }}
+Namespace: {{ r.namespace }}
+Phase: {{ r.phase }}
+Ready: {{ r.ready }}
+Created: {{ r.age }}
+Owner: {{ r.owner or '—' }}</pre>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <h3>No lifecycle resources found</h3>
+                <p>Create ModelRequests, CapacityPlans, or PlatformConfigs to see them here.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Pipeline Executions Tab -->
+<div class="tab-content" id="tab-pipelines" style="display:none">
+    <div class="card">
+        <div class="card-body">
+            {% if pipelines %}
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>PipelineRun</th>
+                            <th>Status</th>
+                            <th>Duration</th>
+                            <th>Started</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for pr in pipelines %}
+                        <tr>
+                            <td><a href="/requests/{{ pr.name.replace('-sandbox','').replace('-staging','') }}">{{ pr.name }}</a></td>
+                            <td>
+                                <span class="badge {{ 'badge-success' if pr.status == 'Succeeded' else 'badge-danger' if pr.status == 'Failed' else 'badge-warning' if pr.status == 'Running' else 'badge-neutral' }}">
+                                    {{ pr.status }}
+                                </span>
+                            </td>
+                            <td>{{ pr.duration }}</td>
+                            <td>{{ pr.started }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state">
+                <h3>No pipeline runs found</h3>
+                <p>Pipeline runs appear when model onboarding pipelines execute.</p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    var tabs = document.querySelectorAll('.tab');
+    tabs.forEach(function(t) {
+        t.addEventListener('click', function() {
+            tabs.forEach(function(x) { x.classList.remove('active'); });
+            t.classList.add('active');
+            document.querySelectorAll('.tab-content').forEach(function(c) { c.style.display = 'none'; });
+            var panel = document.getElementById('tab-' + t.dataset.tab);
+            if (panel) panel.style.display = 'block';
+        });
+    });
+    var firstTab = tabs[0];
+    if (firstTab) firstTab.click();
+})();
+</script>
+{% endblock %}

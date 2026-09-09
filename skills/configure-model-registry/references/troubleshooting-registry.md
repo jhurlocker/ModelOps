@@ -34,6 +34,23 @@ Expected: `200`.
 - Check MySQL service: `oc get svc mysql -n rhoai-model-registries`
 - Check the ModelRegistry CR events: `oc describe modelregistry modelops-registry -n rhoai-model-registries`
 
+## Registry Writes 404 on `/api/model_registry/v1`
+
+Unpinned `pip install model-registry` clients probe `/api/model_registry/v1/registered_models` on connect. This RHOAI REST server only serves **v1alpha3**, so the client gets `404 page not found` and the pipeline logs `Skipping registry update` (writes are best-effort, so the TaskRun still succeeds).
+
+Confirm the live API:
+
+```bash
+curl -sS http://modelops-registry.rhoai-model-registries.svc.cluster.local:8080/api/model_registry/v1alpha3/registered_models
+# 200
+
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  http://modelops-registry.rhoai-model-registries.svc.cluster.local:8080/api/model_registry/v1/registered_models
+# 404
+```
+
+The pipeline tasks talk to `v1alpha3` with stdlib `urllib` (no Python SDK).
+
 ## Registry Writes are Best-Effort
 
 A registry outage logs a WARNING and never fails the pipeline. The scan gates still enforce pass/fail independently.

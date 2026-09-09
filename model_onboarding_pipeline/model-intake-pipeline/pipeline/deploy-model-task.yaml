@@ -71,7 +71,7 @@ spec:
         running deploy-model standalone, outside the full pipeline).
     - name: hardwareProfileName
       type: string
-      default: "gpu-profile"
+      default: "gpu"
       description: >-
         Name of a pre-registered OpenShift AI HardwareProfile CR that
         provides GPU/CPU/memory sizing. NOTE: chart 0.7.1 has a template
@@ -100,11 +100,11 @@ spec:
         models, or leave empty for one-per-model.
     - name: servingRuntimeImage
       type: string
-      default: "registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.2.4"
+      default: "registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:ba060ec145e1b7ac3a3b25b89fc75f7d146746156990ff5858235eaa9d158e32"
       description: >-
         Container image for the "vLLM NVIDIA GPU ServingRuntime for
-        KServe". Defaults to the Red Hat AI Inference Server CUDA vLLM
-        runtime image.
+        KServe". Defaults to the cluster's vLLM CUDA runtime template
+        image (Red Hat AI Inference Server / vLLM 0.24).
   workspaces:
     - description: Shared workspace for storing benchmark/advisor results
       name: shared-workspace
@@ -373,7 +373,7 @@ spec:
           annotations:
             opendatahub.io/apiProtocol: REST
             opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
-            opendatahub.io/runtime-version: v0.9.1.0
+            opendatahub.io/runtime-version: v0.24.0
             opendatahub.io/serving-runtime-scope: global
             opendatahub.io/template-display-name: vLLM NVIDIA GPU ServingRuntime for KServe
             opendatahub.io/template-name: vllm-cuda-runtime-template
@@ -414,15 +414,52 @@ spec:
         REQUIRED_GPUS="$(cat gpu-count-required.txt 2>/dev/null || echo 1)"
         HW_NAME="$(params.hardwareProfileName)"
         HW_NS="$(params.hardwareProfileNamespace)"
-        if [ -n "$HW_NAME" ]; then
-          PROFILE_DEFAULT_GPU="$(oc get hardwareprofile "$HW_NAME" -n "$HW_NS" -o jsonpath='{.spec.identifiers[?(@.identifier=="nvidia.com/gpu")].defaultCount}' 2>/dev/null || true)"
-          if [ -z "$PROFILE_DEFAULT_GPU" ]; then
-            echo "WARNING: could not read HardwareProfile [$HW_NAME] in namespace [$HW_NS] (missing, or no nvidia.com/gpu identifier). Skipping GPU-count cross-check."
-          else
-            echo "HardwareProfile [$HW_NAME] default GPU count: $PROFILE_DEFAULT_GPU (plan requires: $REQUIRED_GPUS)"
-            if [ "$PROFILE_DEFAULT_GPU" != "$REQUIRED_GPUS" ]; then
-              echo "WARNING: HardwareProfile [$HW_NAME]'s default GPU count ($PROFILE_DEFAULT_GPU) does not match the gpu-advisor plan's requirement ($REQUIRED_GPUS). The deployed pod will get whatever the HardwareProfile provides, NOT necessarily what the plan recommended. Register/select a HardwareProfile matching the plan's GPU count, or override via 'valuesContent'."
+
+        # The ODH InferenceService webhook rejects a missing HardwareProfile
+        # name. If the requested CR is gone (this cluster ships "gpu", not
+        # "gpu-profile"), pick the first profile in HW_NS that requests a GPU.
+        profile_gpu_id() {
+          oc get hardwareprofile "$1" -n "$HW_NS" -o jsonpath='{.spec.identifiers[?(@.identifier=="nvidia.com/gpu")].identifier}' 2>/dev/null || true
+        }
+        RESOLVED=""
+        if [ -n "$HW_NAME" ] && [ -n "$(profile_gpu_id "$HW_NAME")" ]; then
+          RESOLVED="$HW_NAME"
+        else
+          if [ -n "$HW_NAME" ]; then
+            echo "HardwareProfile [$HW_NAME] not found (or has no nvidia.com/gpu) in [$HW_NS]; searching for a GPU profile..."
+          fi
+          for cand in $(oc get hardwareprofile -n "$HW_NS" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            if [ -n "$(profile_gpu_id "$cand")" ]; then
+              RESOLVED="$cand"
+              break
             fi
+          done
+        fi
+        if [ -z "$RESOLVED" ]; then
+          echo "ERROR: no HardwareProfile with identifier nvidia.com/gpu in namespace [$HW_NS]."
+          echo "Create one (OpenShift AI Dashboard -> Settings -> Hardware profiles) or pass hardware-profile-name."
+          exit 1
+        fi
+        if [ "$RESOLVED" != "$HW_NAME" ]; then
+          echo "Using HardwareProfile [$RESOLVED] in [$HW_NS] instead of [$HW_NAME]."
+          awk -v new="$RESOLVED" '
+            BEGIN { hp=0 }
+            $1=="hardwareProfile:" { hp=1 }
+            hp && $1=="name:" { sub(/name:[[:space:]].*/, "name: " new); hp=0 }
+            { print }
+          ' deploy-values.yaml > deploy-values.yaml.resolved
+          mv deploy-values.yaml.resolved deploy-values.yaml
+          echo "--- Helm values after HardwareProfile resolve ---"
+          cat deploy-values.yaml
+        fi
+
+        PROFILE_DEFAULT_GPU="$(oc get hardwareprofile "$RESOLVED" -n "$HW_NS" -o jsonpath='{.spec.identifiers[?(@.identifier=="nvidia.com/gpu")].defaultCount}' 2>/dev/null || true)"
+        if [ -z "$PROFILE_DEFAULT_GPU" ]; then
+          echo "WARNING: could not read GPU defaultCount from HardwareProfile [$RESOLVED] in [$HW_NS]. Skipping GPU-count cross-check."
+        else
+          echo "HardwareProfile [$RESOLVED] default GPU count: $PROFILE_DEFAULT_GPU (plan requires: $REQUIRED_GPUS)"
+          if [ "$PROFILE_DEFAULT_GPU" != "$REQUIRED_GPUS" ]; then
+            echo "WARNING: HardwareProfile [$RESOLVED]'s default GPU count ($PROFILE_DEFAULT_GPU) does not match the gpu-advisor plan's requirement ($REQUIRED_GPUS). The deployed pod will get whatever the HardwareProfile provides, NOT necessarily what the plan recommended. Register/select a HardwareProfile matching the plan's GPU count, or override via 'valuesContent'."
           fi
         fi
 
@@ -463,16 +500,19 @@ spec:
           --namespace "$(params.namespace)" \
           security.opendatahub.io/enable-auth=false --overwrite || true
 
-        # Actively drive the deployment to a clean Ready state. We can't
-        # just `oc wait` first and recover afterwards, because the failure
+        # Actively drive the deployment to a Ready state. We can't just
+        # `oc wait` first and recover afterwards, because the failure
         # mode we need to handle (an auth-sidecar pod holding the only GPU
         # while its replacement can't schedule) happens DURING the initial
         # rollout - so `oc wait` would block on the very deadlock we need
         # to break. Instead, loop: (re)assert auth=false, break any
         # single-GPU rollout deadlock by scaling superseded ReplicaSets to
-        # zero, and poll for Ready-without-auth-sidecar. With the Recreate
-        # strategy set in the Helm values this usually converges on its
-        # own; the ReplicaSet scale-down is a belt-and-suspenders fallback.
+        # zero, and poll until the InferenceService is Ready.
+        #
+        # Do NOT gate on kube-rbac-proxy disappearing. ODH injects that
+        # sidecar on 8443; the predictor Service still targets vLLM on
+        # 8080, so in-cluster scans/benchmarks succeed without a token
+        # even if the controller never strips the sidecar.
         PREDICTOR_DEPLOY="$(params.releaseName)-predictor"
         NS="$(params.namespace)"
 
@@ -488,14 +528,14 @@ spec:
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" == "True" ]
         }
 
-        echo "Waiting for InferenceService [$(params.releaseName)] to be Ready without the auth sidecar..."
+        echo "Waiting for InferenceService [$(params.releaseName)] to be Ready..."
         # Model downloads (OCI modelcar pull) can take several minutes, and
         # with Recreate a spec change means a second pull, so allow ample time.
         DEADLINE=$(( $(date +%s) + 1500 ))
         LAST_ANNOTATE=0
         while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-          if is_ready && ! has_auth_sidecar; then
-            echo "InferenceService [$(params.releaseName)] is Ready with no auth sidecar."
+          if is_ready; then
+            echo "InferenceService [$(params.releaseName)] is Ready."
             break
           fi
 
@@ -540,7 +580,8 @@ spec:
         fi
 
         if has_auth_sidecar; then
-          echo "WARNING: could not remove auth sidecar automatically; security-scan/benchmark may get 401s. Manual intervention may be required."
+          echo "WARNING: leftover kube-rbac-proxy sidecar is still on the predictor Deployment."
+          echo "The predictor Service targets port 8080 (vLLM), so in-cluster scans/benchmarks do not need a token."
         else
           echo "Predictor is Ready and serving without an auth sidecar - no bearer token required."
         fi

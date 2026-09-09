@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>Approvals</h1>
+    <p>Review and approve or reject deployment plans from capacity recommendations.</p>
+</div>
+
+<div class="card">
+    <div class="card-body">
+        {% if plans %}
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Plan ID</th>
+                        <th>Model</th>
+                        <th>Namespace</th>
+                        <th>Capacity Status</th>
+                        <th>Decision</th>
+                        <th>Updated</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for plan in plans %}
+                    <tr>
+                        <td><a href="/approvals/{{ plan.plan_id }}">{{ plan.plan_id[:20] }}...</a></td>
+                        <td>{{ plan.model_name or plan.model_id or '—' }}</td>
+                        <td>{{ plan.target_namespace or '—' }}</td>
+                        <td>
+                            <span class="badge {{ 'badge-success' if plan.plan_status == 'CAPACITY_AVAILABLE' else 'badge-danger' if plan.plan_status == 'NO_CAPACITY' else 'badge-warning' }}">
+                                {{ plan.plan_status or '—' }}
+                            </span>
+                        </td>
+                        <td>
+                            <span class="badge {{ 'badge-warning' if plan.status == 'pending' else 'badge-success' if plan.status == 'approved' else 'badge-danger' }}">
+                                {{ plan.status }}
+                            </span>
+                        </td>
+                        <td>{{ plan.updated_at or plan.created_at or '—' }}</td>
+                        <td><a href="/approvals/{{ plan.plan_id }}" class="btn btn-outline btn-sm">Review</a></td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h3>No deployment plans</h3>
+            <p>Plans appear here when the capacity advisor runs during model onboarding.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

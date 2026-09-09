@@ -28,16 +28,28 @@ spec:
       description: "GuideLLM benchmark profile (constant, sweep, throughput)."
     - name: guidellm-rate
       type: string
-      default: "1"
+      default: "4"
       description: "Request rate for benchmark (rps, comma-separated for sweep)."
     - name: guidellm-max-seconds
       type: string
-      default: "30"
+      default: "60"
       description: "Maximum benchmark duration in seconds."
     - name: guidellm-max-requests
       type: string
-      default: "5"
+      default: "40"
       description: "Maximum number of benchmark requests."
+    - name: guidellm-prompt-tokens
+      type: string
+      default: "256"
+      description: "Synthetic prompt size in tokens."
+    - name: guidellm-output-tokens
+      type: string
+      default: "128"
+      description: "Synthetic generated-output size in tokens."
+    - name: poll-timeout-seconds
+      type: string
+      default: "2700"
+      description: "How long to wait for the EvalHub job to finish (seconds)."
   results:
     - name: evalhub-job-id
       description: "EvalHub job ID for the guidellm benchmark (linked from model registry)."
@@ -70,6 +82,12 @@ spec:
           value: $(params.guidellm-max-seconds)
         - name: GUIDELLM_MAX_REQUESTS
           value: $(params.guidellm-max-requests)
+        - name: GUIDELLM_PROMPT_TOKENS
+          value: $(params.guidellm-prompt-tokens)
+        - name: GUIDELLM_OUTPUT_TOKENS
+          value: $(params.guidellm-output-tokens)
+        - name: POLL_TIMEOUT_SECONDS
+          value: $(params.poll-timeout-seconds)
         - name: WORKSPACE_PATH
           value: $(workspaces.shared-workspace.path)
       script: |
@@ -82,6 +100,8 @@ spec:
         echo "EvalHub: $EVALHUB_URL"
         echo "Tenant: $TENANT_NS"
         echo "Profile: $GUIDELLM_PROFILE | Rate: $GUIDELLM_RATE | Max seconds: $GUIDELLM_MAX_SECONDS | Max requests: $GUIDELLM_MAX_REQUESTS"
+        echo "Data: prompt_tokens=$GUIDELLM_PROMPT_TOKENS,output_tokens=$GUIDELLM_OUTPUT_TOKENS"
+        echo "Poll timeout: ${POLL_TIMEOUT_SECONDS}s"
         echo ""
 
         export PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -92,14 +112,21 @@ spec:
         warnings.filterwarnings("ignore")
 
         evalhub_url = os.environ["EVALHUB_URL"]
-        token = os.environ["EVALHUB_TOKEN"]
+        token = os.environ.get("EVALHUB_TOKEN", "").strip()
+        if not token:
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+                token = f.read().strip()
         tenant_ns = os.environ["TENANT_NS"]
         target = os.environ["TARGET_URL"]
         model_name = os.environ["MODEL_NAME"]
         profile = os.environ.get("GUIDELLM_PROFILE", "constant")
-        rate = os.environ.get("GUIDELLM_RATE", "1")
-        max_seconds = int(os.environ.get("GUIDELLM_MAX_SECONDS", "30"))
-        max_requests = int(os.environ.get("GUIDELLM_MAX_REQUESTS", "5"))
+        rate = os.environ.get("GUIDELLM_RATE", "4")
+        max_seconds = int(os.environ.get("GUIDELLM_MAX_SECONDS", "60"))
+        max_requests = int(os.environ.get("GUIDELLM_MAX_REQUESTS", "40"))
+        prompt_tokens = int(os.environ.get("GUIDELLM_PROMPT_TOKENS", "256"))
+        output_tokens = int(os.environ.get("GUIDELLM_OUTPUT_TOKENS", "128"))
+        data_spec = "prompt_tokens={},output_tokens={}".format(prompt_tokens, output_tokens)
+        poll_timeout = int(os.environ.get("POLL_TIMEOUT_SECONDS", "2700"))
         ws = os.environ.get("WORKSPACE_PATH", "/workspace/shared-workspace")
 
         import requests as r
@@ -112,6 +139,15 @@ spec:
         base = "https://{}/api/v1/evaluations".format(evalhub_url)
 
         print("--- Submitting guidellm job to EvalHub ---")
+        parameters = {
+            "profile": profile,
+            "rate": float(rate) if rate else 4.0,
+            "max_seconds": max_seconds,
+            "max_requests": max_requests,
+            "warmup": "0",
+            "data": data_spec,
+        }
+        print("Parameters:", json.dumps(parameters))
         payload = {
             "name": "{}-guidellm-bench".format(model_name),
             "model": {
@@ -122,14 +158,10 @@ spec:
                 {
                     "id": "constant",
                     "provider_id": "guidellm",
-                    "config": {
-                        "type": profile,
-                        "rate": float(rate) if rate else 1.0,
-                        "max_seconds": max_seconds,
-                        "max_requests": max_requests,
-                        "sweep_size": 1,
-                        "warmup": 0,
-                    },
+                    # EvalHub copies this into job.json as "parameters".
+                    # "config" is ignored and GuideLLM then falls back to a
+                    # 10-step sweep (the previous 15-min timeout).
+                    "parameters": parameters,
                 }
             ],
         }
@@ -146,9 +178,14 @@ spec:
         with open(os.path.join(ws, "guidellm-evalhub-job-id.txt"), "w") as f:
             f.write(job_id)
 
-        print("--- Polling for completion (max 60 attempts, 15s each = 15 min) ---")
-        for attempt in range(1, 61):
+        print("--- Polling for completion (timeout {}s) ---".format(poll_timeout))
+        deadline = time.time() + poll_timeout
+        attempt = 0
+        state = "unknown"
+        job = {}
+        while time.time() < deadline:
             time.sleep(15)
+            attempt += 1
             resp = sess.get(base + "/jobs/" + job_id, verify=False)
             if resp.status_code != 200:
                 print("  [{}] Poll error: {} {}".format(attempt, resp.status_code, resp.text[:200]))
@@ -159,7 +196,7 @@ spec:
             if state in ("completed", "failed", "cancelled"):
                 break
         else:
-            print("ERROR: Timed out waiting for EvalHub job.")
+            print("ERROR: Timed out waiting for EvalHub job after {}s.".format(poll_timeout))
             sys.exit(1)
 
         print("\n--- Job final state: {} ---".format(state))
@@ -171,13 +208,22 @@ spec:
         with open(os.path.join(RESULT_DIR, "evalhub-job.json"), "w") as f:
             json.dump(job, f, indent=2)
 
-        # Parse results for summary
-        results = job.get("status", {}).get("results", {})
-        output_tps = results.get("output_tokens_per_second", results.get("output_tps", 0))
-        reqs_per_sec = results.get("requests_per_second", results.get("rps", 0))
-        mean_ttft = results.get("mean_ttft_ms", results.get("mean_ttft", 0))
-        mean_itl = results.get("mean_itl_ms", results.get("mean_itl", 0))
-        job_passed = results.get("pass", results.get("passed", False))
+        # EvalHub puts metrics at results.benchmarks[0].metrics, not status.results.
+        payload_results = job.get("results") or {}
+        bench_list = payload_results.get("benchmarks") or []
+        metrics = {}
+        test = payload_results.get("test") or {}
+        if bench_list:
+            metrics = bench_list[0].get("metrics") or {}
+            test = bench_list[0].get("test") or test
+        if not metrics:
+            metrics = job.get("status", {}).get("results") or {}
+        output_tps = metrics.get("output_tokens_per_second", metrics.get("output_tps", 0))
+        reqs_per_sec = metrics.get("requests_per_second", metrics.get("rps", 0))
+        mean_ttft = metrics.get("mean_ttft_ms", metrics.get("mean_ttft", 0))
+        mean_itl = metrics.get("mean_itl_ms", metrics.get("mean_itl", 0))
+        prompt_tps = metrics.get("prompt_tokens_per_second", 0)
+        job_passed = test.get("pass", metrics.get("pass", metrics.get("passed", False)))
 
         summary = {
             "model": model_name,
@@ -187,8 +233,11 @@ spec:
             "rate": rate,
             "max_seconds": max_seconds,
             "max_requests": max_requests,
+            "prompt_tokens": prompt_tokens,
+            "output_tokens": output_tokens,
             "timestamp": TIMESTAMP,
             "output_tokens_per_second": output_tps,
+            "prompt_tokens_per_second": prompt_tps,
             "requests_per_second": reqs_per_sec,
             "mean_ttft_ms": mean_ttft,
             "mean_itl_ms": mean_itl,
@@ -206,8 +255,14 @@ spec:
             f.write("Rate: {}\n".format(rate))
             f.write("Max Seconds: {}\n".format(max_seconds))
             f.write("Max Requests: {}\n".format(max_requests))
+            f.write("Data: {}\n".format(data_spec))
             f.write("Timestamp: {}\n".format(TIMESTAMP))
             f.write("EvalHub Job ID: {}\n".format(job_id))
+            f.write("Output tokens/sec: {}\n".format(output_tps))
+            f.write("Prompt tokens/sec: {}\n".format(prompt_tps))
+            f.write("Requests/sec: {}\n".format(reqs_per_sec))
+            f.write("Mean TTFT: {} ms\n".format(mean_ttft))
+            f.write("Mean ITL: {} ms\n".format(mean_itl))
 
         # Copy results to workspace root with timestamp prefix so the upload
         # task's glob *${timestamp}* finds them.
@@ -224,6 +279,7 @@ spec:
 
         print("\n--- Benchmark Summary ---")
         print("Output tokens/sec: {}".format(output_tps))
+        print("Prompt tokens/sec: {}".format(prompt_tps))
         print("Requests/sec: {}".format(reqs_per_sec))
         print("Mean TTFT: {} ms".format(mean_ttft))
         print("Mean ITL: {} ms".format(mean_itl))

@@ -32,7 +32,15 @@ Each component is a separate skill loaded on demand. Start with `deploy-openshif
 
 ## Deployment Order
 
-Follow this order for a fresh cluster. Each phase is a separate decision point — load the corresponding skill when the previous phase completes.
+One-shot (idempotent) deploy of every phase:
+
+```bash
+./deploy-all.sh
+# or, skip MaaS / reuse an existing intake-UI image:
+./deploy-all.sh --skip-maas --skip-build
+```
+
+Follow this order for a fresh cluster if you prefer to run phases by hand. Each phase is a separate decision point — load the corresponding skill when the previous phase completes.
 
 - [ ] Phase 1: Deploy S3 storage → load `configure-s3-storage`
 - [ ] Phase 2: Deploy EvalHub → load `configure-evalhub`

@@ -41,6 +41,16 @@ oc apply -f model_onboarding_pipeline/model-intake-pipeline/pipeline/gpu-sharing
 
 If your GPU Operator namespace is not `nvidia-gpu-operator`, edit the Role/RoleBinding namespace in that file and set pipeline params `gpu-operator-namespace`/`clusterpolicy-name` accordingly.
 
+### 3b. EvalHub evaluations RBAC
+
+Required so the pipeline SA can submit/poll garak and GuideLLM jobs (EvalHub SAR on `trustyai.opendatahub.io/evaluations`):
+
+```bash
+oc apply -f model_onboarding_pipeline/model-intake-pipeline/pipeline/evalhub-rbac.yaml
+```
+
+Without this, `security-scan` fails with `403 Forbidden (user=system:serviceaccount:vllm:pipeline, verb=create, resource=evaluations)`.
+
 ### 4. Create ConfigMaps for lm-eval
 
 ```bash
@@ -79,6 +89,16 @@ oc create secret generic gpu-advisor-credentials -n vllm \
   --from-literal=api-key='<your-api-key>' \
   --dry-run=client -o yaml | oc apply -f -
 ```
+
+### 7b. GPU HardwareProfile
+
+The vllm-kserve chart sizes GPUs through an OpenShift AI HardwareProfile. The ODH InferenceService webhook rejects a missing name. The pipeline default is `gpu` in `redhat-ods-applications` (not `gpu-profile`):
+
+```bash
+oc apply -n redhat-ods-applications -f model_onboarding_pipeline/model-intake-pipeline/pipeline/gpu-hardware-profile.yaml
+```
+
+`./deploy-all.sh` applies this in phase 7. Skip only if a GPU HardwareProfile already exists under a different name and you will pass `hardware-profile-name` on the PipelineRun.
 
 ### 8. Deploy Tekton Tasks and Pipeline
 

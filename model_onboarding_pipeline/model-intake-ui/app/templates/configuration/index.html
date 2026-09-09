@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-header">
+    <h1>Configuration</h1>
+    <p>Platform configuration as seen by the Model Intake UI.</p>
+</div>
+
+<div class="card">
+    <div class="card-header">Environment</div>
+    <div class="card-body" style="font-size:13px">
+        <table>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0;width:240px">Pipeline Namespace</td>
+                <td><code>{{ config.pipeline_namespace }}</code></td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Lifecycle Profile</td>
+                <td><code>{{ config.lifecycle_profile }}</code></td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Advisor Endpoint</td>
+                <td><code>{{ config.advisor_endpoint }}</code></td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Internal Service URL</td>
+                <td><code>{{ config.self_url }}</code></td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Prometheus URL</td>
+                <td><code>{{ config.prometheus_url }}</code></td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Database Path</td>
+                <td><code>{{ config.db_path }}</code></td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">Connection Status</div>
+    <div class="card-body">
+        <table style="font-size:13px">
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0;width:240px">Kubernetes API</td>
+                <td>
+                    <span class="badge badge-success">Connected</span>
+                    <span class="form-hint" style="display:inline">cluster access via in-cluster config</span>
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">SQLite</td>
+                <td>
+                    <span class="badge badge-success">Connected</span>
+                    <span class="form-hint" style="display:inline">used for approvals only</span>
+                </td>
+            </tr>
+            <tr>
+                <td style="font-weight:600;padding:6px 24px 6px 0">Prometheus</td>
+                <td>
+                    <span class="badge badge-success">Connected</span>
+                    <span class="form-hint" style="display:inline">GPU metrics from DCGM Exporter</span>
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+{% endblock %}
