@@ -75,29 +75,39 @@ Run these after deployment to validate end-to-end.
 
 ### Garak Security Smoke Test (~15s)
 
+`quick` is a single `dan.Dan_11_0` probe and often returns empty metrics. Use it only to prove EvalHub can schedule a job. For result data, use the taxonomy profiles from [EvalHub's garak.yaml](https://github.com/eval-hub/eval-hub/blob/f2321a81ee4581f9ee6c8eb1b159bdcda07b51e2/config/providers/garak.yaml): `quality`, `avid_security`, `cwe`.
+
 ```bash
 EVALHUB_URL=$(oc get route evalhub -n redhat-ods-applications -o jsonpath='{.spec.host}')
 TOKEN=$(oc whoami -t)
 MODEL_URL="<your-inference-endpoint>"
 MODEL_NAME="<model-name>"
 
+# Scheduling smoke (may complete with empty metrics)
 JOB_RESPONSE=$(curl -k -s -X POST "https://$EVALHUB_URL/api/v1/evaluations/jobs" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "X-Tenant: $TENANT_NS" \
   -d '{"name":"garak-smoke","model":{"url":"'"$MODEL_URL"'","name":"'"${MODEL_NAME:-test-model}"'"},"benchmarks":[{"id":"quick","provider_id":"garak"}]}')
+
+# Result-producing gate (same profiles the pipeline submits)
+JOB_RESPONSE=$(curl -k -s -X POST "https://$EVALHUB_URL/api/v1/evaluations/jobs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant: $TENANT_NS" \
+  -d '{"name":"garak-scan","model":{"url":"'"$MODEL_URL"'","name":"'"${MODEL_NAME:-test-model}"'"},"benchmarks":[{"id":"quality","provider_id":"garak","parameters":{"execution_mode":"simple","garak_config":{"run":{"generations":1}}}},{"id":"avid_security","provider_id":"garak","parameters":{"execution_mode":"simple","garak_config":{"run":{"generations":1}}}},{"id":"cwe","provider_id":"garak","parameters":{"execution_mode":"simple","garak_config":{"run":{"generations":1}}}}]}')
 JOB_ID=$(echo "$JOB_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['resource']['id'])")
 
-for i in $(seq 1 30); do
+for i in $(seq 1 240); do
   STATE=$(curl -k -s -H "Authorization: Bearer $TOKEN" -H "X-Tenant: $TENANT_NS" \
     "https://$EVALHUB_URL/api/v1/evaluations/jobs/$JOB_ID" \
     | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',{}).get('state','unknown'))")
   case "$STATE" in completed|failed|cancelled) break ;; esac
-  sleep 10
+  sleep 15
 done
 ```
 
-Expected: `state: completed` with `attack_success_rate` populated.
+Expected: `state: completed` with per-profile `attack_success_rate` and per-probe `*_asr` metrics. The onboarding pipeline defaults `garak-benchmarks` to `quality,avid_security,cwe`.
 
 ### GuideLLM Performance Smoke Test (~30s)
 
@@ -115,6 +125,7 @@ Expected: `state: completed` with throughput metrics.
 
 ## Gotchas
 
+- **Garak `quick` profile is empty**: `quick` maps to a single `dan.Dan_11_0` probe in the TrustyAI Garak provider. That probe is often missing in current Garak builds, so EvalHub completes with zero evaluations. The pipeline defaults to taxonomy profiles (`quality`, `avid_security`, `cwe`) which auto-discover probes by tag and emit per-probe `attack_success_rate`.
 - **Garak fails with unrecognized arguments**: The garak CLI changed between v0.3.x and v0.15.x. Use `--target_type` (not `--model`), `--generator_options` (not `--model_args`), `--report_prefix` (not `--output_json_path`), `--skip_unknown` to skip probes that don't exist.
 - **Probes not found in garak 0.15**: Old probe names like `availability`, `off_topic_safety_cases`, `leaky_completion` don't exist. Use: `apikey.GetKey,atkgen.Tox,dan.AutoDANCached,dan.DanInTheWild,encoding.InjectBase64,leakreplay.GuardianCloze`. Pass `--skip_unknown` to skip unknown ones.
 - **EvalHub uses namespace multi-tenancy**: The `X-Tenant` header controls the target namespace. Set it to the namespace where the InferenceService runs.

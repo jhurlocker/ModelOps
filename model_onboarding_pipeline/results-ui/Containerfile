@@ -20,4 +20,4 @@ EXPOSE 8080
 
 # Command to run the application using Gunicorn
 # It binds to all interfaces on port 8080 and looks for the 'app' object in 'app.py'
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--timeout", "60", "app:app"]

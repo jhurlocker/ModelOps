@@ -132,8 +132,10 @@ Preferred: use the model-intake web app's "Submit Model" form.
 Manual alternative:
 
 ```bash
-oc apply -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml
+oc create -n vllm -f model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml
 ```
+
+`generateName` requires `oc create` (`oc apply` is rejected). The sample run uses Garak profiles `quality,avid_security,cwe` (not the empty `quick` smoke test).
 
 Monitor:
 

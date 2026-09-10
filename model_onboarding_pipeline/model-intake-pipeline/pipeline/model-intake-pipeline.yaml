@@ -16,7 +16,8 @@ spec:
       2. gpu-advisor-sandbox : GPU capacity plan for sandbox deploy.
       3. apply-gpu-sharing-sandbox : enable time-slicing if needed.
       4. deploy-model : deploy via Helm so it can be scanned live.
-      5. security-scan (garak) : live LLM red-team scan via EvalHub;
+      5. security-scan (garak) : live LLM red-team scan via EvalHub using
+         taxonomy profiles (quality, avid_security, cwe by default);
          UPDATES the registry entry (FAILED-with-links on failure), then gates.
 
     Because tasks are chained with runAfter, a failure in either the
@@ -252,7 +253,19 @@ spec:
       description: Max tolerated garak attack-success rate before BLOCK (block, high, medium, low)
       name: severity-threshold
       type: string
-    - default: "evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com"
+    - default: "quality,avid_security,cwe"
+      description: |
+        Comma-separated EvalHub Garak profile IDs (quality, avid_security, avid_ethics,
+        avid_performance, avid, owasp_llm_top10, cwe, quick). Default uses taxonomy
+        profiles that emit per-probe attack_success_rate. Avoid `quick` (empty DAN smoke)
+        and overnight OWASP/full-AVID scans unless the pipeline timeout is raised.
+      name: garak-benchmarks
+      type: string
+    - default: "7200"
+      description: Seconds to wait for the EvalHub Garak job to finish
+      name: garak-poll-timeout-seconds
+      type: string
+    - default: "evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com"
       description: EvalHub base URL (host only, no protocol prefix)
       name: evalhub-url
       type: string
@@ -264,7 +277,7 @@ spec:
       description: Tenant namespace for EvalHub (must have evalhub.trustyai.opendatahub.io/tenant label)
       name: tenant-ns
       type: string
-    - default: "rh-ai.apps.ocp.h64s4.sandbox324.opentlc.com"
+    - default: "apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com"
       description: OpenShift AI console apps domain for EvalHub result links
       name: openshift-console-domain
       type: string
@@ -519,6 +532,10 @@ spec:
           value: $(params.target-namespace)
         - name: severity-threshold
           value: $(params.severity-threshold)
+        - name: garak-benchmarks
+          value: $(params.garak-benchmarks)
+        - name: poll-timeout-seconds
+          value: $(params.garak-poll-timeout-seconds)
         - name: s3-api-endpoint
           value: $(params.scan-s3-endpoint)
         - name: s3-access-key-id
@@ -535,6 +552,7 @@ spec:
           value: $(params.mr-port)
         - name: model-reg-author
           value: $(params.model-reg-author)
+      timeout: "2h30m0s"
       runAfter:
         - deploy-model
       taskRef:

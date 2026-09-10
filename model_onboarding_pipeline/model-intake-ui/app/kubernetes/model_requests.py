@@ -286,7 +286,7 @@ def create_pipeline_run(name, params, namespace=None):
             "pipelineRef": {"name": PIPELINE_NAME},
             "params": [{"name": k, "value": v} for k, v in params.items() if v is not None],
             "taskRunTemplate": {"serviceAccountName": PIPELINE_SERVICE_ACCOUNT},
-            "timeouts": {"pipeline": "3h0m0s"},
+            "timeouts": {"pipeline": "6h0m0s"},
             "workspaces": [
                 {
                     "name": "shared-workspace",

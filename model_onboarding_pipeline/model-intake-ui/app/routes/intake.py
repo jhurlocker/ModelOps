@@ -127,6 +127,7 @@ def _pipeline_params_from_form(form_data):
         ("values-content", "values-content"),
         ("artifact-cve-threshold", "artifact-cve-threshold"),
         ("severity-threshold", "severity-threshold"),
+        ("garak-benchmarks", "garak-benchmarks"),
         ("openshift-console-domain", "openshift-console-domain"),
         ("s3-endpoint", "s3-api-endpoint"),
         ("maas-gpu-count", "maas-gpu-count"),

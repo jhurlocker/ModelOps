@@ -136,6 +136,7 @@ spec:
                 return ""
 
         bench_ts = read("timestamp.txt")
+        garak_ts = read("security-timestamp.txt")
         lmeval_ts = read("lmeval-timestamp.txt") or read("lm-eval-timestamp.txt")
         bench_ui = read("benchmarkui-route.txt")
         s3_ui = read("s3ui-route.txt")
@@ -157,15 +158,23 @@ spec:
         if bench_ts:
             bench_file = "{}_{}-results.yaml".format(bench_ts, model)
             if bench_ui:
-                props["guidellm-results-ui"] = "https://{}/?file={}".format(bench_ui, bench_file)
+                props["guidellm-results-ui"] = "https://{}/?file={}&bucket=benchmark-results".format(
+                    bench_ui, bench_file)
             if s3_ui:
                 props["guidellm-results-s3"] = "{}/download/benchmark-results/{}".format(s3_ui, bench_file)
         if lmeval_ts:
             lm_file = "{}_lm-eval-results.json".format(lmeval_ts)
             if bench_ui:
-                props["lm-eval-results-ui"] = "https://{}/?file={}".format(bench_ui, lm_file)
+                props["lm-eval-results-ui"] = "https://{}/?file={}&bucket=benchmark-results".format(
+                    bench_ui, lm_file)
             if s3_ui:
                 props["lm-eval-results-s3"] = "{}/download/benchmark-results/{}".format(s3_ui, lm_file)
+        if garak_ts and bench_ui:
+            garak_file = "{}_security_scan/scan_results.summary.json".format(garak_ts)
+            props["garak-results-ui"] = "https://{}/?file={}&bucket=security-scan-results".format(
+                bench_ui, garak_file)
+        elif garak_job_id and bench_ui:
+            props["garak-results-ui"] = "https://{}".format(bench_ui)
 
         if garak_job_id and console_domain and tenant_ns:
             props["evalhub-garak-results"] = "https://{}/evaluation/{}/results/{}".format(

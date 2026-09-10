@@ -300,7 +300,24 @@ EOF
 phase_results_ui() {
   log "Phase 5: Results viewer"
   ensure_ns "$PIPELINE_NS"
-  oc apply -n "$PIPELINE_NS" -f "$ROOT/model_onboarding_pipeline/results-ui/deployment.yaml"
+  local ui_dir="$ROOT/model_onboarding_pipeline/results-ui"
+
+  if [[ "$SKIP_BUILD" -eq 0 ]]; then
+    oc get is benchmark-viewer -n "$PIPELINE_NS" >/dev/null 2>&1 || \
+      oc create imagestream benchmark-viewer -n "$PIPELINE_NS"
+    if ! oc get bc benchmark-viewer -n "$PIPELINE_NS" >/dev/null 2>&1; then
+      oc new-build --binary --strategy=docker --name=benchmark-viewer \
+        -n "$PIPELINE_NS" --to=benchmark-viewer:latest
+    fi
+    oc start-build benchmark-viewer -n "$PIPELINE_NS" --from-dir="$ui_dir" --follow
+  else
+    ok "skipping image build (--skip-build)"
+  fi
+
+  oc apply -n "$PIPELINE_NS" -f "$ui_dir/deployment.yaml"
+  if [[ "$SKIP_BUILD" -eq 0 ]]; then
+    oc rollout restart deployment/benchmark-viewer -n "$PIPELINE_NS" >/dev/null 2>&1 || true
+  fi
   wait_ready_label "$PIPELINE_NS" app=benchmark-viewer 180s || warn "benchmark-viewer not Ready yet"
   ok "Results UI: https://$(oc get route -n "$PIPELINE_NS" benchmark-viewer -o jsonpath='{.spec.host}' 2>/dev/null || echo '(route pending)')"
 }
@@ -326,6 +343,9 @@ phase_intake_ui() {
   fi
 
   oc apply -n "$PIPELINE_NS" -f "$ui_dir/deployment.yaml"
+  if [[ "$SKIP_BUILD" -eq 0 ]]; then
+    oc rollout restart deployment/model-intake -n "$PIPELINE_NS" >/dev/null 2>&1 || true
+  fi
   wait_ready_label "$PIPELINE_NS" app=model-intake 180s
   ok "Intake UI: https://$(oc get route -n "$PIPELINE_NS" model-intake -o jsonpath='{.spec.host}')"
 }
@@ -393,8 +413,32 @@ phase_pipeline() {
     oc apply -n "$PIPELINE_NS" -f "$pipe/$task"
   done
 
+  # The sample Pipeline/PipelineRun YAML may still carry a previous cluster's
+  # EvalHub host. Point the live Pipeline defaults at this cluster's route.
+  local evalhub domain
+  evalhub="$(oc get route evalhub -n "$RHOAI_NS" -o jsonpath='{.spec.host}' 2>/dev/null || true)"
+  domain="$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' 2>/dev/null || true)"
+  if [[ -n "$evalhub" || -n "$domain" ]]; then
+    EVALHUB_HOST="$evalhub" CLUSTER_DOMAIN="$domain" \
+      oc get pipeline.tekton.dev model-intake-pipeline -n "$PIPELINE_NS" -o json | python3 -c '
+import json, os, sys
+pipe = json.load(sys.stdin)
+evalhub = os.environ.get("EVALHUB_HOST") or ""
+domain = os.environ.get("CLUSTER_DOMAIN") or ""
+for param in pipe.get("spec", {}).get("params", []):
+    name = param.get("name")
+    if evalhub and name == "evalhub-url":
+        param["default"] = evalhub
+    if domain and name == "openshift-console-domain":
+        param["default"] = domain
+json.dump(pipe, sys.stdout)
+' | oc apply -n "$PIPELINE_NS" -f - >/dev/null
+    [[ -n "$evalhub" ]] && ok "EvalHub host: $evalhub"
+  fi
+
   ok "Tasks: $(oc get tasks.tekton.dev -n "$PIPELINE_NS" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
   ok "Pipeline: $(oc get pipeline.tekton.dev -n "$PIPELINE_NS" --no-headers 2>/dev/null | awk '{print $1}')"
+  ok "Garak profiles: quality,avid_security,cwe (override with garak-benchmarks)"
 }
 
 print_summary() {
@@ -408,7 +452,7 @@ print_summary() {
   [[ -n "$results" ]] && ok "Results viewer  : https://$results"
   [[ -n "$s3"      ]] && ok "S3 browser      : https://$s3"
   [[ -n "$domain" && "$SKIP_MAAS" -eq 0 ]] && ok "MaaS API        : https://maas.${domain}/maas-api/health"
-  ok "Submit a run from the Intake UI, or: oc apply -n $PIPELINE_NS -f $ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml"
+  ok "Submit a run from the Intake UI, or: oc create -n $PIPELINE_NS -f $ROOT/model_onboarding_pipeline/model-intake-pipeline/pipeline/model-intake-pipelinerun.yaml"
 }
 
 # ---------------------------------------------------------------------------

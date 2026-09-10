@@ -1,7 +1,7 @@
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
-  generateName: guidellm-benchmark-run-
+  generateName: granite-2b-onboard-
 spec:
   params:
     # Model identification
@@ -32,7 +32,7 @@ spec:
       value: '180'
     # Gate 2 - Human approval
     - name: approval-api-url
-      value: ''
+      value: 'http://model-intake.vllm.svc.cluster.local:8080'
     - name: approval-poll-interval-seconds
       value: '15'
     - name: approval-timeout-seconds
@@ -55,16 +55,20 @@ spec:
     # Gate 3 - Security scan (garak via EvalHub)
     - name: severity-threshold
       value: 'block'
+    - name: garak-benchmarks
+      value: 'quality,avid_security,cwe'
+    - name: garak-poll-timeout-seconds
+      value: '7200'
     # EvalHub
     - name: evalhub-url
-      value: 'evalhub-redhat-ods-applications.apps.ocp.h64s4.sandbox324.opentlc.com'
+      value: 'evalhub-redhat-ods-applications.apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com'
     - name: evalhub-token
       value: ''
     - name: tenant-ns
-      value: 'my-first-model'
+      value: 'vllm'
     # OpenShift AI console for EvalHub result links
     - name: openshift-console-domain
-      value: 'rh-ai.apps.ocp.h64s4.sandbox324.opentlc.com'
+      value: 'apps.cluster-fz7vw.fz7vw.sandbox5177.opentlc.com'
     # Benchmark (GuideLLM via EvalHub)
     - name: guidellm-profile
       value: 'constant'
@@ -113,9 +117,9 @@ spec:
     - name: model-reg-author
       value: 'ModelOps Platform Team'
   pipelineRef:
-    name: guidellm-benchmark-pipeline
+    name: model-intake-pipeline
   taskRunSpecs:
-  - pipelineTaskName: gpu-advisor
+  - pipelineTaskName: gpu-advisor-sandbox
     computeResources:
       requests:
         cpu: "1"
@@ -134,7 +138,7 @@ spec:
   taskRunTemplate:
     serviceAccountName: pipeline
   timeouts:
-    pipeline: 3h0m0s
+    pipeline: 6h0m0s
   workspaces:
     - name: shared-workspace
       persistentVolumeClaim:
