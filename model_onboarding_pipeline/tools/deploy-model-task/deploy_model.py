@@ -314,15 +314,15 @@ spec:
          "security.opendatahub.io/enable-auth=false", "--overwrite"], check=False)
 
     # --- Wait for readiness ---
-    def has_auth_sidecar():
-        r = subprocess.run(
-            ["oc", "get", "deployment", f"{RELEASE_NAME}-predictor",
-             "-n", NAMESPACE,
-             "-o", "jsonpath={.spec.template.spec.containers[*].name}"],
-            capture_output=True, text=True,
-        )
-        return "kube-rbac-proxy" in r.stdout
-
+    # Readiness is gated on the InferenceService Ready condition ONLY. A prior
+    # version also waited for a "kube-rbac-proxy" container to disappear, but
+    # that container is the KServe metrics/RBAC proxy -- always present
+    # regardless of auth -- and is NOT the sidecar that
+    # security.opendatahub.io/enable-auth=false removes (prediction-endpoint
+    # auth is enforced externally via the MaaS gateway on this platform). That
+    # mistaken check made the deploy step spin for the full 25-minute deadline
+    # re-asserting the annotation every 20s; it is removed here. The one-time
+    # enable-auth=false annotation above is still applied (best-effort).
     def is_ready():
         r = subprocess.run(
             ["oc", "get", "inferenceservice", RELEASE_NAME,
@@ -332,20 +332,11 @@ spec:
         )
         return r.stdout.strip() == "True"
 
-    print(f"Waiting for InferenceService [{RELEASE_NAME}] to be Ready without auth sidecar...")
+    print(f"Waiting for InferenceService [{RELEASE_NAME}] to be Ready...")
     deadline = time.time() + 1500
-    last_annotate = 0
     while time.time() < deadline:
-        if is_ready() and not has_auth_sidecar():
-            print(f"InferenceService [{RELEASE_NAME}] is Ready with no auth sidecar.")
+        if is_ready():
             break
-
-        if has_auth_sidecar() and (time.time() - last_annotate) >= 20:
-            print("  Auth sidecar present - (re)asserting enable-auth=false...")
-            _oc(["annotate", "inferenceservice", RELEASE_NAME,
-                 "--namespace", NAMESPACE,
-                 "security.opendatahub.io/enable-auth=false", "--overwrite"], check=False)
-            last_annotate = time.time()
 
         # Scale old ReplicaSets to 0 to break GPU deadlock
         r = subprocess.run(
@@ -381,10 +372,7 @@ spec:
         _oc(["get", "pods", "-n", NAMESPACE, "-l", f"serving.kserve.io/inferenceservice={RELEASE_NAME}"], check=False)
         sys.exit(1)
 
-    if has_auth_sidecar():
-        print("WARNING: could not remove auth sidecar automatically")
-    else:
-        print("Predictor is Ready and serving without an auth sidecar - no bearer token required.")
+    print("Predictor is Ready and serving.")
 
 
 # ---------------------------------------------------------------------------
