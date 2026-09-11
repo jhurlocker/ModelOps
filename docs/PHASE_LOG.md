@@ -5968,7 +5968,31 @@ the in-cluster `https://modelops-registry…:8443` endpoint + a projected SA tok
   Zot uses (`model-registry-service-ca` inject-cabundle ConfigMap), not by
   accepting a gap: primary SA-dir `service-ca.crt`, degrade to the mounted
   ConfigMap, with unit tests pinning the preference order.
-- Full end-to-end onboarding re-run follows commit + ArgoCD sync (the
-  gitops-managed Tasks/PlatformConfig/RBAC are reverted by selfHeal if applied
-  without committing); the probe above is the live proof of the changed
-  mechanism ahead of that integration run.
+
+### End-to-end verification (real onboarding run)
+
+After commit `815a3e7` and ArgoCD convergence (all component apps `Synced`/
+`Healthy`; `modelops-root`'s `OutOfSync` is a pre-existing app-of-apps quirk,
+not this change), a fresh onboarding (`verify-hf-b-registryfix`,
+`granite-2b-registryfix`, `standard-generative-onboarding`, sandbox→staging)
+was run end to end. Final registry entry (read-only probe, `pipeline` SA):
+
+```
+granite-2b-registryfix v1
+  onboarding-stage: staging-benchmark-eval
+  overall-status:   PRODUCTION-READY (staging validated)
+```
+
+i.e. the compliance scan registered the model, the security scan advanced
+`onboarding-stage`, and the final `model-registry` task (
+`register-model-and-results`) set `overall-status` to PRODUCTION-READY — all
+through the real Tekton pipeline (8 sandbox + 8 promotion tasks, every
+`[model-registry]` write now authenticating over in-cluster https:8443).
+
+Pre-existing (NOT this change): the compliance scan's intermediate
+`overall-status` is momentarily `"FAILED - compliance/artifact scan"` because
+`compliance-artifact-scan-task.yaml`'s `compose-links` step sources
+`/tmp/scan_env.sh` from its own container `/tmp` (not the shared workspace),
+so `OVERALL_PASSED` is never set and the else branch wins; the final
+`model-registry` task overwrites it with the correct PRODUCTION-READY value.
+Tracked as a separate compose-links /tmp-sharing bug, unaddressed here.
