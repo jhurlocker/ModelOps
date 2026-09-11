@@ -5758,3 +5758,65 @@ This phase adds that missing mapping.
   (2) `Status.Stages[sandbox].Results` persisting them, (3) promotion's
   `spec.params.modelcar-image` = `pull-ref`, (4) the `oci`/`s3` negative path
   producing no `modelcar-image` param.
+
+## Operator build/deploy path — quay.io → in-cluster BuildConfig + internal registry
+
+### Why the path changed
+
+Earlier phases reference `quay.io/jhurlocker/modelops-operator:latest` as the
+operator image, but this development environment has **no quay.io push
+credentials**, so every operator Go change since (Phase C results-forwarding,
+the `pull-ref` handler) could not be published. The operator running on the
+cluster was therefore stale (binary inspection showed neither `image-ref` nor
+`pull-ref` present), which is what the Phase C entry's "NOT verified live" note
+was really blocked on — beyond the missing Pipeline-level `results` block fixed
+immediately above.
+
+### What changed
+
+- The operator is now built in-cluster via the project's established path —
+  `oc new-build --binary --strategy=docker --name modelops-operator` +
+  `oc start-build modelops-operator --from-dir=operator`, pushing to the
+  internal Image Registry (`image-registry.openshift-image-registry.svc:5000`,
+  ImageStream `modelops/modelops-operator`). This does NOT depend on quay.io or
+  Zot.
+- `gitops/components/operator/deployment.yaml` now references the built image by
+  digest (`.../modelops/modelops-operator@sha256:...`) instead of
+  `quay.io/...:latest`, so ArgoCD's selfHeal converges the operator to the new
+  code instead of reverting it (a bare `oc set image` patch was observed to be
+  reverted by ArgoCD within ~2 minutes).
+- The `modelops-operator` ServiceAccount's auto-managed
+  `modelops-operator-dockercfg-*` pull secret authenticates the node-level pull;
+  no explicit `imagePullSecrets` entry is needed.
+
+### Names and root cause (not a guess)
+
+The "S3-backed internal registry" is the OpenShift **Image Registry operator**
+(`image-registry-operator`), Service
+`image-registry.openshift-image-registry.svc:5000` in `openshift-image-registry`,
+backed by AWS S3 (`us-east-2`, SSE, public access blocked; `defaultRoute: false`).
+The earlier Phase C `500/unauthorized` was **not** a DNS failure: the node's
+`/etc/hosts` carries an OpenShift-generated hardcoded entry that maps
+`image-registry.openshift-image-registry.svc` (and `.cluster.local`) to its
+ClusterIP, so the hostname resolves at node level (unlike Zot's Service, which
+had no such entry). It was an artifact of the *podman-push* path used at the
+time; the native `oc new-build` path was verified to pull cleanly at node level
+as the `modelops-operator` SA (probe image `Successfully pulled ... in ~280ms`,
+no `unauthorized`).
+
+### Verification of the build path
+
+- Probe `oc new-build --binary --strategy=docker` (throwaway `buildprobe`)
+  completed in ~14s and the resulting image pulled at node level.
+- Full operator rebuild completed and pushed
+  `image-registry.openshift-image-registry.svc:5000/modelops/modelops-operator@sha256:bdced4a6a1621647b0874cfbfc33cd385c0150f348546bb01c0450415067bdb5`;
+  ArgoCD (`modelops-operator`) converged to it and the new pod came up clean
+  (all EventSources/controllers registered).
+
+### Follow-up noted
+
+The BuildConfig/ImageStream are ad-hoc (regenerated from the committed
+`operator/Dockerfile`), documented in `gitops/README.md` "Operator image build
+(required per cluster)" + New Cluster Bootstrap Checklist item 0, rather than
+committed — a binary build uploads the local source tree via
+`oc start-build --from-dir` and cannot be triggered declaratively by ArgoCD.

@@ -19,7 +19,7 @@ spec:
       serviceAccountName: modelops-operator
       containers:
         - name: manager
-          image: image-registry.openshift-image-registry.svc:5000/modelops/modelops-operator:latest
+          image: image-registry.openshift-image-registry.svc:5000/modelops/modelops-operator@sha256:bdced4a6a1621647b0874cfbfc33cd385c0150f348546bb01c0450415067bdb5
           imagePullPolicy: Always
           command:
             - /usr/local/bin/manager

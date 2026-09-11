@@ -700,6 +700,50 @@ open https://openshift-gitops-server-openshift-gitops.apps.<cluster-domain>
 oc get applications -n openshift-gitops
 ```
 
+## Operator image build (required per cluster)
+
+The ModelOps operator is **not** pulled from `quay.io` — this environment has
+no push credentials for that external registry. It is instead built in-cluster
+with the OpenShift Docker build strategy and pushed to the cluster's internal
+Image Registry (`image-registry.openshift-image-registry.svc:5000`), which is the
+operator's established build/deploy path (`oc new-build --binary --strategy=docker`).
+`gitops/components/operator/deployment.yaml` references the built image **by
+digest**, and a Go build is not byte-reproducible, so the digest is per-build.
+
+On every fresh cluster — and after any operator code change — do:
+
+1. **Build** the operator image (the build context is the committed
+   `operator/` directory and its `Dockerfile`):
+   ```bash
+   oc new-build --binary --strategy=docker --name modelops-operator -n modelops
+   oc start-build modelops-operator --from-dir=operator --follow -n modelops
+   ```
+   If the `modelops-operator` BuildConfig/ImageStream already exist from a prior
+   build, the `oc new-build` step is idempotent; only `oc start-build --from-dir`
+   is needed to rebuild.
+
+2. **Capture the new digest** and update the committed deployment:
+   ```bash
+   oc get build modelops-operator-1 -n modelops -o jsonpath='{.status.outputDockerImageReference}'
+   # -> image-registry.openshift-image-registry.svc:5000/modelops/modelops-operator@sha256:...
+   ```
+   Then set that exact `@sha256:...` value as `image` in
+   `gitops/components/operator/deployment.yaml`, commit, and push. (Use the build
+   that just ran — `oc get build -n modelops` lists the latest `modelops-operator-N`.)
+
+The BuildConfig and ImageStream created by `oc new-build` are **ad hoc** — they
+are regenerated deterministically from the committed `operator/Dockerfile`, so
+they are not committed to Git. Committing them would not automate the build
+anyway: a *binary* build uploads the local source tree via
+`oc start-build --from-dir` and cannot be triggered declaratively by ArgoCD.
+Rebuild-and-re-pin is the operator-side equivalent of the credential re-sealing
+in Step 3; both are required, first-class per-cluster steps.
+
+The `modelops-operator` ServiceAccount's auto-managed
+`modelops-operator-dockercfg-*` `imagePullSecret` authenticates the node-level
+kubelet pull of the internal image, so no explicit `imagePullSecrets` entry is
+needed in `deployment.yaml`.
+
 ## Adding a New Promotion Namespace
 
 Promotion namespaces are declared per-stage on `ModelLifecycleProfile.Spec.Stages`
@@ -743,6 +787,11 @@ The operator will ensure each promotion namespace has:
 
 When deploying to a fresh cluster, follow this order after prerequisites
 (Step 1 and 1a in Quick Start; Steps 1b/1c are now automatic) are satisfied:
+
+0. **Build and pin the operator image** — see "Operator image build (required per
+   cluster)" above. The committed deployment references a build-specific digest,
+   so the operator image must be built and the digest updated before the
+   `modelops-operator` Application can reach `Healthy` on a fresh cluster.
 
 1. **Export your cluster domain**:
    ```bash
