@@ -113,11 +113,10 @@ spec:
         fi
 
         # Emit BOTH the raw route host (traceability) and the full
-        # node-resolvable pull reference from THIS step. The build-and-push
-        # step cannot rely on $(steps.resolve-registry-host.results.route-host)
-        # value interpolation (observed NOT substituted by Tekton v1 -- the env
-        # arrives as the literal text -- while $(params.*) interpolation does
-        # work), so pull-ref is composed here from params + the resolved host.
+        # node-resolvable pull reference from THIS step. build-and-push cannot
+        # consume the prior step's result via a step-result variable (Tekton v1
+        # did not interpolate it into the env at runtime -- it arrived as the
+        # literal text), so pull-ref is composed here from params + the host.
         printf '%s' "${HOST}" > "$(results.route-host.path)"
         printf '%s' "${HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"
         echo "Resolved Zot pull host: ${HOST}"
@@ -266,8 +265,8 @@ spec:
         # Emit the in-cluster reference for downstream tasks / Phase C.
         # (pull-ref is emitted by the resolve-registry-host step, where the
         # route hostname is resolved -- see that step's note about Tekton not
-        # interpolating $(steps.X.results.Y) values; build-and-push keeps no
-        # ROUTE_HOST env for the same reason.)
+        # interpolating step-result variables into env at runtime; build-and-push
+        # therefore keeps no ROUTE_HOST env.)
         #   image-ref = Zot's internal Service DNS (in-cluster consumers,
         #               e.g. compliance-artifact-scan's skopeo inspect)
         printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
