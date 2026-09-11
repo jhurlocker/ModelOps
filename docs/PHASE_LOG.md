@@ -5820,3 +5820,155 @@ The BuildConfig/ImageStream are ad-hoc (regenerated from the committed
 (required per cluster)" + New Cluster Bootstrap Checklist item 0, rather than
 committed — a binary build uploads the local source tree via
 `oc start-build --from-dir` and cannot be triggered declaratively by ArgoCD.
+
+## Model Registry auth fix — in-cluster https:8443 + projected SA token
+
+### Why
+
+The OpenShift AI Model Registry (`ModelRegistry` CR `modelops-registry` in
+`rhoai-model-registries`) is fronted by `kube-rbac-proxy`. The operator-created
+Service exposes **only** `https-api:8443` (TLS, `--upstream=http://127.0.0.1:8080`),
+but the pipeline still pointed at `http://…:8080` everywhere (PlatformConfig
+`registryServer/registryPort`, Task `mr-server`/`mr-port` defaults, and the
+`model-registry` SDK calls). The `modelops-registry-http` Route also targets a
+nonexistent `http-api` Service port and is dead. Result: every registry write
+logged `could not connect … (Connect call failed ('172.30.13.101', 8080))` and
+silently skipped.
+
+### Auth model (verified, not guessed)
+
+Read the live proxy config from the running pod
+(`/etc/kube-rbac-proxy/config-file.yaml`): the registry's `kube-rbac-proxy`
+authorizes callers with a **single SubjectAccessReview**:
+
+```yaml
+authorization:
+  resourceAttributes:
+    apiVersion: v1
+    resource: services
+    verb: get
+    namespace: rhoai-model-registries
+    name: modelops-registry
+```
+
+So the *only* K8s-level permission the pipeline needs is `get` on the named
+`Services` `modelops-registry` in `rhoai-model-registries`. The actual
+register/list/update operations go over the REST endpoint into the registry's own
+database — **no `modelregistry.opendatahub.io` CRD RBAC is required at all**.
+TLS is served by a cert signed by `openshift-service-serving-signer`
+(`service.beta.openshift.io/serving-cert-secret-name` annotation), i.e. the
+standard OpenShift service CA. Because that SA-dir
+`/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt` is *not*
+guaranteed on every cluster (the reason Zot added its own fallback), the
+helpers resolve the CA in preference order: **primary** the pod's own
+serviceaccount `service-ca.crt`, **fallback** a dedicated inject-cabundle
+ConfigMap (`model-registry-service-ca`) mounted at `/etc/model-registry-ca` —
+mirroring Zot's `/etc/zot-ca` pattern exactly.
+
+### Node-level vs in-cluster (why not the external Route)
+
+The registry's only consumer is the Tekton pipeline task — a normal pod. Unlike
+`deploy-model`'s ModelCar pull there is no kubelet/DNS constraint analogous to
+Zot's, so there is no reason to accept the external Route exposure. The fix uses
+the in-cluster `https://modelops-registry…:8443` endpoint + a projected SA token.
+
+### What changed
+
+- **Operator default** (`operator/internal/stagecommon/params.go`): `mr-server`
+  default → `https://modelops-registry.rhoai-model-registries.svc.cluster.local`,
+  `mr-port` default → `8443`. (`params_test.go` updated to match.)
+- **PlatformConfig** (`gitops/components/runtime-config/platformconfig.yaml`):
+  `registryServer`/`registryPort` → the same https/8443 values.
+- **RBAC** (`gitops/components/model-registry/registry-rbac.yaml`, added to the
+  kustomization): a `Role` granting `get` on `services/modelops-registry` and a
+  `RoleBinding` to `system:serviceaccount:sandbox:pipeline`.
+- **Tasks** (`model-registry-task.yaml`, `security-scan-task.yaml`,
+  `compliance-artifact-scan-task.yaml`): `mr-server`/`mr-port` defaults → https/8443;
+  a projected `serviceAccountToken` volume (`expirationSeconds: 3600`, no explicit
+  audience) mounted at `/var/run/model-registry`, plus the
+  `model-registry-service-ca` ConfigMap mounted at `/etc/model-registry-ca` as the
+  CA fallback; the registry-writing steps get both mounts +
+  `MR_USER_TOKEN_PATH`/`MR_CA_PATH` env.
+- **CA fallback ConfigMap** (`gitops/components/runtime-config/model-registry-service-ca.yaml`,
+  added to the kustomization): `service.beta.openshift.io/inject-cabundle: "true"`
+  in `sandbox`, mirroring `zot-service-ca`.
+- **Helpers** (register.py, evaluate.py, and the inline `registry_helper.py`
+  embedded in `model-registry-task.yaml`): extract a shared, testable
+  `connection_kwargs(server, port, token, ca_path)` + `resolve_user_token`/
+  `resolve_ca_path`/`read_secret_file`; pass `user_token` and `custom_ca` to the
+  `model_registry` SDK and derive `is_secure` from the `https` scheme (the
+  previous `evaluate.py` hardcoded `is_secure=False` and passed no CA);
+  `resolve_ca_path` now walks a preference order (`MR_CA_PATH` env override, then
+  primary SA CA, then the `/etc/model-registry-ca` fallback).
+- **SDK pinning**: `model-registry` pinned to `==0.3.1` in both tool
+  Containerfiles and in the inline task installs (was unpinned/`0.3.0`); `0.3.1`
+  verified to expose `user_token`/`user_token_envvar`/`custom_ca`/`custom_ca_envvar`.
+- **Tool images** (no quay.io push creds, following the operator's in-cluster
+  build path): rebuilt in-cluster and referenced by digest —
+  `image-registry.openshift-image-registry.svc:5000/modelops/model-registry-helper@sha256:9e8facf6a1088830928bce570714107d7b9e9c9601a8d8388310cc62be2bc458`
+  and
+  `…/modelops/compliance-scanner@sha256:db49714fb19ef8f8afacf5d6b2a511c256dae97e00de56b1a65b90429313ed7b`.
+- **Cross-namespace image pull** (`gitops/components/operator/image-puller-sandbox.yaml`):
+  `RoleBinding` granting `system:image-puller` in `modelops` to
+  `system:serviceaccount:sandbox:pipeline` (the tasks run in `sandbox`, the tool
+  images live in `modelops`).
+
+### Tests (TDD)
+
+- `operator/internal/stagecommon/params_test.go`: default `mr-server`/`mr-port`
+  assertions flipped to https/8443 first (observed red), then `params.go`.
+- `tools/model-registry-helper/tests/test_connection.py` (pytest, 13 cases):
+  https→`is_secure`+`custom_ca`, http→no CA, empty token/CA omitted, file
+  resolution, explicit env path, CA preference/fallback ordering (primary wins;
+  degrades to secondary; explicit env takes precedence), and a drift-guard
+  asserting `evaluate.py`'s `connection_kwargs` matches `register.py`'s.
+  Pre-written (red) then implemented.
+- `internal/stages/tekton/pipeline_yaml_ca_test.go` — narrowed the EvalHub CA
+  guard: it was a blanket `NotContains` on
+  `/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt`, which is now
+  legitimately used by the registry helper (`MR_CA_PATH`). The assertion now only
+  forbids that path as the value of `REQUESTS_CA_BUNDLE`/`SSL_CERT_FILE`.
+
+### Verification (live, sandbox cluster)
+
+- `go test ./...` green for every package except `internal/controller`, which
+  needs envtest binaries (`/usr/local/kubebuilder/bin/etcd` missing locally) —
+  pre-existing environment gap, unrelated.
+- `oc auth can-i get services/modelops-registry -n rhoai-model-registries
+  --as=system:serviceaccount:sandbox:pipeline` → **yes**; same as
+  `system:serviceaccount:sandbox:default` → **no**; `list` (wrong verb) → **no**
+  (confirms the narrow `get`-only scope).
+- `oc auth can-i get imagestreams --subresource=layers -n modelops
+  --as=system:serviceaccount:sandbox:pipeline` → **yes** (cross-ns image pull).
+- Standalone probe pod (`sandbox`, `pipeline` SA, projected token + service-ca,
+  the rebuilt helper image by digest): first run `Registered 'registry-auth-probe'
+  with 3 properties.`; re-run `already registered - updating version 'v1'` /
+  `Updated version 'v1' - merged 3 properties.` — proves image pull, TLS
+  verification, proxy auth, and the register/update code path.
+- Negative probe (`serviceAccountName: default`, no grant) →
+  `could not connect … (403) Reason: Forbidden … user=system:serviceaccount:
+  sandbox:default, verb=get, resource=services` — proves the proxy gate is real
+  and scoped.
+- The inline `registry_helper.py` heredoc extracted from
+  `model-registry-task.yaml` and `py_compile`d + its `connection_kwargs` exercised
+  — the third code copy matches the tested canonical one.
+
+### Follow-up noted
+
+- The `RoleBinding` pins the tenant namespace `sandbox`; multi-tenant onboarding
+  (per-namespace `pipeline` SA) will need one binding per tenant namespace (or a
+  cluster-scoped grant), not deferred here because the registry is confirmed to
+  be written **only** from the ModelRequest namespace (`sandbox`) — the promotion
+  pipeline still runs its Tekton pods in `req.Namespace` (`stagerunner.go`), with
+  `target-namespace`/`staging` only a deployment-target param.
+- `security-scanner` (garak) image remains on `quay.io/jhurlocker/…:v0.1.9`; only
+  the two registry-writing tools were rebuilt. Rebuild it into the internal
+  registry when it next changes.
+- The CA-trust question was resolved by **adding** the same defensive fallback
+  Zot uses (`model-registry-service-ca` inject-cabundle ConfigMap), not by
+  accepting a gap: primary SA-dir `service-ca.crt`, degrade to the mounted
+  ConfigMap, with unit tests pinning the preference order.
+- Full end-to-end onboarding re-run follows commit + ArgoCD sync (the
+  gitops-managed Tasks/PlatformConfig/RBAC are reverted by selfHeal if applied
+  without committing); the probe above is the live proof of the changed
+  mechanism ahead of that integration run.

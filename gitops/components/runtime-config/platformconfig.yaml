@@ -6,8 +6,8 @@ metadata:
 spec:
   complianceS3Bucket: compliance-artifact-results
   securityS3Bucket: security-scan-results
-  registryServer: http://modelops-registry.rhoai-model-registries.svc.cluster.local
-  registryPort: "8080"
+  registryServer: https://modelops-registry.rhoai-model-registries.svc.cluster.local
+  registryPort: "8443"
   registryAuthor: ModelOps Platform Team
   complianceScanImage: registry.access.redhat.com/ubi9/python-311:latest
   complianceIgnoreUnfixed: "true"

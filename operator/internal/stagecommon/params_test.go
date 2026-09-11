@@ -167,8 +167,8 @@ func TestBuildCommonModelParams_DefaultsAppliedWhenFieldsEmpty(t *testing.T) {
 	require.Equal(t, "0.7.1", got["chart-version"])
 	require.Equal(t, "gpu-profile", got["hardware-profile-name"])
 	require.Equal(t, "redhat-ods-applications", got["hardware-profile-namespace"])
-	require.Equal(t, "http://modelops-registry.rhoai-model-registries.svc.cluster.local", got["mr-server"])
-	require.Equal(t, "8080", got["mr-port"])
+	require.Equal(t, "https://modelops-registry.rhoai-model-registries.svc.cluster.local", got["mr-server"])
+	require.Equal(t, "8443", got["mr-port"])
 	require.Equal(t, "ModelOps Platform Team", got["model-reg-author"])
 
 	// Fields with no default that are simply omitted when empty.

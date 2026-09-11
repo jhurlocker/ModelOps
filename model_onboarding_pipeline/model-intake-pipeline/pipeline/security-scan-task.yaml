@@ -63,11 +63,11 @@ spec:
       description: "Model Registry version to update with the garak results."
     - name: mr-server
       type: string
-      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      default: "https://modelops-registry.rhoai-model-registries.svc.cluster.local"
       description: "OpenShift AI Model Registry REST base URL (in-cluster service)."
     - name: mr-port
       type: string
-      default: "8080"
+      default: "8443"
       description: "Model Registry REST port."
     - name: model-reg-author
       type: string
@@ -84,6 +84,20 @@ spec:
     - name: evalhub-service-ca
       configMap:
         name: default-evalhub-service-ca
+    # Short-lived, pod-bound ServiceAccount token for the Model Registry's
+    # kube-rbac-proxy (in-cluster https:8443). See model-registry-task.yaml.
+    - name: model-registry-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+    # Defensive fallback CA trust source for the registry (mirrors
+    # zot-service-ca; primary is the pod's own serviceaccount service-ca.crt).
+    - name: model-registry-service-ca
+      configMap:
+        name: model-registry-service-ca
+        optional: true
   workspaces:
     - name: shared-workspace
       description: Shared workspace for scan results
@@ -144,8 +158,15 @@ spec:
 
     # Update Model Registry with garak results
     - name: update-registry
-      image: quay.io/jhurlocker/model-registry-helper:v0.1.0
+      image: image-registry.openshift-image-registry.svc:5000/modelops/model-registry-helper@sha256:9e8facf6a1088830928bce570714107d7b9e9c9601a8d8388310cc62be2bc458
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: model-registry-token
+          mountPath: /var/run/model-registry
+          readOnly: true
+        - name: model-registry-service-ca
+          mountPath: /etc/model-registry-ca
+          readOnly: true
       env:
         - name: MODEL_NAME
           value: $(params.model-name)
@@ -157,5 +178,9 @@ spec:
           value: $(params.mr-port)
         - name: MR_AUTHOR
           value: $(params.model-reg-author)
+        - name: MR_USER_TOKEN_PATH
+          value: /var/run/model-registry/token
+        - name: MR_CA_PATH
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
         - name: MR_STAGE
           value: security-scan

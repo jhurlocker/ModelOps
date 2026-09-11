@@ -1,0 +1,36 @@
+# Least-privilege access for the ModelOps pipeline ServiceAccount ("pipeline",
+# in the ModelRequest namespace) to the OpenShift AI Model Registry.
+#
+# The Model Registry's kube-rbac-proxy authorizes callers with a single
+# SubjectAccessReview: get on the "modelops-registry" Service in this
+# namespace (read from /etc/kube-rbac-proxy/config-file.yaml of the running
+# modelops-registry pod). The pipeline's registry writes all go through the
+# proxy's REST endpoint into the registry's own database -- they do NOT touch
+# modelregistry.opendatahub.io CRDs -- so this narrow "get services/
+# modelops-registry" grant is the complete and minimum viable K8s-level
+# permission. The caller authenticates with a projected, short-lived
+# ServiceAccount token mounted by the registry-writing Tekton steps.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: modelops-registry-client
+  namespace: rhoai-model-registries
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["modelops-registry"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: modelops-registry-client
+  namespace: rhoai-model-registries
+subjects:
+  - kind: ServiceAccount
+    name: pipeline
+    namespace: sandbox
+roleRef:
+  kind: Role
+  name: modelops-registry-client
+  apiGroup: rbac.authorization.k8s.io

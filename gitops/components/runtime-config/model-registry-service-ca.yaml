@@ -1,0 +1,23 @@
+# OpenShift service-serving CA bundle, injected by the Service CA operator
+# (service.beta.openshift.io/inject-cabundle) into the `service-ca.crt` key.
+# This is the CA that signs the Model Registry's kube-rbac-proxy serving
+# certificate (the service.beta.openshift.io/serving-cert-secret-name
+# annotation on the modelops-registry Service), so mounting it lets the
+# pipeline tasks verify the registry over HTTPS on in-cluster :8443.
+#
+# This is the DEFENSIVE fallback trust source, mirroring zot-service-ca. The
+# primary source is the CA bundle the Service CA operator injects into every
+# pod's own serviceaccount dir (/var/run/secrets/kubernetes.io/serviceaccount/
+# service-ca.crt); the registry-writing steps prefer that path and only fall
+# back to this ConfigMap (mounted at /etc/model-registry-ca) if the SA path
+# isn't populated — because that SA path is not guaranteed on every cluster
+# (see docs/PHASE_LOG.md: the EvalHub CA fix and the Zot TLS phase entry).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-registry-service-ca
+  namespace: sandbox
+  labels:
+    app.kubernetes.io/part-of: modelops
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"

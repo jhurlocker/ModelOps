@@ -8,3 +8,4 @@ resources:
   - mysql-deployment.yaml
   - mysql-service.yaml
   - modelregistry-instance.yaml
+  - registry-rbac.yaml

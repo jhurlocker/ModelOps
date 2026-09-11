@@ -33,11 +33,11 @@ spec:
       default: "ModelOps Platform Team"
     - name: mr-server
       type: string
-      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      default: "https://modelops-registry.rhoai-model-registries.svc.cluster.local"
       description: "OpenShift AI Model Registry REST base URL (in-cluster service)."
     - name: mr-port
       type: string
-      default: "8080"
+      default: "8443"
     - name: staging-namespace
       type: string
       default: "staging"
@@ -69,6 +69,27 @@ spec:
   workspaces:
     - name: shared-workspace
       description: Shared workspace holding benchmark/eval result timestamps + UI routes.
+  volumes:
+    # Short-lived, pod-bound ServiceAccount token used to authenticate to the
+    # Model Registry's kube-rbac-proxy (in-cluster https:8443). No static
+    # Secret to manage; audience left unset so it is valid for the proxy's
+    # default-audience TokenReview.
+    - name: model-registry-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+    # Defensive fallback CA trust source (see resolve_ca_path's preference
+    # order): the registry's serving cert is signed by the OpenShift service
+    # CA. Primary source is the pod's own serviceaccount service-ca.crt; this
+    # inject-cabundle ConfigMap is mounted at /etc/model-registry-ca as the
+    # fallback (mirrors zot-service-ca). Not guaranteed to be injected before
+    # the first PipelineRun in a freshly-labeled namespace, but primary wins.
+    - name: model-registry-service-ca
+      configMap:
+        name: model-registry-service-ca
+        optional: true
   steps:
     # Resolve the benchmark-viewer + S3 UI routes so the registry entry can carry
     # human-friendly links to the GuideLLM results. Previously these files were
@@ -96,6 +117,13 @@ spec:
     - name: update-registry
       image: registry.access.redhat.com/ubi9/python-311
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: model-registry-token
+          mountPath: /var/run/model-registry
+          readOnly: true
+        - name: model-registry-service-ca
+          mountPath: /etc/model-registry-ca
+          readOnly: true
       env:
         - name: WORKSPACE_PATH
           value: $(workspaces.shared-workspace.path)
@@ -111,6 +139,10 @@ spec:
           value: $(params.mr-port)
         - name: MR_AUTHOR
           value: $(params.model-reg-author)
+        - name: MR_USER_TOKEN_PATH
+          value: /var/run/model-registry/token
+        - name: MR_CA_PATH
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
         - name: STAGING_NAMESPACE
           value: $(params.staging-namespace)
         - name: CUSTOM_DATA
@@ -122,7 +154,7 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
-        pip install -q model-registry 2>&1 | grep -v "already satisfied" || true
+        pip install -q model-registry==0.3.1 2>&1 | grep -v "already satisfied" || true
 
         # --- Build the benchmark/eval property set from the workspace files. ---
         cat > /tmp/build_props.py << 'PYEOF'
@@ -198,10 +230,12 @@ spec:
         # Tekton task that writes to the OpenShift AI Model Registry. Driven entirely
         # by environment variables so the same code works at every onboarding stage.
         #
-        #   MR_SERVER          registry REST base, e.g.
-        #                      http://modelops-registry.rhoai-model-registries.svc.cluster.local
-        #   MR_PORT            registry REST port (default 8080)
+        #   MR_SERVER          registry REST base (https in-cluster service, port 8443)
+        #                      https://modelops-registry.rhoai-model-registries.svc.cluster.local
+        #   MR_PORT            registry REST port (default 8443)
         #   MR_AUTHOR          author recorded on the entry
+        #   MR_USER_TOKEN_PATH optional path to the bearer token file (projected SA token)
+        #   MR_CA_PATH         optional path to the service-CA bundle (TLS verification)
         #   MODEL_NAME         registered-model name (identity across the whole pipeline)
         #   MODEL_VERSION      version name (default v1)
         #   MODEL_URI          artifact URI (used only when first registering)
@@ -224,12 +258,66 @@ spec:
             print("[model-registry] {}".format(msg), flush=True)
 
 
+        DEFAULT_REGISTRY_PORT = "8443"
+        DEFAULT_TOKEN_PATH = "/var/run/model-registry/token"
+        LEGACY_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        # CA trust sources in preference order (primary: pod's own SA CA;
+        # fallback: inject-cabundle ConfigMap at /etc/model-registry-ca).
+        DEFAULT_CA_PATHS = (
+            "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt",
+            "/etc/model-registry-ca/service-ca.crt",
+        )
+
+
+        def read_secret_file(paths):
+            for path in paths:
+                try:
+                    with open(path, "r") as f:
+                        value = f.read().strip()
+                    if value:
+                        return value
+                except OSError:
+                    continue
+            return ""
+
+
+        def resolve_user_token(env):
+            explicit = env.get("MR_USER_TOKEN_PATH", "").strip()
+            paths = (
+                [explicit, DEFAULT_TOKEN_PATH, LEGACY_TOKEN_PATH]
+                if explicit
+                else [DEFAULT_TOKEN_PATH, LEGACY_TOKEN_PATH]
+            )
+            return read_secret_file(paths)
+
+
+        def resolve_ca_path(env):
+            explicit = env.get("MR_CA_PATH", "").strip()
+            candidates = list(DEFAULT_CA_PATHS)
+            if explicit:
+                candidates.insert(0, explicit)
+            for path in candidates:
+                if path and os.path.exists(path):
+                    return path
+            return ""
+
+
+        def connection_kwargs(server, port, token, ca_path):
+            is_secure = server.lower().startswith("https")
+            kwargs = {"server_address": server, "port": port, "is_secure": is_secure}
+            if token:
+                kwargs["user_token"] = token
+            if is_secure and ca_path:
+                kwargs["custom_ca"] = ca_path
+            return kwargs
+
+
         def main():
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "model-registry"], check=True)
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "model-registry==0.3.1"], check=True)
             from model_registry import ModelRegistry
 
             server = os.environ["MR_SERVER"].rstrip("/")
-            port = int(os.environ.get("MR_PORT", "8080"))
+            port = int(os.environ.get("MR_PORT", DEFAULT_REGISTRY_PORT))
             author = os.environ.get("MR_AUTHOR", "ModelOps Platform")
             name = os.environ["MODEL_NAME"]
             version = os.environ.get("MODEL_VERSION", "v1")
@@ -250,9 +338,12 @@ spec:
                 merged["onboarding-stage"] = stage
             merged["last-updated"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-            is_secure = server.lower().startswith("https")
+            token = resolve_user_token(os.environ)
+            ca_path = resolve_ca_path(os.environ)
+            kwargs = connection_kwargs(server, port, token, ca_path)
+            kwargs["author"] = author
             try:
-                client = ModelRegistry(server_address=server, port=port, author=author, is_secure=is_secure)
+                client = ModelRegistry(**kwargs)
             except Exception as e:
                 log("WARNING: could not connect to model registry at {}:{} ({}). "
                     "Skipping registry update.".format(server, port, e))

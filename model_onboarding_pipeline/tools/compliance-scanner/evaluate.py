@@ -11,7 +11,8 @@ Environment variables:
   ARTIFACT_SCAN_IMAGE image scanned by Trivy
   CVE_THRESHOLD      critical, high, or none
   ALLOWED_ARCHES     comma-separated allowed CPU architectures
-  MR_SERVER, MR_PORT, MR_AUTHOR  Model Registry connection
+  MR_SERVER, MR_PORT, MR_AUTHOR  Model Registry connection (https in-cluster :8443)
+  MR_USER_TOKEN_PATH, MR_CA_PATH optional token/CA-bundle paths for TLS + proxy auth
   S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET, S3_UI_ROUTE
   TIMESTAMP           run timestamp for S3 prefix
 """
@@ -46,6 +47,63 @@ def load_json(path, default=None):
         return default if default is not None else {}
 
 
+DEFAULT_REGISTRY_PORT = "8443"
+DEFAULT_TOKEN_PATH = "/var/run/model-registry/token"
+LEGACY_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+# CA trust sources in preference order: primary is the pod's own injected SA
+# CA bundle; fallback is the dedicated inject-cabundle ConfigMap mounted at
+# /etc/model-registry-ca (mirrors Zot's /etc/zot-ca). The SA-dir service-ca.crt
+# is not guaranteed on every cluster (see docs/PHASE_LOG.md).
+DEFAULT_CA_PATHS = (
+    "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt",
+    "/etc/model-registry-ca/service-ca.crt",
+)
+
+
+def read_secret_file(paths):
+    """Return the first non-empty file content from `paths`, else ""."""
+    for path in paths:
+        try:
+            with open(path, "r") as f:
+                value = f.read().strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    return ""
+
+
+def resolve_user_token(env):
+    explicit = env.get("MR_USER_TOKEN_PATH", "").strip()
+    paths = (
+        [explicit, DEFAULT_TOKEN_PATH, LEGACY_TOKEN_PATH]
+        if explicit
+        else [DEFAULT_TOKEN_PATH, LEGACY_TOKEN_PATH]
+    )
+    return read_secret_file(paths)
+
+
+def resolve_ca_path(env):
+    explicit = env.get("MR_CA_PATH", "").strip()
+    candidates = list(DEFAULT_CA_PATHS)
+    if explicit:
+        candidates.insert(0, explicit)
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def connection_kwargs(server, port, token, ca_path):
+    is_secure = server.lower().startswith("https")
+    kwargs = {"server_address": server, "port": port, "is_secure": is_secure}
+    if token:
+        kwargs["user_token"] = token
+    if is_secure and ca_path:
+        kwargs["custom_ca"] = ca_path
+    return kwargs
+
+
 def register_in_model_registry():
     """Register/update the model in the OpenShift AI Model Registry.
     Uses the model-registry Python client with an explicit SA token."""
@@ -59,7 +117,7 @@ def register_in_model_registry():
     sandbox = os.path.join(ws, "compliance-artifact-sandbox")
 
     mr_server = os.environ.get("MR_SERVER", "").rstrip("/")
-    mr_port = int(os.environ.get("MR_PORT", "8080"))
+    mr_port = int(os.environ.get("MR_PORT", DEFAULT_REGISTRY_PORT))
     name = os.environ.get("MODEL_NAME", "unknown-model")
     version = os.environ.get("MODEL_VERSION", "v1")
     author = os.environ.get("MR_AUTHOR", "ModelOps Platform Team")
@@ -100,21 +158,13 @@ def register_in_model_registry():
     }
     props = {k: v for k, v in props.items() if v}
 
-    token = ""
-    try:
-        with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
-            token = f.read().strip()
-    except Exception:
-        pass
+    token = resolve_user_token(os.environ)
+    ca_path = resolve_ca_path(os.environ)
+    kwargs = connection_kwargs(mr_server, mr_port, token, ca_path)
+    kwargs["author"] = author
 
     try:
-        registry = ModelRegistry(
-            server_address=mr_server,
-            port=mr_port,
-            is_secure=False,
-            user_token=token,
-            author=author,
-        )
+        registry = ModelRegistry(**kwargs)
     except Exception as e:
         print(f"  ERROR connecting to Model Registry: {e}", flush=True)
         return

@@ -174,8 +174,8 @@ func BuildCommonModelParams(
 	// in the synthetic/test-fixture case where it's unset.
 	AddParam(p, "result-s3-secret-name", secrets.ResultS3SecretName)
 
-	AddParam(p, "mr-server", StrOrDefault(cfg.Spec.RegistryServer, "http://modelops-registry.rhoai-model-registries.svc.cluster.local"))
-	AddParam(p, "mr-port", StrOrDefault(cfg.Spec.RegistryPort, "8080"))
+	AddParam(p, "mr-server", StrOrDefault(cfg.Spec.RegistryServer, "https://modelops-registry.rhoai-model-registries.svc.cluster.local"))
+	AddParam(p, "mr-port", StrOrDefault(cfg.Spec.RegistryPort, "8443"))
 	AddParam(p, "model-reg-author", StrOrDefault(cfg.Spec.RegistryAuthor, "ModelOps Platform Team"))
 
 	return p

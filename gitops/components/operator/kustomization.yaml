@@ -9,6 +9,7 @@ resources:
   - clusterrolebinding.yaml
   - clusterrolebinding-edit.yaml
   - clusterrole-maas.yaml
+  - image-puller-sandbox.yaml
   - deployment.yaml
   - crd-modelrequests.yaml
   - crd-lifecycleprofiles.yaml

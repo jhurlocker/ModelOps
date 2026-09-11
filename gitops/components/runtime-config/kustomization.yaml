@@ -12,3 +12,4 @@ resources:
   - result-s3-credentials-sealedsecret.yaml
   - zot-push-credentials-sealedsecret.yaml
   - zot-service-ca.yaml
+  - model-registry-service-ca.yaml

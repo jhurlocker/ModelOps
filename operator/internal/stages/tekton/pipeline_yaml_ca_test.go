@@ -24,6 +24,7 @@ package tekton
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -87,8 +88,17 @@ func TestPipelineYAML_EvalHubTasks_UseCorrectCABundle(t *testing.T) {
 		require.Contains(t, text, evalHubCABundleEnvVal,
 			"%s must set a CA bundle env var to %q (REQUESTS_CA_BUNDLE for requests-based scripts, SSL_CERT_FILE for urllib-based scripts)",
 			filename, evalHubCABundleEnvVal)
-		require.NotContains(t, text, oldBrokenCABundlePath,
-			"%s must NOT use the old broken CA bundle path %q",
+		// The EvalHub CA-bundle env vars must not point at the old broken
+		// serviceaccount path. That path is now legitimately used by OTHER
+		// clients (e.g. the Model Registry helper's MR_CA_PATH, whose serving
+		// cert is signed by the standard service-signing CA actually carried
+		// in service-ca.crt), so a blanket substring ban is wrong -- only the
+		// EvalHub bundle value is guarded here.
+		brokenAsBundle := regexp.MustCompile(
+			`(?m)- name: (REQUESTS_CA_BUNDLE|SSL_CERT_FILE)\n\s+value:\s*` +
+				regexp.QuoteMeta(oldBrokenCABundlePath))
+		require.NotRegexp(t, brokenAsBundle, text,
+			"%s must not point REQUESTS_CA_BUNDLE/SSL_CERT_FILE at the old broken path %q",
 			filename, oldBrokenCABundlePath)
 	}
 }

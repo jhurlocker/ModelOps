@@ -72,11 +72,11 @@ spec:
       description: "Comma-separated CPU architectures permitted by compliance policy."
     - name: mr-server
       type: string
-      default: "http://modelops-registry.rhoai-model-registries.svc.cluster.local"
+      default: "https://modelops-registry.rhoai-model-registries.svc.cluster.local"
       description: "OpenShift AI Model Registry REST base URL (in-cluster service)."
     - name: mr-port
       type: string
-      default: "8080"
+      default: "8443"
       description: "Model Registry REST port."
     - name: model-reg-author
       type: string
@@ -114,6 +114,20 @@ spec:
     - name: zot-service-ca
       configMap:
         name: zot-service-ca
+        optional: true
+    # Short-lived, pod-bound ServiceAccount token for the Model Registry's
+    # kube-rbac-proxy (in-cluster https:8443). See model-registry-task.yaml.
+    - name: model-registry-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+    # Defensive fallback CA trust source for the registry (mirrors
+    # zot-service-ca; primary is the pod's own serviceaccount service-ca.crt).
+    - name: model-registry-service-ca
+      configMap:
+        name: model-registry-service-ca
         optional: true
   workspaces:
     - name: shared-workspace
@@ -262,7 +276,7 @@ spec:
     # Containerized compliance scanner - versioned, tested, auditable.
     # ----------------------------------------------------------------------
     - name: evaluate-and-upload
-      image: quay.io/jhurlocker/compliance-scanner:v0.1.4
+      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:db49714fb19ef8f8afacf5d6b2a511c256dae97e00de56b1a65b90429313ed7b
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_ID
@@ -374,8 +388,15 @@ spec:
 
     # --- Register model in Model Registry (best-effort, even on failure) ---
     - name: register-model
-      image: quay.io/jhurlocker/compliance-scanner:v0.1.4
+      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:db49714fb19ef8f8afacf5d6b2a511c256dae97e00de56b1a65b90429313ed7b
       workingDir: $(workspaces.shared-workspace.path)
+      volumeMounts:
+        - name: model-registry-token
+          mountPath: /var/run/model-registry
+          readOnly: true
+        - name: model-registry-service-ca
+          mountPath: /etc/model-registry-ca
+          readOnly: true
       env:
         - name: WORKSPACE_PATH
           value: $(workspaces.shared-workspace.path)
@@ -389,6 +410,10 @@ spec:
           value: $(params.mr-port)
         - name: MR_AUTHOR
           value: $(params.model-reg-author)
+        - name: MR_USER_TOKEN_PATH
+          value: /var/run/model-registry/token
+        - name: MR_CA_PATH
+          value: /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
         - name: MODEL_ID
           value: $(params.model-id)
         - name: ARTIFACT_SCAN_IMAGE
