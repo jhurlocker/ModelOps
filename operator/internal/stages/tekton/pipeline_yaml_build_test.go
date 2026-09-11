@@ -42,6 +42,10 @@ type pipelineTaskDoc struct {
 			Name     string   `json:"name"`
 			RunAfter []string `json:"runAfter"`
 		} `json:"tasks"`
+		Results []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"results"`
 	} `json:"spec"`
 }
 
@@ -169,6 +173,28 @@ func TestPipelineYAML_BuildModelcar_EmitsNodeResolvablePullReference(t *testing.
 		"pull-ref must use the Route hostname, not the internal Service DNS")
 }
 
+// TestPipelineYAML_SandboxSurfacesModelcarResultsAtPipelineLevel pins the
+// piece that actually carries build-modelcar's output out of Tekton and into
+// the operator: the Pipeline-level results block. Task-level results alone
+// never reach PipelineRun.status.results (what tekton.StageRunner reads), so
+// without these two mappings the operator's promotion handler has no
+// image-ref/pull-ref to consume in a real deployment. image-ref (internal
+// Service DNS) and pull-ref (node-resolvable Route hostname) must BOTH be
+// declared here, in this order, referencing the build-modelcar task results.
+func TestPipelineYAML_SandboxSurfacesModelcarResultsAtPipelineLevel(t *testing.T) {
+	var doc pipelineTaskDoc
+	require.NoError(t, yaml.Unmarshal([]byte(readPipelineYAMLFile(t, "sandbox-pipeline.yaml")), &doc))
+	require.Len(t, doc.Spec.Results, 2, "sandbox-pipeline.yaml must surface exactly two Pipeline-level results")
+
+	require.Equal(t, "image-ref", doc.Spec.Results[0].Name)
+	require.Equal(t, "$(tasks.build-modelcar.results.image-ref)", doc.Spec.Results[0].Value,
+		"image-ref must map up from the build-modelcar task result (internal Service DNS)")
+
+	require.Equal(t, "pull-ref", doc.Spec.Results[1].Name)
+	require.Equal(t, "$(tasks.build-modelcar.results.pull-ref)", doc.Spec.Results[1].Value,
+		"pull-ref must map up from the build-modelcar task result (node-resolvable Route hostname)")
+}
+
 // TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy pins the
 // Phase C sandbox-pipeline companion wiring: compliance-artifact-scan must
 // consume the internal image-ref (in-cluster skopeo inspect), while
@@ -180,10 +206,14 @@ func TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy(t *testing.T) 
 
 	const internalRef = "value: $(tasks.build-modelcar.results.image-ref)"
 	const pullRef = "value: $(tasks.build-modelcar.results.pull-ref)"
-	require.Equal(t, 1, strings.Count(text, internalRef),
-		"exactly one sandbox task (compliance-artifact-scan) must consume the internal image-ref result")
-	require.Equal(t, 1, strings.Count(text, pullRef),
-		"exactly one sandbox task (deploy-model) must consume the node-resolvable pull-ref result")
+	// Each reference appears exactly twice: once as a task param
+	// (compliance-artifact-scan for image-ref, deploy-model for pull-ref) and
+	// once in the Pipeline-level results block that surfaces it into
+	// PipelineRun.status.results for the operator to read.
+	require.Equal(t, 2, strings.Count(text, internalRef),
+		"image-ref must be consumed by exactly one task (compliance-artifact-scan) AND surfaced once at the Pipeline level")
+	require.Equal(t, 2, strings.Count(text, pullRef),
+		"pull-ref must be consumed by exactly one task (deploy-model) AND surfaced once at the Pipeline level")
 
 	// The old param-forwarding must be gone from the sandbox pipeline --
 	// modelcar-image now comes from the build result, never from a

@@ -5092,9 +5092,26 @@ cluster-environment auth issue, not a code issue) despite a clean `podman`-side
 push/pull via the exposed default route. The cluster was reverted to its prior
 state (deployment image restored to `quay.io/...:latest`, ArgoCD auto-sync
 re-enabled, registry `defaultRoute` reverted). The promotion `modelcar-image`
-behavior is nonetheless covered end-to-end by
+behavior is covered by
 `TestModelRequest_ImageRefResult_SetsPromotionModelcarImage_AndPersists` against
-a real `envtest` apiserver.
+a real `envtest` apiserver, but **only as logic-verified, not
+infrastructure-verified** -- that test scripts a fake `StageRunner` to inject
+the `image-ref` result, so it proves the operator-side mapping (result ->
+modelcar-image param) without proving that a real PipelineRun ever produced the
+result in the first place.
+
+**Post-hoc correction (see the follow-up phase entry appended at the end of this
+log):** the "operator-side mechanism" here was correct *in code* but was never
+deployed to this cluster (the rebuild was blocked as described above), and in
+addition the sandbox Pipeline itself **never surfaced `image-ref` at the
+Pipeline level** -- `model-intake-sandbox` had no `spec.results` block, and
+Tekton does NOT promote a Task's results into `PipelineRun.status.results`
+without one. So a real deployment would have produced **no** `PipelineRun`
+results for `buildResults` (the `tekton.StageRunner` reader) to forward, even if
+the operator image had been running. Every prior "end-to-end" claim for this
+feature must therefore be read as *logic-verified via fake-runner/envtest*, not
+*infrastructure-verified*, until the follow-up that (a) adds the Pipeline-level
+`results` block and (b) redeploys the operator.
 
 ### TLS investigation (input to the Zot TLS decision)
 
@@ -5680,3 +5697,64 @@ NOT folded in here.
 - `resolve-registry-host` uses `openshift/cli:latest` (floating tag), matching
   the existing `grant-model-access` precedent; pinning to a digest would be a
   small hardening follow-up.
+
+## Pipeline-level results — surface `image-ref`/`pull-ref` into `PipelineRun.status.results`
+
+### Why this matters
+
+The Phase C entry above already flagged the operator-deploy blocker, but there
+was a second, independent gap that made the results flow non-functional in a
+real deployment regardless of the operator: `model-intake-sandbox` declared the
+`image-ref`/`pull-ref` contract only at the **Task** level
+(`build-modelcar`'s results, consumed by sibling tasks). Tekton does **not**
+promote a Task's results into a `PipelineRun`'s `status.results` automatically
+-- that requires an explicit Pipeline-level `spec.results` mapping. Without it,
+`tekton.StageRunner.buildResults` (which reads `PipelineRun.status.results`)
+would always see an empty/nil slice, so `ModelRequest.Status.Stages[sandbox].Results`
+would never be persisted and promotion would never receive `image-ref`/`pull-ref`.
+
+This phase adds that missing mapping.
+
+### What changed
+
+- `sandbox-pipeline.yaml`: new `spec.results` block mapping
+  `image-ref` -> `$(tasks.build-modelcar.results.image-ref)` and
+  `pull-ref` -> `$(tasks.build-modelcar.results.pull-ref)` up to the Pipeline
+  level. For `oci`/`s3` sources the `build-modelcar` task is skipped, the
+  references resolve to empty strings, and `buildResults` drops them (its
+  existing `StringVal == ""` guard) -- preserving the negative path.
+- `internal/stages/tekton/pipeline_yaml_build_test.go`: extended the
+  `pipelineTaskDoc` helper with a `results` field; added
+  `TestPipelineYAML_SandboxSurfacesModelcarResultsAtPipelineLevel` (pins the two
+  Pipeline-level mappings) and updated
+  `TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy` to account for
+  each reference now appearing twice (once as a task param, once in the
+  Pipeline results block).
+
+### Verification status — honest, not overclaimed
+
+- Static YAML tests: green (the new Pipeline-level mapping is pinned).
+- Full suite: `go build ./...`, `go vet ./...`, and
+  `go test ./internal/stages/tekton/ ./internal/stages/promotion/ ./internal/stagecommon/ ./internal/stagewalk/ ./internal/controller/`
+  all pass (including the envtest-backed `internal/controller` suite).
+- **NOT infra-verified live**: the two live checks this phase was meant to
+  close (a real `PipelineRun.status.results` carrying `image-ref`/`pull-ref`,
+  and the persisted `ModelRequest.Status.Stages[sandbox].Results`) remain
+  blocked for the same reason as Phase C -- the running operator
+  (`quay.io/jhurlocker/modelops-operator:latest`, `imagePullPolicy: Always`)
+  is **pre-Phase-C**: binary inspection of the live `/usr/local/bin/manager`
+  confirms the strings `image-ref`/`pull-ref` are absent, so it has neither
+  `buildResults`/`StageResult` forwarding nor the promotion `pull-ref`
+  preference. No quay.io push credentials and the S3-backed internal registry's
+  kubelet-pull auth failure (both documented in the Phase C entry) still block
+  redeploying the operator.
+
+### Follow-up / limitations
+
+- Redeploy the operator is the gating step: once a rebuilt image (with the
+  Phase C + pull-ref Go changes) is running, then -- and only then -- can the
+  live checks be performed: (1) a HuggingFace `ModelRequest` completing its
+  sandbox `PipelineRun` with non-empty `status.results.image-ref`/`pull-ref`,
+  (2) `Status.Stages[sandbox].Results` persisting them, (3) promotion's
+  `spec.params.modelcar-image` = `pull-ref`, (4) the `oci`/`s3` negative path
+  producing no `modelcar-image` param.

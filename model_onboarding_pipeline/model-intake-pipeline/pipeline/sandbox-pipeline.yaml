@@ -429,6 +429,21 @@ spec:
         - name: shared-workspace
           workspace: shared-workspace
 
+  # Surface build-modelcar's OCI references at the Pipeline level so they
+  # land in PipelineRun.status.results, which tekton.StageRunner reads and
+  # forwards into the operator's StageContext.Results (and thus into the
+  # persisted ModelRequest.Status.Stages[sandbox].Results and downstream
+  # promotion params). image-ref is the internal Service DNS reference for
+  # in-cluster consumers (compliance-artifact-scan); pull-ref is the
+  # node-resolvable Route hostname for NODE-level pulls (deploy-model).
+  # For oci/s3 sources build-modelcar is skipped (when: in [huggingface]),
+  # so both results resolve to empty strings and buildResults drops them.
+  results:
+    - name: image-ref
+      value: $(tasks.build-modelcar.results.image-ref)
+    - name: pull-ref
+      value: $(tasks.build-modelcar.results.pull-ref)
+
   workspaces:
     - name: shared-workspace
       description: Shared workspace for the sandbox pipeline
