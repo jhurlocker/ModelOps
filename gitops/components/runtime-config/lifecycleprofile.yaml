@@ -49,6 +49,12 @@ spec:
       namespaceSetup:
         ensureRBAC: true
         labels:
+          # Required so the sandbox namespace is admitted by the ODH
+          # NetworkPolicy that gates ingress to redhat-ods-applications
+          # (and thus EvalHub). Without it, the sandbox security-scan task
+          # cannot reach default-evalhub.svc:8443 and fails with a
+          # ConnectTimeout. The promotion stage sets the same label.
+          opendatahub.io/generated-namespace: "true"
           evalhub.trustyai.opendatahub.io/tenant: ""
     - name: promotion
       kind: PipelineRun
@@ -73,8 +79,7 @@ spec:
           # system:serviceaccount:redhat-ods-applications:
           # default-evalhub-service in namespace "staging".
           # Any future per-namespace promotion stage must
-          # include this label (matching what the sandbox
-          # stage already has).
+          # include this label (as does the sandbox stage above).
           evalhub.trustyai.opendatahub.io/tenant: ""
           maas.opendatahub.io/gateway-access: "true"
           opendatahub.io/dashboard: "true"
