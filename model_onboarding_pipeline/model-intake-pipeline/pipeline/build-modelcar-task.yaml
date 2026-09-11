@@ -92,6 +92,11 @@ spec:
   steps:
     - name: resolve-registry-host
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      env:
+        - name: MODEL_NAME
+          value: $(params.model-name)
+        - name: MODEL_VERSION
+          value: $(params.model-version)
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
@@ -106,8 +111,17 @@ spec:
           echo "FATAL: could not resolve the Zot Route hostname (route 'zot' in namespace 'modelops-zot')" >&2
           exit 1
         fi
+
+        # Emit BOTH the raw route host (traceability) and the full
+        # node-resolvable pull reference from THIS step. The build-and-push
+        # step cannot rely on $(steps.resolve-registry-host.results.route-host)
+        # value interpolation (observed NOT substituted by Tekton v1 -- the env
+        # arrives as the literal text -- while $(params.*) interpolation does
+        # work), so pull-ref is composed here from params + the resolved host.
         printf '%s' "${HOST}" > "$(results.route-host.path)"
+        printf '%s' "${HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"
         echo "Resolved Zot pull host: ${HOST}"
+        echo "Node-pull reference: ${HOST}/${MODEL_NAME}:${MODEL_VERSION}"
     - name: build-and-push
       image: $(params.buildah-image)
       # SETFCAP is required for buildah to create its (rootless-style) user
@@ -134,8 +148,6 @@ spec:
           value: $(params.model-version)
         - name: REGISTRY_URL
           value: $(params.registry-url)
-        - name: ROUTE_HOST
-          value: $(steps.resolve-registry-host.results.route-host)
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
@@ -251,16 +263,15 @@ spec:
           "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" \
           "docker://${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
 
-        # Emit the two references for downstream tasks / Phase C:
+        # Emit the in-cluster reference for downstream tasks / Phase C.
+        # (pull-ref is emitted by the resolve-registry-host step, where the
+        # route hostname is resolved -- see that step's note about Tekton not
+        # interpolating $(steps.X.results.Y) values; build-and-push keeps no
+        # ROUTE_HOST env for the same reason.)
         #   image-ref = Zot's internal Service DNS (in-cluster consumers,
         #               e.g. compliance-artifact-scan's skopeo inspect)
-        #   pull-ref  = Zot's Route hostname (node-resolvable, consumed by
-        #               deploy-model whose KServe pods pull at the node
-        #               level, where .svc.cluster.local does NOT resolve)
         printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
-        printf '%s' "${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"
         echo "Built and pushed: ${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
-        echo "Node-pull reference: ${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
   volumes:
     # Mounted into the build-and-push step as the fallback service-CA source.
     # optional: the primary source is the pod's own serviceaccount CA bundle,

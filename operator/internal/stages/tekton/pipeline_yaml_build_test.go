@@ -163,14 +163,18 @@ func TestPipelineYAML_BuildModelcar_EmitsNodeResolvablePullReference(t *testing.
 		"build-modelcar must resolve the Zot Route hostname in a dedicated resolve-registry-host step")
 	require.Contains(t, text, "oc get route zot -n modelops-zot",
 		"resolve-registry-host must read the live Zot Route hostname (no committed host)")
-	require.Contains(t, text, "$(steps.resolve-registry-host.results.route-host)",
-		"the build-and-push step must consume the resolved route-host result")
 
-	// image-ref (internal) and pull-ref (route) must be emitted separately.
+	// pull-ref is composed in the resolve-registry-host step (not in
+	// build-and-push), because Tekton v1 does NOT interpolate
+	// $(steps.X.results.Y) environment values -- the env arrives as the literal
+	// text, while $(params.X) interpolation works. pull-ref therefore uses the
+	// resolved shell HOST + MODEL_NAME/MODEL_VERSION sourced from params.
+	require.Contains(t, text, `printf '%s' "${HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"`,
+		"pull-ref must be composed in resolve-registry-host from the resolved host + model name/version")
 	require.Contains(t, text, `"${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"`,
 		"image-ref must use the internal Service DNS registry host")
-	require.Contains(t, text, `"${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"`,
-		"pull-ref must use the Route hostname, not the internal Service DNS")
+	require.NotContains(t, text, "name: ROUTE_HOST",
+		"build-and-push must not declare a ROUTE_HOST env var sourced from $(steps.resolve-registry-host.results.route-host) (not interpolated by Tekton)")
 }
 
 // TestPipelineYAML_SandboxSurfacesModelcarResultsAtPipelineLevel pins the
