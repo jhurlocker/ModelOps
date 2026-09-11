@@ -19,7 +19,7 @@ spec:
       serviceAccountName: modelops-operator
       containers:
         - name: manager
-          image: quay.io/jhurlocker/modelops-operator:latest
+          image: image-registry.openshift-image-registry.svc:5000/modelops/modelops-operator:latest
           imagePullPolicy: Always
           command:
             - /usr/local/bin/manager
