@@ -258,6 +258,37 @@ func TestBuildSpec_ImageRefResult_SetsModelcarImage(t *testing.T) {
 // guard), so no image-ref result exists, and the promotion stage must
 // produce params byte-identical to today -- no modelcar-image key at all,
 // model-id still the source of truth.
+// TestBuildSpec_PullRefResult_WinsOverImageRef covers the node-level pull
+// split: when the sandbox stage produced both references, promotion's
+// deploy-model pulls at the node level, so modelcar-image must bind the
+// node-resolvable pull-ref (Zot's Route hostname), not the in-cluster
+// image-ref (internal Service DNS).
+func TestBuildSpec_PullRefResult_WinsOverImageRef(t *testing.T) {
+	mr, cfg, plan, secrets := fullCharacterizationFixture()
+
+	sc := stagecommon.StageContext{
+		ModelRequest:   mr,
+		PlatformConfig: cfg,
+		CapacityPlan:   plan,
+		Secrets:        secrets,
+		Stage:          modelopsv1alpha1.ProfileStageSpec{Name: "promotion", PerNamespace: true},
+		Namespace:      "prod-ns",
+		NamespaceIndex: 0,
+		NamespaceCount: 1,
+		Results: []stagecommon.StageResult{
+			{Name: stagecommon.ResultImageRef, Value: "zot.modelops-zot.svc.cluster.local:5000/smollm2-135m-instruct:v1"},
+			{Name: stagecommon.ResultPullImageRef, Value: "zot-modelops-zot.apps.cluster/smollm2-135m-instruct:v1"},
+		},
+	}
+
+	spec, err := Handler{}.BuildSpec(sc)
+	require.NoError(t, err)
+
+	require.Equal(t, "zot-modelops-zot.apps.cluster/smollm2-135m-instruct:v1",
+		spec.Params["modelcar-image"],
+		"modelcar-image must bind the node-resolvable pull-ref when present")
+}
+
 func TestBuildSpec_NoImageRefResult_ProducesIdenticalParams(t *testing.T) {
 	mr, cfg, plan, secrets := fullCharacterizationFixture()
 

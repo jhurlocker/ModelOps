@@ -60,6 +60,15 @@ type StageResult struct {
 // other's package.
 const ResultImageRef = "image-ref"
 
+// ResultPullImageRef is the node-resolvable counterpart to ResultImageRef:
+// the same Zot-built ModelCar image referenced by Zot's Route hostname
+// rather than the internal Service DNS. Node-level image pulls (kubelet/
+// CRI-O running in the node's host network namespace) cannot resolve
+// .svc.cluster.local at all, so deploy-model's KServe serving pods pull
+// via this reference; in-cluster consumers keep ResultImageRef. Both are
+// emitted by build-modelcar and carried forward identically by the walker.
+const ResultPullImageRef = "pull-ref"
+
 // StageStatus is the generic status contract a StageRunner reports back
 // to the reconciler for a single stage run. Modeled after Kubernetes'
 // own metav1.Condition pattern (Reason/Message), reduced to exactly the

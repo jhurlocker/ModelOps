@@ -23,11 +23,15 @@
 #     htpasswd file -- see gitops/components/runtime-config/secrets.yaml for
 #     the rotation-coupling caveat (rotate both together or push auth
 #     breaks silently).
-#   - The push target is Zot's internal Service DNS (now HTTPS on :5000),
-#     per the gitops/README.md rule that in-cluster consumers use internal
-#     DNS, never the external Route. Zot serves TLS with an OpenShift
-#     service-serving cert; the step installs the service CA into the trust
-#     store and pushes with full TLS verification.
+#   - The push target is Zot's internal Service DNS (now HTTPS on :5000), and
+#     the push verifies Zot's OpenShift service-serving cert (service CA).
+#     Two references are emitted, splitting in-cluster vs node-level
+#     consumers: `image-ref` (internal Service DNS, for in-cluster consumers
+#     like compliance-artifact-scan) and `pull-ref` (Zot's Route hostname,
+#     for deploy-model's node-level kubelet pull -- the node's OS resolver
+#     cannot resolve .svc.cluster.local names at all). The Route hostname is
+#     resolved at runtime (see the resolve-registry-host step); its TLS cert
+#     is the router's public *.apps wildcard, trusted by the node by default.
 #
 # Builder execution: buildah runs rootless with the vfs storage driver,
 # which avoids needing overlayfs or privileged access on OpenShift.
@@ -42,9 +46,10 @@ spec:
     as the "image-ref" result, consumed by downstream tasks (and Phase C).
 
     image-ref value shape: <registry-url>/<model-name>:<model-version>,
-    e.g. zot.modelops-zot.svc.cluster.local:5000/granite-2b:v1 -- the
-    in-cluster Service DNS (pullable by any in-cluster consumer), NOT the
-    external zot-ui Route.
+    e.g. zot.modelops-zot.svc.cluster.local:5000/granite-2b:v1 -- Zot's
+    internal Service DNS, for in-cluster consumers. pull-ref is the same
+    image via the node-resolvable Route hostname, consumed by deploy-model
+    for the node-level (kubelet) pull.
   params:
     - name: model-id
       type: string
@@ -72,15 +77,37 @@ spec:
     - name: registry-url
       type: string
       default: "zot.modelops-zot.svc.cluster.local:5000"
-      description: "Zot registry host:port (internal Service DNS; HTTPS, verified against the installed service CA)."
+      description: "Zot registry PUSH target host:port (internal Service DNS; HTTPS, verified against the installed service CA). The node-level PULL reference is derived separately from the Route hostname."
     - name: buildah-image
       type: string
       default: "quay.io/buildah/stable:v1.43.2"
       description: "Pinned buildah image used for the build and push."
   results:
     - name: image-ref
-      description: "Full OCI reference of the pushed ModelCar image: <registry-url>/<model-name>:<model-version>."
+      description: "Full OCI reference of the ModelCar image on Zot's internal Service DNS: <registry-url>/<model-name>:<model-version>."
+    - name: pull-ref
+      description: "Full OCI reference of the ModelCar image via the Zot Route hostname (node-resolvable): <route-host>/<model-name>:<model-version>."
+    - name: route-host
+      description: "The Zot Route hostname, resolved at runtime from the modelops-zot Route."
   steps:
+    - name: resolve-registry-host
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # The Zot Route hostname is auto-generated at apply time (no spec.host
+        # is committed), so resolve it from the live cluster. This is the ONLY
+        # reference the node's kubelet/CRI-O can resolve when pulling the
+        # ModelCar image -- the internal Service DNS does not resolve from the
+        # node host (it uses the node's OS resolver, not CoreDNS).
+        HOST="$(oc get route zot -n modelops-zot -o jsonpath='{.spec.host}')"
+        if [ -z "${HOST}" ]; then
+          echo "FATAL: could not resolve the Zot Route hostname (route 'zot' in namespace 'modelops-zot')" >&2
+          exit 1
+        fi
+        printf '%s' "${HOST}" > "$(results.route-host.path)"
+        echo "Resolved Zot pull host: ${HOST}"
     - name: build-and-push
       image: $(params.buildah-image)
       # SETFCAP is required for buildah to create its (rootless-style) user
@@ -107,6 +134,8 @@ spec:
           value: $(params.model-version)
         - name: REGISTRY_URL
           value: $(params.registry-url)
+        - name: ROUTE_HOST
+          value: $(steps.resolve-registry-host.results.route-host)
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
@@ -222,9 +251,16 @@ spec:
           "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" \
           "docker://${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
 
-        # Emit the full reference for downstream tasks / Phase C.
+        # Emit the two references for downstream tasks / Phase C:
+        #   image-ref = Zot's internal Service DNS (in-cluster consumers,
+        #               e.g. compliance-artifact-scan's skopeo inspect)
+        #   pull-ref  = Zot's Route hostname (node-resolvable, consumed by
+        #               deploy-model whose KServe pods pull at the node
+        #               level, where .svc.cluster.local does NOT resolve)
         printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
+        printf '%s' "${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"
         echo "Built and pushed: ${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
+        echo "Node-pull reference: ${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
   volumes:
     # Mounted into the build-and-push step as the fallback service-CA source.
     # optional: the primary source is the pod's own serviceaccount CA bundle,

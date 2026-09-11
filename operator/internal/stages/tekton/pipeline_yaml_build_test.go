@@ -139,21 +139,51 @@ func TestPipelineYAML_BuildModelcarTask_PinnedBuildahImage_NeverLatest(t *testin
 func TestPipelineYAML_BuildModelcar_RegistryUrlIsInternalServiceDNS(t *testing.T) {
 	text := readPipelineYAMLFile(t, buildModelcarTaskFile)
 	require.Contains(t, text, "zot.modelops-zot.svc.cluster.local:5000",
-		"build-modelcar must push to Zot's internal Service DNS (HTTP), never the external Route")
+		"build-modelcar must PUSH to Zot's internal Service DNS (the Route hostname is only used for the emitted node-level pull reference)")
+}
+
+// TestPipelineYAML_BuildModelcar_EmitsNodeResolvablePullReference pins the
+// node-level pull fix: build-modelcar must emit BOTH an internal `image-ref`
+// (Zot's internal Service DNS, for in-cluster consumers) and a node-resolvable
+// `pull-ref` (Zot's Route hostname, resolved at runtime from the live Route),
+// because kubelet/CRI-O pulls the ModelCar image in the node's host network
+// namespace where .svc.cluster.local does not resolve.
+func TestPipelineYAML_BuildModelcar_EmitsNodeResolvablePullReference(t *testing.T) {
+	text := readPipelineYAMLFile(t, buildModelcarTaskFile)
+
+	require.Contains(t, text, "name: route-host",
+		"build-modelcar must declare a route-host result for the resolved Zot Route hostname")
+	require.Contains(t, text, "name: pull-ref",
+		"build-modelcar must declare a pull-ref result for the node-resolvable reference")
+	require.Contains(t, text, "resolve-registry-host",
+		"build-modelcar must resolve the Zot Route hostname in a dedicated resolve-registry-host step")
+	require.Contains(t, text, "oc get route zot -n modelops-zot",
+		"resolve-registry-host must read the live Zot Route hostname (no committed host)")
+	require.Contains(t, text, "$(steps.resolve-registry-host.results.route-host)",
+		"the build-and-push step must consume the resolved route-host result")
+
+	// image-ref (internal) and pull-ref (route) must be emitted separately.
+	require.Contains(t, text, `"${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"`,
+		"image-ref must use the internal Service DNS registry host")
+	require.Contains(t, text, `"${ROUTE_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.pull-ref.path)"`,
+		"pull-ref must use the Route hostname, not the internal Service DNS")
 }
 
 // TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy pins the
-// Phase C sandbox-pipeline companion wiring: the sandbox pipeline's own
-// compliance-artifact-scan and deploy-model tasks must consume the
-// build-modelcar result (the Zot-built image) instead of re-deriving a
-// tag from quay.io/redhat-ai-services/modelcar-catalog. Reads the
-// committed YAML, not a copy.
+// Phase C sandbox-pipeline companion wiring: compliance-artifact-scan must
+// consume the internal image-ref (in-cluster skopeo inspect), while
+// deploy-model must consume the node-resolvable pull-ref (its KServe pods
+// pull at the node level). Neither re-derives a tag from
+// quay.io/redhat-ai-services/modelcar-catalog. Reads the committed YAML.
 func TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy(t *testing.T) {
 	text := readPipelineYAMLFile(t, "sandbox-pipeline.yaml")
 
-	const resultRef = "value: $(tasks.build-modelcar.results.image-ref)"
-	require.Equal(t, 2, strings.Count(text, resultRef),
-		"exactly two sandbox tasks must consume the image-ref result: compliance-artifact-scan and deploy-model")
+	const internalRef = "value: $(tasks.build-modelcar.results.image-ref)"
+	const pullRef = "value: $(tasks.build-modelcar.results.pull-ref)"
+	require.Equal(t, 1, strings.Count(text, internalRef),
+		"exactly one sandbox task (compliance-artifact-scan) must consume the internal image-ref result")
+	require.Equal(t, 1, strings.Count(text, pullRef),
+		"exactly one sandbox task (deploy-model) must consume the node-resolvable pull-ref result")
 
 	// The old param-forwarding must be gone from the sandbox pipeline --
 	// modelcar-image now comes from the build result, never from a

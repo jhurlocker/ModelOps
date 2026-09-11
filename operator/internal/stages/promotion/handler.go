@@ -43,18 +43,33 @@ func (Handler) BuildSpec(sc stagecommon.StageContext) (stagecommon.StageSpec, er
 
 	// modelcar-image is where the promotion stage learns the specific
 	// ModelCar OCI image built during the sandbox stage (the
-	// build-modelcar Task's "image-ref" result, forwarded generically by
-	// the walker via StageContext.Results). When the sandbox produced
-	// one, prefer it; when it didn't (oci/s3 source -> build-modelcar
-	// skipped -> no image-ref result), leave modelcar-image unset
-	// exactly as BuildCommonModelParams did, so model-id remains the
-	// sole source and the pre-existing derivation is unchanged. See
-	// stagecommon.ResultImageRef and docs/PHASE_LOG.md Phase C.
+	// build-modelcar Task's results, forwarded generically by the walker
+	// via StageContext.Results). deploy-model pulls this image at the
+	// NODE level, so prefer the node-resolvable pull-ref (Zot's Route
+	// hostname) over the in-cluster image-ref (internal Service DNS);
+	// fall back to image-ref only when pull-ref is absent. When neither
+	// exists (oci/s3 source -> build-modelcar skipped), modelcar-image
+	// stays unset exactly as BuildCommonModelParams left it, so model-id
+	// remains the sole source and the pre-existing catalog derivation is
+	// unchanged. See stagecommon.ResultPullImageRef/ResultImageRef and
+	// docs/PHASE_LOG.md.
+	var pullRef, internalRef string
 	for _, r := range sc.Results {
-		if r.Name == stagecommon.ResultImageRef && r.Value != "" {
-			stagecommon.AddParam(p, "modelcar-image", r.Value)
-			break
+		switch r.Name {
+		case stagecommon.ResultPullImageRef:
+			if r.Value != "" {
+				pullRef = r.Value
+			}
+		case stagecommon.ResultImageRef:
+			if r.Value != "" {
+				internalRef = r.Value
+			}
 		}
+	}
+	if pullRef != "" {
+		stagecommon.AddParam(p, "modelcar-image", pullRef)
+	} else if internalRef != "" {
+		stagecommon.AddParam(p, "modelcar-image", internalRef)
 	}
 
 	stagecommon.AddParam(p, "target-namespace", sc.Namespace)

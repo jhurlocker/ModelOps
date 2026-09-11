@@ -5531,3 +5531,152 @@ All verifications were done against the live sandbox after ArgoCD synced
 - Node-level `additionalTrustedCA` for Zot (backlog item 16) is unaffected — this
   phase changes credential storage, not registry trust.
 
+
+---
+
+## Node-level Zot pull fix — reencrypt Route + runtime hostname resolution
+
+**Status:** Uncommitted in the working tree (this phase follows the explicit
+"stop for design review before committing" instruction; see the review gate
+below). Files changed: `gitops/components/zot/route.yaml` (new),
+`gitops/components/zot/route-reader-rbac.yaml` (new),
+`gitops/components/zot/kustomization.yaml`,
+`model_onboarding_pipeline/model-intake-pipeline/pipeline/build-modelcar-task.yaml`,
+`operator/internal/stages/tekton/pipeline_yaml_build_test.go`.
+
+### Root cause (corrected — this is NOT backlog item 16's trust story)
+
+A model in `sandbox` (`granite-2b` InferenceService) stuck in
+`Init:ImagePullBackOff`. The kubelet event was unambiguous:
+
+```
+Failed to pull image "zot.modelops-zot.svc.cluster.local:5000/granite-2b:v1":
+dial tcp: lookup zot.modelops-zot.svc.cluster.local on 10.0.0.2:53: no such host
+```
+
+`10.0.0.2` is the AWS VPC resolver, not CoreDNS. kubelet/CRI-O pulls images in
+the node's **host network namespace using the node's OS-level resolver**
+(`/etc/resolv.conf` on the node → `search us-east-2.compute.internal`,
+`nameserver 10.0.0.2`), which by design cannot resolve `.svc.cluster.local`.
+This is documented OpenShift behavior (the cluster-dns-operator README): *"DNS
+names for Services will not resolve from the node host… with the following
+exception"* — the `node-resolver` DaemonSet writes a **hardcoded** `/etc/hosts`
+entry for only `image-registry.openshift-image-registry.svc`. Confirmed on the
+node: `/etc/hosts` had exactly one `# openshift-generated-node-resolver` entry
+for `image-registry.openshift-image-registry.svc` — and none for Zot.
+
+The failure happens **before any TLS handshake** — so backlog item 16's
+characterization ("node-level trust for Zot … `additionalTrustedCA`") was the
+wrong root cause. `additionalTrustedCA` alone would NOT have fixed this: the
+DNS lookup fails first, and it affects `.svc.cluster.local` resolution, which
+is a DNS question, not a CA-trust question. See the REFACTOR_PLAN backlog item
+16 correction.
+
+### Why a Route, and why reencrypt specifically
+
+Verified against the live cluster:
+
+- **The `*.apps.<domain>` zone is PUBLIC** (resolves to AWS public EIPs
+  `3.133.14.251` / `18.190.197.157`, reachable from off-cluster). Adding a
+  Route therefore re-exposes Zot externally — flagged and accepted here (see
+  "Security posture" below).
+- **The router wildcard cert is publicly trusted, not self-signed.** `oc get
+  ingresscontroller default` → `spec.defaultCertificate: cert-manager-ingress-cert`;
+  that cert's issuer is `ZeroSSL RSA DV SSL CA 2` (public DV CA), subject
+  `CN=*.apps.<domain>`. TLS validation succeeds with **no `-k`**.
+- Consequently a **reencrypt** Route (router terminates the client TLS with the
+  public wildcard cert, then re-encrypts to Zot's OpenShift service-serving
+  cert) lets the node's kubelet both *resolve* the hostname and *trust* the
+  cert with **zero node-rollout / `additionalTrustedCA` change** — it sidesteps
+  item 16's trust concern entirely, not because we added node trust, but
+  because the pull now traverses the public-ingress path. `passthrough` would
+  have presented Zot's own service-CA cert to the node (still untrusted) and
+  is explicitly avoided.
+
+### What changed
+
+- **`gitops/components/zot/route.yaml`** — a committed Route, `termination:
+  reencrypt` + `insecureEdgeTerminationPolicy: Redirect`, **no `spec.host`**.
+  OpenShift auto-generates the hostname at apply time
+  (`zot-modelops-zot.apps.<domain>`), so **nothing cluster-specific is
+  committed**; the hostname is decided by the cluster, not declared in a file.
+  This deliberately bypasses the cluster-config.yaml kustomize-replacement
+  pattern — there is no committed hostname to source, by design.
+- **`gitops/components/zot/route-reader-rbac.yaml`** — a namespaced
+  `Role`/`RoleBinding` granting the sandbox `pipeline` ServiceAccount `get` on
+  `routes` in `modelops-zot` (least-privilege, one namespace, one verb). This
+  is what lets build-modelcar read the auto-generated hostname.
+- **`build-modelcar-task.yaml`** — added a `resolve-registry-host` step
+  (`image-registry.openshift-image-registry.svc:5000/openshift/cli:latest`,
+  the same image `grant-model-access` already uses) that runs
+  `oc get route zot -n modelops-zot -o jsonpath='{.spec.host}'` into a new
+  `route-host` result. The `build-and-push` step still **pushes** to the
+  internal Service DNS (fast, direct, service-CA-verified, unchanged) and now
+  emits **two** references: `image-ref` (internal Service DNS, for in-cluster
+  consumers like compliance-artifact-scan) and a new **`pull-ref`** (Zot's
+  Route hostname, node-resolvable).
+- **`sandbox-pipeline.yaml`** — `deploy-model`'s `modelcar-image` now binds
+  `$(tasks.build-modelcar.results.pull-ref)` (node-resolvable); compliance
+  keeps `image-ref` (internal).
+- **`operator/internal/stages/promotion/handler.go` + `stagecommon/stage.go`**
+  — new `ResultPullImageRef = "pull-ref"` contract; promotion binds
+  `modelcar-image` to `pull-ref` (preferring it) with `image-ref` as fallback,
+  so promotion's own node-level deploy-model pull also uses the Route host.
+- **Tests** — `pipeline_yaml_build_test.go`: the internal-DNS registry-url
+  assertion clarified, `TestPipelineYAML_BuildModelcar_EmitsNodeResolvablePullReference`
+  pins the split (image-ref internal + pull-ref route),
+  `TestPipelineYAML_SandboxConsumesImageRef_ComplianceAndDeploy` now asserts
+  compliance→image-ref (1) and deploy-model→pull-ref (1); `promotion/handler_test.go`
+  adds `TestBuildSpec_PullRefResult_WinsOverImageRef`.
+
+### Router cert trust result (the step-3 report)
+
+Against the newly-created Route (`zot-modelops-zot.apps.<domain>`):
+
+- Node-level resolution: resolves via `10.0.0.2` to the public ingress IPs. ✓
+- `openssl s_client` subject `CN=*.apps.<domain>`, issuer `ZeroSSL RSA DV SSL CA 2`. ✓
+- `curl` with **no `-k`** → `HTTP 200` on `/v2/`. ✓
+
+Publicly trusted — the fix works without any further node-level change.
+
+### Verification (live cluster)
+
+- Patched the stuck `granite-2b` InferenceService's `storageUri` from
+  `oci://zot.modelops-zot.svc.cluster.local:5000/granite-2b:v1` to
+  `oci://zot-modelops-zot.apps.<domain>/granite-2b:v1` (exactly the `pull-ref`
+  reference the updated build-modelcar now emits) as a diagnostic, then
+  observed the replacement predictor pod:
+  - `Successfully pulled image "zot-modelops-zot.apps.<domain>/granite-2b:v1"
+    in 48.11s. Image size: 5095422965 bytes.` (the ~5 GB ModelCar, at NODE level,
+    over the public Route, trusted cert) — **no "no such host", no ImagePullBackOff**.
+  - Pod reached `3/3 Running`; InferenceService `Ready: True`.
+- RBAC confirmed: `oc auth can-i get routes.route.openshift.io -n modelops-zot
+  --as=system:serviceaccount:sandbox:pipeline` → `yes`, and the same subject
+  resolves the host correctly.
+
+### Security posture (deliberate, accepted for the sandbox)
+
+The `*.apps` zone is public, so this Route re-exposes Zot's registry API (and
+built-in UI, since Zot serves both on one port) externally. This is an explicit
+trade-off: anonymous **read (pull)** remains open, exactly as it was when Zot
+was internal-only, and push continues to require the `zotadmin` htpasswd
+identity (unchanged SealedSecrets). No anonymous-pull revocation was done this
+pass — the earlier-proposed "revoke anonymous pull + require auth on all
+access" needs the KServe serving pods to authenticate their own pull, which
+required either rebuilding the prebuilt `deploy-model-task` image (no quay.io
+push credentials available this session) or namespace ServiceAccount-level
+`imagePullSecrets`. That re-lockdown is a deliberate, separate follow-up; it is
+NOT folded in here.
+
+### Follow-up / limitations
+
+- **Zot anonymous pull over the public Route** (above) — revisit before any
+  non-sandbox deployment; requires the serving-pod pull-auth path.
+- The two earlier diagnostic Routes (`route-amethyst-possum`,
+  `route-brown-quail`) were manually deleted — ArgoCD does NOT prune these (they
+  were never part of any committed manifest it tracks), so leaving them would
+  have leaked two extra public registry endpoints. The committed `zot` Route is
+  the only Route in `modelops-zot`.
+- `resolve-registry-host` uses `openshift/cli:latest` (floating tag), matching
+  the existing `grant-model-access` precedent; pinning to a digest would be a
+  small hardening follow-up.

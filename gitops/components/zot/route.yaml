@@ -1,0 +1,45 @@
+# Zot is an in-cluster OCI registry. Its node-level consumers (the KServe
+# modelcar-init/modelcar containers, which pull the built ModelCar image via
+# kubelet/CRI-O in the node's HOST network namespace) cannot resolve the
+# internal Service DNS (zot.modelops-zot.svc.cluster.local) -- nodes use their
+# own OS resolver, not CoreDNS. This Route is the ONLY way the kubelet can
+# reach Zot: a hostname under the *public* *.apps.<cluster-domain> wildcard
+# zone, which the node CAN resolve and whose TLS certificate (served by the
+# router's default wildcard cert, signed by a public CA) the node trusts by
+# default.
+#
+# No `spec.host` is set: OpenShift auto-generates the hostname at apply time
+# (<route-name>-<namespace>.apps.<domain>), so nothing cluster-specific is
+# committed to Git for this Route. The pipeline discovers the real hostname at
+# runtime (see build-modelcar-task.yaml's resolve-registry-host step) and uses
+# it as the ModelCar pull reference -- never a committed literal.
+#
+# Termination is reencrypt, NOT passthrough: the router terminates the client
+# TLS handshake with the public *.apps wildcard cert (trusted by node CRI-O)
+# and re-encrypts to Zot over its OpenShift service-serving cert. passthrough
+# would present Zot's own service-CA-signed cert to the client, which the node
+# does NOT trust -- defeating the entire point of using a Route here.
+#
+# Security note: the *.apps zone on this cluster is PUBLIC, so this Route
+# re-exposes Zot's registry API (and built-in UI, since Zot serves both on one
+# port) externally. This is a deliberate trade-off accepted for the sandbox:
+# Zot still enforces htpasswd basic auth for push; anonymous read (pull) remains
+# open, exactly as it was when Zot was internal-only. See docs/PHASE_LOG.md
+# (node-level Zot pull fix).
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: zot
+  namespace: modelops-zot
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  to:
+    kind: Service
+    name: zot
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect

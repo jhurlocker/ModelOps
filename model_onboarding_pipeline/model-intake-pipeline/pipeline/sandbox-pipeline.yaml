@@ -345,11 +345,15 @@ spec:
         - name: model-id
           value: $(params.model-id)
         # Phase C: deploy the Zot-built ModelCar image produced by
-        # build-modelcar, not a quay.io catalog tag. Same oci/s3 fallback
-        # as compliance-artifact-scan above (empty image-ref -> deploy-model
-        # derives the artifact from model-id/modelcar-repo as before).
+        # build-modelcar, not a quay.io catalog tag. deploy-model consumes the
+        # node-resolvable pull-ref (Zot's Route hostname) because its KServe
+        # pods pull at the NODE level, where the internal Service DNS does not
+        # resolve; compliance-artifact-scan (in-cluster) keeps image-ref
+        # (internal). For oci/s3 sources build-modelcar is skipped and both
+        # results resolve empty -> deploy-model derives the artifact from
+        # model-id/modelcar-repo as before.
         - name: modelcar-image
-          value: $(tasks.build-modelcar.results.image-ref)
+          value: $(tasks.build-modelcar.results.pull-ref)
         - name: huggingface-secret-name
           value: $(params.huggingface-secret-name)
         - name: valuesContent
