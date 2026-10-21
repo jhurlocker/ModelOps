@@ -15,41 +15,32 @@ spec:
     spec:
       containers:
         - name: minio
-          image: quay.io/minio/minio:latest
-          args:
-            - server
-            - /data
-            - --console-address
-            - ":9090"
+          image: rustfs/rustfs:1.0.3
           env:
-            - name: MINIO_ROOT_USER
+            - name: RUSTFS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: minio-credentials
                   key: root-user
-            - name: MINIO_ROOT_PASSWORD
+            - name: RUSTFS_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: minio-credentials
                   key: root-password
-            # NOTE: MINIO_BROWSER_REDIRECT_URL (the Console's OIDC login
-            # redirect target) is intentionally NOT set. It is only used
-            # during OpenID/IDP login, and this deployment has no IDP
-            # configured (root user/password only), so the variable is
-            # inert. Setting it would require hardcoding the console Route
-            # hostname that OpenShift auto-generates as
-            # minio-console-<namespace>.apps.<cluster-domain>, duplicating
-            # a cluster-specific value this repo deliberately avoids. If an
-            # IDP is ever added, derive the redirect target from the real
-            # minio-console Route at pod startup instead of hardcoding it.
-            - name: MINIO_SERVER_URL
-              # Controls the URL MinIO embeds in S3 API responses
-              # (presigned URLs, location headers, etc.). In-cluster
-              # S3 clients (Tekton pipelines, controllers) connect via
-              # the internal Service, so this MUST be internal DNS, not
-              # an external Route. TLS is edge-terminated at the Route
-              # only; the internal Service is plain HTTP on port 9000.
-              value: "http://minio.modelops-storage.svc.cluster.local:9000"
+            - name: RUSTFS_ADDRESS
+              value: ":9000"
+            - name: RUSTFS_CONSOLE_ADDRESS
+              value: ":9090"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "true"
+            # Log to stdout: the image's /logs is owned by UID 10001, but
+            # OpenShift's restricted SCC runs the pod as a namespace-range
+            # UID, so /logs is not writable. Emptying this makes the
+            # entrypoint stream logs to stdout instead.
+            - name: RUSTFS_OBS_LOG_DIRECTORY
+              value: ""
+            - name: RUSTFS_VOLUMES
+              value: "/data"
           ports:
             - containerPort: 9000
               name: api

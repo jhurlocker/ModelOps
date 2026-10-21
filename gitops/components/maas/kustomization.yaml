@@ -8,9 +8,6 @@ resources:
   - gateway.yaml
   - patch-data-science-gateway-config.yaml
   - namespace-maas-infra.yaml
-  - maas-postgres.yaml
-  - maas-postgres-credentials-sealedsecret.yaml
-  - maas-db-config-sealedsecret.yaml
   - kuadrant-crds.yaml
   - maas-auth-proxy.yaml
   - tenant.yaml

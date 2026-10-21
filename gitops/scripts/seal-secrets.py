@@ -20,8 +20,8 @@ Identity coupling (rotate together, never independently):
     defaults -- all five must carry THE SAME user/password.
   - The zotadmin identity is bcrypt-hashed in zot-htpasswd and carried in
     plaintext in zot-push-credentials -- the two MUST stay in lockstep.
-  - The MaaS DB password appears in both maas-postgres-credentials and the
-    DB_CONNECTION_URL inside maas-db-config -- same rule.
+  - The MaaS database is provisioned by RHOAI (CloudNativePG), not by this
+    repo, so no MaaS DB credential is sealed here.
 
 Only the encrypted SealedSecret files are written to the repo. Credential
 values are never written to disk or committed.
@@ -94,7 +94,6 @@ def main():
     minio_pass = rand_password()
     zot_pass = rand_password()
     zot_htpasswd = bcrypt_htpasswd("zotadmin", zot_pass)
-    maas_pass = rand_password()
     mysql_pass = rand_password()
     mysql_root_pass = rand_password()
 
@@ -125,12 +124,7 @@ def main():
           "mysql", {"database-name": "sampledb", "database-password": mysql_pass,
                     "database-root-password": mysql_root_pass, "database-user": "admin"})
 
-    write("maas/maas-db-config-sealedsecret.yaml", "redhat-ai-gateway-infra",
-          "maas-db-config", {"DB_CONNECTION_URL": "postgresql://maas:%s@maas-postgres.maas-infra.svc.cluster.local:5432/maas" % maas_pass})
 
-    write("maas/maas-postgres-credentials-sealedsecret.yaml", "maas-infra",
-          "maas-postgres-credentials", {"database-user": "maas",
-                                        "database-password": maas_pass, "database-name": "maas"})
 
 
 if __name__ == "__main__":
