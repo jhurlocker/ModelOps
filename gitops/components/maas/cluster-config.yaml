@@ -21,4 +21,4 @@ metadata:
   namespace: openshift-ingress
 data:
   # External hostname the MaaS Gateway terminates and the Route serves.
-  maas-hostname: maas.apps.ocp.mb9bl.sandbox1545.opentlc.com
+  maas-hostname: maas.apps.ocp.55s8t.sandbox1545.opentlc.com
