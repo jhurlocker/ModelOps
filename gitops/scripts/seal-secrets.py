@@ -36,7 +36,7 @@ import sys
 
 import yaml
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 KUBESEAL_ARGS = ["--controller-namespace", "kube-system",
                  "--controller-name", "sealed-secrets-controller",
