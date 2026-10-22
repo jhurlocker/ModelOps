@@ -94,6 +94,16 @@ func TestPipelineYAML_BuildModelcar_WhenGuard_RunsOnlyForHuggingface(t *testing.
 	require.NotContains(t, text, `operator: notin`,
 		"the guard must be a positive 'in' match, not 'notin'")
 
+	// A dedicated emit-empty-results step must run for non-huggingface
+	// sources and write empty result files, so the Pipeline-level results
+	// block (and downstream $(tasks.build-modelcar.results.*) references)
+	// resolve to empty strings instead of "result does not exist" (which
+	// fails the PipelineRun with "invalid pipelineresults").
+	require.Contains(t, text, "name: emit-empty-results",
+		"build-modelcar must declare an emit-empty-results step for non-huggingface sources")
+	require.Contains(t, text, `values: ["huggingface"]`,
+		"the emit-empty-results step must be guarded by notin [huggingface]")
+
 	// The sandbox pipeline must forward source-type into build-modelcar and
 	// must NOT carry a Task-level when guard (which would cascade-skip).
 	pipeline := readPipelineYAMLFile(t, "sandbox-pipeline.yaml")

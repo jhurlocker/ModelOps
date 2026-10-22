@@ -283,6 +283,23 @@ spec:
         #               e.g. compliance-artifact-scan's skopeo inspect)
         printf '%s' "${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}" > "$(results.image-ref.path)"
         echo "Built and pushed: ${REGISTRY_HOST}/${MODEL_NAME}:${MODEL_VERSION}"
+    - name: emit-empty-results
+      when:
+        - input: $(params.source-type)
+          operator: notin
+          values: ["huggingface"]
+      image: registry.access.redhat.com/ubi9/ubi-minimal
+      script: |
+        #!/bin/sh
+        set -eu
+        # Non-huggingface sources skip the build steps above. Emit empty
+        # results so the Pipeline-level results block (and downstream
+        # $(tasks.build-modelcar.results.*) references) resolve to empty
+        # strings instead of "result does not exist", which would fail the
+        # PipelineRun with "invalid pipelineresults".
+        printf '' > "$(results.image-ref.path)"
+        printf '' > "$(results.pull-ref.path)"
+        printf '' > "$(results.route-host.path)"
   volumes:
     # Mounted into the build-and-push step as the fallback service-CA source.
     # optional: the primary source is the pod's own serviceaccount CA bundle,
