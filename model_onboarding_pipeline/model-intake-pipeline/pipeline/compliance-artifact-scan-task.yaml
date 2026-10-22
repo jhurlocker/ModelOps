@@ -276,7 +276,7 @@ spec:
     # Containerized compliance scanner - versioned, tested, auditable.
     # ----------------------------------------------------------------------
     - name: evaluate-and-upload
-      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:db49714fb19ef8f8afacf5d6b2a511c256dae97e00de56b1a65b90429313ed7b
+      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:fceaf4e64c8595dab949881975806a5a488e74f77b91401422f2f81e4f4fb36f
       workingDir: $(workspaces.shared-workspace.path)
       env:
         - name: MODEL_ID
@@ -388,7 +388,7 @@ spec:
 
     # --- Register model in Model Registry (best-effort, even on failure) ---
     - name: register-model
-      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:db49714fb19ef8f8afacf5d6b2a511c256dae97e00de56b1a65b90429313ed7b
+      image: image-registry.openshift-image-registry.svc:5000/modelops/compliance-scanner@sha256:fceaf4e64c8595dab949881975806a5a488e74f77b91401422f2f81e4f4fb36f
       workingDir: $(workspaces.shared-workspace.path)
       volumeMounts:
         - name: model-registry-token

@@ -158,7 +158,7 @@ spec:
 
     # Update Model Registry with garak results
     - name: update-registry
-      image: image-registry.openshift-image-registry.svc:5000/modelops/model-registry-helper@sha256:9e8facf6a1088830928bce570714107d7b9e9c9601a8d8388310cc62be2bc458
+      image: image-registry.openshift-image-registry.svc:5000/modelops/model-registry-helper@sha256:9a7408bd3d4acaee32ff965372fd48f006e9d06b60efe964651d97002ad188b6
       workingDir: $(workspaces.shared-workspace.path)
       volumeMounts:
         - name: model-registry-token
