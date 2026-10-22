@@ -214,16 +214,14 @@ spec:
           value: $(params.model-name)
         - name: model-version
           value: $(params.model-version)
+        - name: source-type
+          value: $(params.model-source-type)
         - name: huggingface-secret-name
           value: $(params.huggingface-secret-name)
         - name: registry-auth-secret-name
           value: $(params.registry-auth-secret-name)
         - name: registry-url
           value: $(params.registry-url)
-      when:
-        - input: $(params.model-source-type)
-          operator: in
-          values: ["huggingface"]
       taskRef:
         kind: Task
         name: build-modelcar

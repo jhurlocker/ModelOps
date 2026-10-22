@@ -61,6 +61,10 @@ spec:
       type: string
       default: "v1"
       description: "OCI image tag in Zot."
+    - name: source-type
+      type: string
+      default: "huggingface"
+      description: "Model source type (huggingface, s3, oci). Non-huggingface sources skip the build steps and emit empty results."
     - name: huggingface-secret-name
       type: string
       default: "huggingface-credentials"
@@ -91,6 +95,10 @@ spec:
       description: "The Zot Route hostname, resolved at runtime from the modelops-zot Route."
   steps:
     - name: resolve-registry-host
+      when:
+        - input: $(params.source-type)
+          operator: in
+          values: ["huggingface"]
       image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
       env:
         - name: MODEL_NAME
@@ -122,6 +130,10 @@ spec:
         echo "Resolved Zot pull host: ${HOST}"
         echo "Node-pull reference: ${HOST}/${MODEL_NAME}:${MODEL_VERSION}"
     - name: build-and-push
+      when:
+        - input: $(params.source-type)
+          operator: in
+          values: ["huggingface"]
       image: $(params.buildah-image)
       # SETFCAP is required for buildah to create its (rootless-style) user
       # namespace on OpenShift 4.11+/kernel 5.12+; without it, buildah's

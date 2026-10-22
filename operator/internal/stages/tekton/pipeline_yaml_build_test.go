@@ -12,9 +12,11 @@ package tekton
 //
 //   - build-modelcar is Task #1 in sandbox-pipeline.yaml, and
 //     compliance-artifact-scan (the old first task) now runs after it;
-//   - it is guarded by `when: in ["huggingface"]` so oci/s3 sources skip
-//     the build entirely (fail-safe-by-default: any future source type
-//     also skips rather than surprising-us with a build);
+//   - its build steps are guarded by step-level `when: in ["huggingface"]`
+//     so oci/s3 sources skip the build steps (fail-safe-by-default: any
+//     future source type also skips rather than surprising-us with a
+//     build), while the Task itself still runs and emits empty results so
+//     downstream result references do not cascade-skip the whole pipeline;
 //   - it declares an `image-ref` result (the full Zot reference
 //     <registry-url>/<model-name>:<model-version> that Phase C consumes);
 //   - both credentials (HF token, Zot push username/password) come from
@@ -76,15 +78,27 @@ func TestPipelineYAML_BuildModelcar_IsFirstTaskInSandboxPipeline(t *testing.T) {
 }
 
 func TestPipelineYAML_BuildModelcar_WhenGuard_RunsOnlyForHuggingface(t *testing.T) {
-	text := readPipelineYAMLFile(t, "sandbox-pipeline.yaml")
-	require.Contains(t, text, "input: $(params.model-source-type)",
-		"the when guard must key off the existing model-source-type param")
+	// The build steps are guarded at the STEP level (not the Task level) so
+	// that oci/s3 sources skip the actual build but the Task still runs and
+	// emits empty results. A Task-level `when` would mark build-modelcar as
+	// "skipped", and Tekton propagates that skip to every downstream task
+	// that references $(tasks.build-modelcar.results.*) -- cascading to the
+	// entire sandbox pipeline. Step-level guards avoid that.
+	text := readPipelineYAMLFile(t, buildModelcarTaskFile)
+	require.Contains(t, text, "input: $(params.source-type)",
+		"the build steps' when guard must key off the source-type param")
 	require.Contains(t, text, "operator: in",
 		"the when guard must use a positive 'in' match (fail-safe-by-default)")
 	require.Contains(t, text, `values: ["huggingface"]`,
-		"the when guard must match exactly [\"huggingface\"]; oci/s3 (and any future type) skip the build")
+		"the when guard must match exactly [\"huggingface\"]; oci/s3 (and any future type) skip the build steps")
 	require.NotContains(t, text, `operator: notin`,
 		"the guard must be a positive 'in' match, not 'notin'")
+
+	// The sandbox pipeline must forward source-type into build-modelcar and
+	// must NOT carry a Task-level when guard (which would cascade-skip).
+	pipeline := readPipelineYAMLFile(t, "sandbox-pipeline.yaml")
+	require.Contains(t, pipeline, "value: $(params.model-source-type)",
+		"sandbox-pipeline.yaml must forward model-source-type into build-modelcar")
 }
 
 func TestPipelineYAML_BuildModelcarTask_EmitsImageRefResult(t *testing.T) {
